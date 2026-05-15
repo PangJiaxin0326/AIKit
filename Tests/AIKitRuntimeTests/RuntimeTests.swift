@@ -58,6 +58,38 @@ import AIKitTestSupport
         }
     }
 
+    @Test func recoversFencedToolCallFallback() throws {
+        let text = "I'll handle that.\n```tool\n"
+            + "{\"name\":\"navigate\",\"input\":{\"destination\":\"home\"}}\n```"
+        let response = LLMResponse(content: [.text(text)], stopReason: .endTurn)
+        guard case .mixed(let narration, let calls) = try OutputParser.parse(
+            response, allowToolCallFallback: true
+        ) else {
+            Issue.record("expected mixed")
+            return
+        }
+        #expect(narration == "I'll handle that.")
+        #expect(calls.first?.name == "navigate")
+        #expect(calls.first?.input.objectValue?["destination"]?.stringValue == "home")
+    }
+
+    @Test func fallbackDisabledTreatsFenceAsText() throws {
+        let text = "```tool\n{\"name\":\"x\",\"input\":{}}\n```"
+        let response = LLMResponse(content: [.text(text)], stopReason: .endTurn)
+        guard case .final = try OutputParser.parse(response) else {
+            Issue.record("expected final text when fallback is off")
+            return
+        }
+    }
+
+    @Test func malformedFencedToolCallThrows() {
+        let text = "```tool\n{\"name\": oops \n```"
+        let response = LLMResponse(content: [.text(text)], stopReason: .endTurn)
+        #expect(throws: OutputParser.ParserError.self) {
+            try OutputParser.parse(response, allowToolCallFallback: true)
+        }
+    }
+
     @Test func roundTripRandomToolCalls() throws {
         for _ in 0..<50 {
             let name = "tool_\(Int.random(in: 0...999))"
@@ -197,4 +229,85 @@ import AIKitTestSupport
         #expect(deltas.joined() == "hello stream")
         #expect(final == "hello stream")
     }
+
+    @Test func mixedNarrationSurfacedNonStreaming() async throws {
+        let provider = MockProvider(responses: [
+            LLMResponse(content: [
+                .text("Let me open that for you."),
+                .toolUse(
+                    id: "t1", name: "navigate",
+                    input: .object(["destination": .string("settings")])
+                ),
+            ], stopReason: .toolUse),
+            LLMResponse(content: [.text("Done.")], stopReason: .endTurn),
+        ])
+        let orchestrator = await makeOrchestrator(provider: provider)
+        var deltas: [String] = []
+        var sawUsage = false
+        for try await event in await orchestrator.run("open settings") {
+            if case .llmDelta(let d) = event { deltas.append(d) }
+            if case .usage = event { sawUsage = true }
+            if case .error(let e) = event { Issue.record("unexpected: \(e)") }
+        }
+        #expect(deltas.contains("Let me open that for you."))
+        #expect(sawUsage)
+    }
+
+    @Test func defaultsToProviderModelWhenOptionUnset() async throws {
+        let provider = MockProvider(
+            responses: [LLMResponse(content: [.text("hi")], stopReason: .endTurn)],
+            defaultModel: "provider-default"
+        )
+        let resolver = ContextResolver()
+        await resolver.push(ViewContext(id: .init("v"), displayName: "V"))
+        let orchestrator = Orchestrator(
+            llm: LLMClient(provider: provider),
+            tools: ToolRegistry(),
+            memory: InMemoryMemoryStore(),
+            contextResolver: resolver,
+            guardrails: PolicyEngine(),
+            options: .init(stream: false)
+        )
+        for try await _ in await orchestrator.run("hi") {}
+        #expect(provider.receivedRequests.first?.model == "provider-default")
+    }
+
+    @Test func piiRedactorRedactsToolInputBeforeInvocation() async throws {
+        let seen = SeenInput()
+        let registry = ToolRegistry()
+        await registry.register(NavigateTool { input, _ in
+            await seen.record(input.destination)
+            return .init(navigated: true)
+        })
+        let resolver = ContextResolver()
+        await resolver.push(ViewContext(
+            id: .init("home"), displayName: "Home", toolNames: ["navigate"]
+        ))
+        let provider = MockProvider(responses: [
+            LLMResponse(content: [.toolUse(
+                id: "t1", name: "navigate",
+                input: .object(["destination": .string("email me at a@b.com")])
+            )], stopReason: .toolUse),
+            LLMResponse(content: [.text("ok")], stopReason: .endTurn),
+        ])
+        let orchestrator = Orchestrator(
+            llm: LLMClient(provider: provider),
+            tools: registry,
+            memory: InMemoryMemoryStore(),
+            contextResolver: resolver,
+            guardrails: PolicyEngine(rails: [PIIRedactor(mode: .redact)]),
+            options: .init(stream: false)
+        )
+        for try await event in await orchestrator.run("go") {
+            if case .error(let e) = event { Issue.record("unexpected: \(e)") }
+        }
+        let destination = await seen.value
+        #expect(destination?.contains("[REDACTED]") == true)
+        #expect(destination?.contains("a@b.com") == false)
+    }
+}
+
+private actor SeenInput {
+    private(set) var value: String?
+    func record(_ v: String) { value = v }
 }

@@ -15,10 +15,36 @@ public enum LLMError: Error, Sendable, Hashable {
     case missingAPIKey
     /// Networking failed before a response was received.
     case transport(String)
+    /// The request exceeded its configured timeout. Retriable.
+    case timeout(String)
+    /// The request was cancelled by the caller. Never retriable.
+    case cancelled
     /// The requested capability is not supported by this provider.
     case unsupported(String)
     /// Provider returned a structured error payload.
     case provider(message: String)
+}
+
+extension LLMError {
+    /// Maps a transport-layer error into the right `LLMError` case so retry
+    /// classification stays accurate instead of collapsing everything to a
+    /// generic transient string.
+    public static func from(transport error: any Error) -> LLMError {
+        if error is CancellationError { return .cancelled }
+        if let urlError = error as? URLError {
+            switch urlError.code {
+            case .cancelled:
+                return .cancelled
+            case .timedOut:
+                return .timeout(urlError.localizedDescription)
+            case .badURL, .unsupportedURL:
+                return .unsupported(urlError.localizedDescription)
+            default:
+                return .transport("\(urlError.code.rawValue): \(urlError.localizedDescription)")
+            }
+        }
+        return .transport(error.localizedDescription)
+    }
 }
 
 extension LLMError: LocalizedError {
@@ -34,6 +60,10 @@ extension LLMError: LocalizedError {
             return "LLM provider configuration is missing an API key"
         case .transport(let detail):
             return "LLM transport error: \(detail)"
+        case .timeout(let detail):
+            return "LLM request timed out: \(detail)"
+        case .cancelled:
+            return "LLM request was cancelled"
         case .unsupported(let detail):
             return "Unsupported LLM operation: \(detail)"
         case .provider(let message):

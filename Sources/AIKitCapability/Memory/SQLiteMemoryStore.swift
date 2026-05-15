@@ -104,9 +104,11 @@ public actor SQLiteMemoryStore: MemoryStore {
 
     public func search(query: String, limit: Int) async throws -> [UsageEvent] {
         guard !query.isEmpty else { return [] }
+        // Escape LIKE metacharacters so a query containing `%` or `_` is
+        // treated literally instead of matching everything.
         let sql = """
         SELECT id, ts, view, kind, payload FROM usage_events
-        WHERE payload LIKE ? OR kind LIKE ?
+        WHERE payload LIKE ? ESCAPE '\\' OR kind LIKE ? ESCAPE '\\'
         ORDER BY ts DESC LIMIT ?;
         """
         var stmt: OpaquePointer?
@@ -115,7 +117,11 @@ public actor SQLiteMemoryStore: MemoryStore {
         }
         defer { sqlite3_finalize(stmt) }
 
-        let pattern = "%\(query)%"
+        let escaped = query
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "%", with: "\\%")
+            .replacingOccurrences(of: "_", with: "\\_")
+        let pattern = "%\(escaped)%"
         sqlite3_bind_text(stmt, 1, pattern, -1, Self.transient)
         sqlite3_bind_text(stmt, 2, pattern, -1, Self.transient)
         sqlite3_bind_int(stmt, 3, Int32(max(0, limit)))

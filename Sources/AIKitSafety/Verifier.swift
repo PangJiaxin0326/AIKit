@@ -40,6 +40,16 @@ public protocol Guardrail: Sendable {
     var id: String { get }
     var stages: Set<Verifier.Stage> { get }
     func evaluate(_ payload: GuardrailPayload) async -> Verifier.Outcome
+
+    /// Optionally returns a sanitized payload to use in place of the original
+    /// (e.g. redacting PII from a tool input). Returning `nil` (the default)
+    /// leaves the payload untouched. `PolicyEngine` applies rewrites before
+    /// running `evaluate`, so a rail can redact and then pass.
+    func rewrite(_ payload: GuardrailPayload) async -> GuardrailPayload?
+}
+
+public extension Guardrail {
+    func rewrite(_ payload: GuardrailPayload) async -> GuardrailPayload? { nil }
 }
 
 /// Thrown when any guardrail blocks. Categorized by the ErrorHandler as

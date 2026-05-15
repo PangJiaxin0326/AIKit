@@ -1,0 +1,308 @@
+import Foundation
+
+/// `LLMProvider` backed by Ollama's native `/api/chat` endpoint.
+///
+/// Unlike pointing `OpenAIProvider` at Ollama's OpenAI-compatible shim, this
+/// talks to the native API directly: native tool calling, native `options`
+/// (`num_ctx`, `top_p`, `seed`, `stop`, …) and `keep_alive`. No API key is
+/// required; one is sent only if the configuration provides a non-empty key
+/// (for reverse-proxied deployments).
+///
+/// Ollama streams newline-delimited JSON (not SSE), and emits `tool_calls` as
+/// a single complete block rather than incremental deltas.
+public struct OllamaProvider: LLMProvider {
+    public static let defaultBaseURL = URL(string: "http://localhost:11434")!
+    public static let defaultModel = "llama3.1"
+
+    let configuration: LLMProviderConfiguration
+
+    public var defaultModel: String { configuration.defaultModel }
+
+    public init(configuration: LLMProviderConfiguration) {
+        self.configuration = configuration
+    }
+
+    public init(
+        model: String = OllamaProvider.defaultModel,
+        baseURL: URL = OllamaProvider.defaultBaseURL,
+        apiKey: String = "",
+        timeout: TimeInterval? = nil,
+        session: URLSession = .shared
+    ) {
+        self.init(configuration: .init(
+            apiKey: apiKey,
+            baseURL: baseURL,
+            defaultModel: model,
+            timeout: timeout,
+            session: session
+        ))
+    }
+
+    // MARK: - Non-streaming
+
+    public func complete(_ request: LLMRequest) async throws -> LLMResponse {
+        let urlRequest = try makeURLRequest(request, stream: false)
+        let (data, response): (Data, URLResponse)
+        do {
+            (data, response) = try await configuration.session.data(for: urlRequest)
+        } catch {
+            throw LLMError.from(transport: error)
+        }
+        try Self.validate(response, data: data)
+        do {
+            return try JSONDecoder().decode(WireResponse.self, from: data).toResponse()
+        } catch {
+            throw LLMError.decodingFailed(String(describing: error))
+        }
+    }
+
+    // MARK: - Streaming
+
+    public func stream(
+        _ request: LLMRequest
+    ) -> AsyncThrowingStream<LLMResponseChunk, any Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task {
+                do {
+                    let urlRequest = try makeURLRequest(request, stream: true)
+                    let (bytes, response) = try await configuration.session.bytes(for: urlRequest)
+                    try Self.validate(response, data: Data())
+                    var toolIndex = 0
+                    for try await line in bytes.lines {
+                        try Task.checkCancellation()
+                        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                        guard !trimmed.isEmpty,
+                              let payload = trimmed.data(using: .utf8),
+                              let event = try? JSONDecoder().decode(WireResponse.self, from: payload)
+                        else { continue }
+                        for chunk in event.chunks(toolIndex: &toolIndex) {
+                            continuation.yield(chunk)
+                        }
+                    }
+                    continuation.finish()
+                } catch is CancellationError {
+                    continuation.finish()
+                } catch let error as LLMError {
+                    continuation.finish(throwing: error)
+                } catch {
+                    continuation.finish(throwing: LLMError.from(transport: error))
+                }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
+    // MARK: - Request construction
+
+    /// `options` sub-keys owned by the wire encoder; `extraBody` may not
+    /// override these.
+    private static let reservedOptionKeys: Set<String> = [
+        "temperature", "num_predict",
+    ]
+
+    private func makeURLRequest(_ request: LLMRequest, stream: Bool) throws -> URLRequest {
+        let url = configuration.baseURL.resolvingEndpoint(
+            apiPrefix: "api", endpoint: "chat"
+        )
+        var urlRequest = URLRequest(url: url)
+        urlRequest.httpMethod = "POST"
+        urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if !configuration.apiKey.isEmpty {
+            urlRequest.setValue(
+                "Bearer \(configuration.apiKey)",
+                forHTTPHeaderField: "Authorization"
+            )
+        }
+        if let timeout = configuration.timeout {
+            urlRequest.timeoutInterval = timeout
+        }
+
+        var body: [String: JSONValue] = [
+            "model": .string(request.model),
+            "stream": .bool(stream),
+            "messages": .array(Self.wireMessages(request)),
+        ]
+        if !request.tools.isEmpty {
+            body["tools"] = .array(request.tools.map(Self.wireTool))
+        }
+
+        var options: [String: JSONValue] = [:]
+        if let temperature = request.temperature {
+            options["temperature"] = .number(temperature)
+        }
+        if let maxTokens = request.maxTokens {
+            options["num_predict"] = .number(Double(maxTokens))
+        }
+        // `keep_alive` is a top-level Ollama key; everything else flows into
+        // `options` (num_ctx, top_p, seed, stop, …) unless it shadows a
+        // reserved key the encoder already set.
+        for (key, value) in request.extraBody {
+            if key == "keep_alive" {
+                body["keep_alive"] = value
+            } else if !Self.reservedOptionKeys.contains(key) {
+                options[key] = value
+            }
+        }
+        if !options.isEmpty {
+            body["options"] = .object(options)
+        }
+
+        do {
+            urlRequest.httpBody = try JSONValue.object(body).data()
+        } catch {
+            throw LLMError.encodingFailed(String(describing: error))
+        }
+        return urlRequest
+    }
+
+    private static func wireMessages(_ request: LLMRequest) -> [JSONValue] {
+        var messages: [JSONValue] = []
+        if let system = request.system, !system.isEmpty {
+            messages.append(.object(["role": .string("system"), "content": .string(system)]))
+        }
+        for message in request.messages {
+            switch message.role {
+            case .system:
+                messages.append(.object([
+                    "role": .string("system"),
+                    "content": .string(message.plainText),
+                ]))
+            case .user:
+                messages.append(.object([
+                    "role": .string("user"),
+                    "content": .string(message.plainText),
+                ]))
+            case .assistant:
+                var object: [String: JSONValue] = [
+                    "role": .string("assistant"),
+                    "content": .string(message.plainText),
+                ]
+                let toolCalls: [JSONValue] = message.content.compactMap { block in
+                    if case .toolUse(_, let name, let input) = block {
+                        return .object(["function": .object([
+                            "name": .string(name),
+                            "arguments": input,
+                        ])])
+                    }
+                    return nil
+                }
+                if !toolCalls.isEmpty {
+                    object["tool_calls"] = .array(toolCalls)
+                }
+                messages.append(.object(object))
+            case .tool:
+                for block in message.content {
+                    if case .toolResult(_, let content, _) = block {
+                        messages.append(.object([
+                            "role": .string("tool"),
+                            "content": .string(content),
+                        ]))
+                    }
+                }
+            }
+        }
+        return messages
+    }
+
+    private static func wireTool(_ descriptor: ToolDescriptor) -> JSONValue {
+        .object([
+            "type": .string("function"),
+            "function": .object([
+                "name": .string(descriptor.name),
+                "description": .string(descriptor.description),
+                "parameters": descriptor.inputSchema,
+            ]),
+        ])
+    }
+
+    private static func validate(_ response: URLResponse, data: Data) throws {
+        guard let http = response as? HTTPURLResponse else { return }
+        guard (200..<300).contains(http.statusCode) else {
+            let body = String(data: data, encoding: .utf8) ?? ""
+            throw LLMError.httpStatus(code: http.statusCode, body: body)
+        }
+    }
+}
+
+// MARK: - Wire types
+
+private struct WireResponse: Decodable {
+    struct WireMessage: Decodable {
+        struct ToolCall: Decodable {
+            struct Function: Decodable {
+                let name: String
+                let arguments: JSONValue?
+            }
+            let function: Function
+        }
+        let content: String?
+        let tool_calls: [ToolCall]?
+    }
+    let message: WireMessage?
+    let done: Bool?
+    let done_reason: String?
+    let prompt_eval_count: Int?
+    let eval_count: Int?
+
+    private func stopReason() -> StopReason {
+        switch done_reason {
+        case "stop", nil: return (message?.tool_calls?.isEmpty == false) ? .toolUse : .endTurn
+        case "length": return .maxTokens
+        case let other?: return .other(other)
+        }
+    }
+
+    private func usage() -> TokenUsage {
+        TokenUsage(
+            inputTokens: prompt_eval_count ?? 0,
+            outputTokens: eval_count ?? 0
+        )
+    }
+
+    func toResponse() -> LLMResponse {
+        var blocks: [ContentBlock] = []
+        if let text = message?.content, !text.isEmpty {
+            blocks.append(.text(text))
+        }
+        for (offset, call) in (message?.tool_calls ?? []).enumerated() {
+            blocks.append(.toolUse(
+                id: "ollama-\(offset)",
+                name: call.function.name,
+                input: call.function.arguments ?? .object([:])
+            ))
+        }
+        let stop = stopReason()
+        return LLMResponse(
+            content: blocks,
+            stopReason: (message?.tool_calls?.isEmpty == false) ? .toolUse : stop,
+            usage: usage()
+        )
+    }
+
+    /// Converts one streamed NDJSON object into response chunks. Ollama sends
+    /// each `tool_call` as a complete block, so we synthesize start/input/stop
+    /// in one go.
+    func chunks(toolIndex: inout Int) -> [LLMResponseChunk] {
+        var result: [LLMResponseChunk] = []
+        if let text = message?.content, !text.isEmpty {
+            result.append(.textDelta(text))
+        }
+        for call in message?.tool_calls ?? [] {
+            let id = "ollama-\(toolIndex)"
+            toolIndex += 1
+            result.append(.toolUseStart(id: id, name: call.function.name))
+            if let args = call.function.arguments,
+               let data = try? args.data(),
+               let json = String(data: data, encoding: .utf8) {
+                result.append(.toolUseInputDelta(id: id, json: json))
+            }
+            result.append(.toolUseStop(id: id))
+        }
+        if done == true {
+            let hasTools = message?.tool_calls?.isEmpty == false
+            result.append(.stop(hasTools ? .toolUse : stopReason()))
+            result.append(.usage(usage()))
+        }
+        return result
+    }
+}

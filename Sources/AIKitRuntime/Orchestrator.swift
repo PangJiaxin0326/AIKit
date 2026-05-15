@@ -11,6 +11,9 @@ public enum OrchestratorEvent: Sendable {
     case toolCall(name: String, input: Data)
     case toolResult(name: String, output: Data)
     case verification(stage: Verifier.Stage, outcome: Verifier.Outcome)
+    /// Token usage for one LLM call. Emitted once per iteration so hosts can
+    /// do cost/telemetry accounting even on the streaming path.
+    case usage(TokenUsage)
     case finalAnswer(String)
     case error(any Error)
 }
@@ -19,22 +22,33 @@ public enum OrchestratorEvent: Sendable {
 /// so concurrent `run` calls on one instance serialize cleanly.
 public actor Orchestrator {
     public struct Options: Sendable {
-        public var model: String
+        /// The model to request. `nil` defers to the provider's `defaultModel`,
+        /// so there is a single source of truth instead of a value that is
+        /// silently ignored.
+        public var model: String?
         public var maxIterations: Int
         public var stream: Bool
         public var retry: RetryPolicy
         public var memoryWindow: Int
         public var temperature: Double?
         public var maxTokens: Int?
+        /// Provider-specific request knobs (`num_ctx`, `keep_alive`, `stop`,
+        /// `top_p`, `seed`, …) forwarded on every LLM call this turn.
+        public var extraBody: [String: JSONValue]
+        /// When true, the prompt asks models without native function calling to
+        /// emit a fenced ```tool block, which `OutputParser` then recovers.
+        public var toolCallFallback: Bool
 
         public init(
-            model: String = AnthropicProvider.defaultModel,
+            model: String? = nil,
             maxIterations: Int = 8,
             stream: Bool = true,
             retry: RetryPolicy = .default,
             memoryWindow: Int = 20,
             temperature: Double? = nil,
-            maxTokens: Int? = nil
+            maxTokens: Int? = nil,
+            extraBody: [String: JSONValue] = [:],
+            toolCallFallback: Bool = true
         ) {
             self.model = model
             self.maxIterations = maxIterations
@@ -43,6 +57,8 @@ public actor Orchestrator {
             self.memoryWindow = memoryWindow
             self.temperature = temperature
             self.maxTokens = maxTokens
+            self.extraBody = extraBody
+            self.toolCallFallback = toolCallFallback
         }
     }
 
@@ -120,9 +136,11 @@ public actor Orchestrator {
                     memory: recent,
                     transcript: transcript,
                     toolManifest: manifest,
-                    model: options.model,
+                    model: options.model ?? llm.defaultModel,
                     temperature: options.temperature,
-                    maxTokens: options.maxTokens
+                    maxTokens: options.maxTokens,
+                    extraBody: options.extraBody,
+                    toolCallFallbackHint: options.toolCallFallback
                 )
                 let rendered = RenderedPrompt(request: request, toolNames: context.toolNames)
                 emit(.promptBuilt(rendered))
@@ -133,7 +151,10 @@ public actor Orchestrator {
                 }
 
                 let response = try await callLLM(request, emit: emit)
-                let parsed = try OutputParser.parse(response)
+                emit(.usage(response.usage))
+                let parsed = try OutputParser.parse(
+                    response, allowToolCallFallback: options.toolCallFallback
+                )
 
                 switch parsed {
                 case .final(let text):
@@ -145,7 +166,21 @@ public actor Orchestrator {
                     emit(.finalAnswer(text))
                     return
 
-                case .toolCalls(let calls), .mixed(_, let calls):
+                case .toolCalls(let calls):
+                    transcript.append(.assistant(response.content))
+                    for call in calls {
+                        try await execute(
+                            call, viewID: viewID, transcript: &transcript, emit: emit
+                        )
+                    }
+
+                case .mixed(let text, let calls):
+                    // Non-stream mode never emitted deltas, so surface the
+                    // narration that accompanies the tool call instead of
+                    // dropping it. (Streaming already emitted it as deltas.)
+                    if !options.stream, !text.isEmpty {
+                        emit(.llmDelta(text))
+                    }
                     transcript.append(.assistant(response.content))
                     for call in calls {
                         try await execute(
@@ -185,21 +220,34 @@ public actor Orchestrator {
         transcript: inout [TranscriptEntry],
         emit: @Sendable (OrchestratorEvent) -> Void
     ) async throws {
-        try await guardrails.verify(.preToolUse, .preToolUse(call))
+        // `resolve` runs payload-rewriting rails (e.g. PIIRedactor in redact
+        // mode) before the block checks, so the tool sees the sanitized input.
+        let (resolvedPayload, warnings) = try await guardrails.resolve(
+            .preToolUse, .preToolUse(call)
+        )
+        for warning in warnings {
+            emit(.verification(stage: .preToolUse, outcome: .warn(reason: warning)))
+        }
+        let effectiveCall: ToolCall
+        if case .preToolUse(let rewritten) = resolvedPayload {
+            effectiveCall = rewritten
+        } else {
+            effectiveCall = call
+        }
         emit(.verification(stage: .preToolUse, outcome: .pass))
 
-        let inputData = (try? call.input.data()) ?? Data("{}".utf8)
-        emit(.toolCall(name: call.name, input: inputData))
+        let inputData = (try? effectiveCall.input.data()) ?? Data("{}".utf8)
+        emit(.toolCall(name: effectiveCall.name, input: inputData))
         try? await memory.append(UsageEvent(
             viewID: viewID, kind: .toolInvoked,
-            text: "\(call.name) \(String(decoding: inputData, as: UTF8.self))"
+            text: "\(effectiveCall.name) \(String(decoding: inputData, as: UTF8.self))"
         ))
 
         let context = ToolContext(viewID: viewID, memory: memory, logger: logger)
         let output: Data
         do {
             output = try await tools.invoke(
-                name: call.name, jsonInput: inputData, context: context
+                name: effectiveCall.name, jsonInput: inputData, context: context
             )
         } catch {
             // Surface to the catch-site classifier (tool-retriable, fatal, …).
@@ -209,18 +257,18 @@ public actor Orchestrator {
         let isError = false
         try await guardrails.verify(
             .postToolUse,
-            .postToolUse(name: call.name, output: output, isError: isError)
+            .postToolUse(name: effectiveCall.name, output: output, isError: isError)
         )
         emit(.verification(stage: .postToolUse, outcome: .pass))
-        emit(.toolResult(name: call.name, output: output))
+        emit(.toolResult(name: effectiveCall.name, output: output))
         try? await memory.append(UsageEvent(
             viewID: viewID, kind: .toolResult,
-            text: "\(call.name) -> \(String(decoding: output, as: UTF8.self))"
+            text: "\(effectiveCall.name) -> \(String(decoding: output, as: UTF8.self))"
         ))
 
         transcript.append(.toolResult(
-            id: call.id ?? call.name,
-            name: call.name,
+            id: effectiveCall.id ?? effectiveCall.name,
+            name: effectiveCall.name,
             content: String(decoding: output, as: UTF8.self),
             isError: isError
         ))
@@ -258,7 +306,13 @@ public actor Orchestrator {
             case .stop(let reason):
                 stopReason = reason
             case .usage(let value):
-                usage = value
+                // Providers report usage across several events (Anthropic
+                // splits input/output). Keep the largest seen of each field
+                // so a later partial event can't zero out an earlier count.
+                usage = TokenUsage(
+                    inputTokens: max(usage.inputTokens, value.inputTokens),
+                    outputTokens: max(usage.outputTokens, value.outputTokens)
+                )
             }
         }
 

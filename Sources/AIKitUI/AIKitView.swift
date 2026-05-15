@@ -1,6 +1,7 @@
 import SwiftUI
 import Observation
 import AIKitCore
+import AIKitCapability
 import AIKitRuntime
 import AIKitSafety
 
@@ -18,11 +19,30 @@ public final class AIKitSession {
     public private(set) var lines: [Line] = []
     public private(set) var isRunning = false
     public private(set) var lastError: String?
+    /// Cumulative token usage across every turn this session has run, so hosts
+    /// can show cost/telemetry without wiring the event stream themselves.
+    public private(set) var totalUsage = TokenUsage.zero
 
     private let orchestrator: Orchestrator
 
     public init(orchestrator: Orchestrator) {
         self.orchestrator = orchestrator
+    }
+
+    /// Renders an error with its safety detail intact. A `GuardrailViolation`
+    /// surfaced as a bare description loses the rail id and stage; spell them
+    /// out so the host gets a usable safety story out of the box.
+    private static func describe(_ error: any Error) -> String {
+        if let violation = error as? GuardrailViolation {
+            return "Blocked by \(violation.railID) at \(violation.stage.rawValue): \(violation.reason)"
+        }
+        if let iteration = error as? IterationLimitExceeded {
+            return "Stopped after reaching the \(iteration.limit)-iteration limit."
+        }
+        if let llmError = error as? LLMError {
+            return llmError.errorDescription ?? "\(llmError)"
+        }
+        return "\(error)"
     }
 
     public func send(_ instruction: String) async {
@@ -45,20 +65,34 @@ public final class AIKitSession {
                         text: "\(name): \(String(decoding: output, as: UTF8.self))"
                     ))
                 case .verification(let stage, let outcome):
-                    if case .warn(let reason) = outcome {
+                    switch outcome {
+                    case .pass:
+                        break
+                    case .warn(let reason):
                         lines.append(Line(role: "warn", text: "[\(stage.rawValue)] \(reason)"))
+                    case .block(let reason):
+                        lines.append(Line(role: "blocked", text: "[\(stage.rawValue)] \(reason)"))
                     }
+                case .usage(let usage):
+                    totalUsage = TokenUsage(
+                        inputTokens: totalUsage.inputTokens + usage.inputTokens,
+                        outputTokens: totalUsage.outputTokens + usage.outputTokens
+                    )
                 case .finalAnswer(let text):
                     lines.append(Line(role: "assistant", text: text))
                     streamingText = ""
                 case .error(let error):
-                    lastError = "\(error)"
+                    let message = Self.describe(error)
+                    lastError = message
+                    lines.append(Line(role: "error", text: message))
                 case .promptBuilt:
                     break
                 }
             }
         } catch {
-            lastError = "\(error)"
+            let message = Self.describe(error)
+            lastError = message
+            lines.append(Line(role: "error", text: message))
         }
         isRunning = false
     }

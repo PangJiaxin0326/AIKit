@@ -18,16 +18,38 @@ public actor PolicyEngine {
         rails.append(rail)
     }
 
-    /// Runs every guardrail bound to `stage`. Throws on the first `.block`.
-    /// Returns the warnings raised (if any).
-    @discardableResult
-    public func verify(
+    /// Removes every rail with the given id. Lets a host toggle a rail at
+    /// runtime without rebuilding the engine and orchestrator.
+    public func unregister(id: String) {
+        rails.removeAll { $0.id == id }
+    }
+
+    /// Replaces the rail with a matching id (or appends it if absent). The
+    /// replacement keeps the original position so stage ordering is stable.
+    public func replace(_ rail: any Guardrail) {
+        if let index = rails.firstIndex(where: { $0.id == rail.id }) {
+            rails[index] = rail
+        } else {
+            rails.append(rail)
+        }
+    }
+
+    /// Runs every guardrail bound to `stage`, applying payload rewrites first.
+    /// Throws on the first `.block`. Returns the (possibly rewritten) payload
+    /// and the warnings raised.
+    public func resolve(
         _ stage: Verifier.Stage,
         _ payload: GuardrailPayload
-    ) async throws -> [String] {
+    ) async throws -> (payload: GuardrailPayload, warnings: [String]) {
+        var current = payload
         var warnings: [String] = []
         for rail in rails where rail.stages.contains(stage) {
-            switch await rail.evaluate(payload) {
+            if let rewritten = await rail.rewrite(current),
+               rewritten.stage == stage {
+                logger.debug("guardrail \(rail.id, privacy: .public) rewrote payload")
+                current = rewritten
+            }
+            switch await rail.evaluate(current) {
             case .pass:
                 continue
             case .warn(let reason):
@@ -38,6 +60,16 @@ public actor PolicyEngine {
                 throw GuardrailViolation(railID: rail.id, stage: stage, reason: reason)
             }
         }
-        return warnings
+        return (current, warnings)
+    }
+
+    /// Runs every guardrail bound to `stage`. Throws on the first `.block`.
+    /// Returns the warnings raised (if any).
+    @discardableResult
+    public func verify(
+        _ stage: Verifier.Stage,
+        _ payload: GuardrailPayload
+    ) async throws -> [String] {
+        try await resolve(stage, payload).warnings
     }
 }

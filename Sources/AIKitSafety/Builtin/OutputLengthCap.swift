@@ -1,6 +1,8 @@
 import Foundation
 
-/// Blocks final responses over a configured character cap.
+/// Blocks final responses longer than a configured number of **characters**
+/// (not tokens — this is a cheap guard against runaway output, not a token
+/// budget).
 public struct OutputLengthCap: Guardrail {
     public let id = "builtin.outputLengthCap"
     public let stages: Set<Verifier.Stage> = [.finalResult]

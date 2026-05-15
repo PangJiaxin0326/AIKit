@@ -10,12 +10,19 @@ public final class MockProvider: LLMProvider, @unchecked Sendable {
     private var index = 0
     public private(set) var receivedRequests: [LLMRequest] = []
 
-    public init(responses: [LLMResponse]) {
+    public let defaultModel: String
+
+    public init(responses: [LLMResponse], defaultModel: String = "mock-model") {
         self.scripted = responses.map { .success($0) }
+        self.defaultModel = defaultModel
     }
 
-    public init(results: [Result<LLMResponse, LLMError>]) {
+    public init(
+        results: [Result<LLMResponse, LLMError>],
+        defaultModel: String = "mock-model"
+    ) {
         self.scripted = results
+        self.defaultModel = defaultModel
     }
 
     /// Convenience: a single final-text response.
