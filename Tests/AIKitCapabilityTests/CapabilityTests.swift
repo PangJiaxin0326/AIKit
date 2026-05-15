@@ -91,6 +91,31 @@ private struct EchoTool: Tool {
         let after = await resolver.merged()
         #expect(after.toolNames == ["navigate"])
     }
+
+    @Test func tokenPopRemovesExactFrameNotByID() async {
+        let resolver = ContextResolver()
+        let first = await resolver.push(ViewContext(
+            id: .init("dup"), displayName: "First", toolNames: ["a"]
+        ))
+        await resolver.push(ViewContext(
+            id: .init("dup"), displayName: "Second", toolNames: ["b"]
+        ))
+        // Two live frames share the id; popping the first token must leave the
+        // second intact (the id-based pop could not tell them apart).
+        await resolver.pop(first)
+        let merged = await resolver.merged()
+        #expect(merged.toolNames == ["b"])
+        #expect(merged.stack == [ViewContext.ID("dup")])
+    }
+
+    @Test func doublePopByTokenIsIdempotent() async {
+        let resolver = ContextResolver()
+        let token = await resolver.push(ViewContext(id: .init("x"), displayName: "X"))
+        await resolver.pop(token)
+        await resolver.pop(token)
+        let current = await resolver.current()
+        #expect(current.isEmpty)
+    }
 }
 
 @Suite struct MemoryStoreTests {
@@ -117,5 +142,22 @@ private struct EchoTool: Tool {
         #expect(hits.count == 1)
         let none = try await store.recent(limit: 10, view: .init("other"))
         #expect(none.isEmpty)
+    }
+
+    @Test func sqliteSearchEscapesLikeWildcards() async throws {
+        let store = try SQLiteMemoryStore(path: nil)
+        try await store.append(UsageEvent(
+            viewID: .init("a"), kind: .userInstruction, text: "100% sure"
+        ))
+        try await store.append(UsageEvent(
+            viewID: .init("a"), kind: .userInstruction, text: "totally unrelated"
+        ))
+        // A bare "%" must be matched literally, not as "match everything".
+        let percent = try await store.search(query: "%", limit: 10)
+        #expect(percent.count == 1)
+        #expect(percent.first?.payloadText == "100% sure")
+        // "_" likewise literal.
+        let underscore = try await store.search(query: "_", limit: 10)
+        #expect(underscore.isEmpty)
     }
 }

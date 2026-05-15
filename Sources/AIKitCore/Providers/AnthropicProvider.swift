@@ -8,6 +8,8 @@ public struct AnthropicProvider: LLMProvider {
 
     let configuration: LLMProviderConfiguration
 
+    public var defaultModel: String { configuration.defaultModel }
+
     public init(configuration: LLMProviderConfiguration) {
         self.configuration = configuration
     }
@@ -16,12 +18,14 @@ public struct AnthropicProvider: LLMProvider {
         apiKey: String,
         model: String = AnthropicProvider.defaultModel,
         baseURL: URL = AnthropicProvider.defaultBaseURL,
+        timeout: TimeInterval? = nil,
         session: URLSession = .shared
     ) {
         self.init(configuration: .init(
             apiKey: apiKey,
             baseURL: baseURL,
             defaultModel: model,
+            timeout: timeout,
             session: session
         ))
     }
@@ -34,7 +38,7 @@ public struct AnthropicProvider: LLMProvider {
         do {
             (data, response) = try await configuration.session.data(for: urlRequest)
         } catch {
-            throw LLMError.transport(error.localizedDescription)
+            throw LLMError.from(transport: error)
         }
         try Self.validate(response, data: data)
         do {
@@ -57,6 +61,7 @@ public struct AnthropicProvider: LLMProvider {
                     let (bytes, response) = try await configuration.session.bytes(for: urlRequest)
                     try Self.validate(response, data: Data())
                     for try await line in bytes.lines {
+                        try Task.checkCancellation()
                         guard line.hasPrefix("data:") else { continue }
                         let json = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
                         guard !json.isEmpty, json != "[DONE]" else { continue }
@@ -73,7 +78,7 @@ public struct AnthropicProvider: LLMProvider {
                 } catch let error as LLMError {
                     continuation.finish(throwing: error)
                 } catch {
-                    continuation.finish(throwing: LLMError.transport(error.localizedDescription))
+                    continuation.finish(throwing: LLMError.from(transport: error))
                 }
             }
             continuation.onTermination = { _ in task.cancel() }
@@ -82,19 +87,34 @@ public struct AnthropicProvider: LLMProvider {
 
     // MARK: - Request construction
 
+    /// Body keys owned by the wire encoder; `extraBody` may not override these.
+    private static let reservedBodyKeys: Set<String> = [
+        "model", "system", "messages", "tools", "temperature",
+        "max_tokens", "stream",
+    ]
+
     private func makeURLRequest(_ request: LLMRequest, stream: Bool) throws -> URLRequest {
-        guard !configuration.apiKey.isEmpty else { throw LLMError.missingAPIKey }
-        var urlRequest = URLRequest(
-            url: configuration.baseURL.appendingPathComponent("v1/messages")
+        let url = configuration.baseURL.resolvingEndpoint(
+            apiPrefix: "v1", endpoint: "messages"
         )
+        var urlRequest = URLRequest(url: url)
         urlRequest.httpMethod = "POST"
         urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        urlRequest.setValue(configuration.apiKey, forHTTPHeaderField: "x-api-key")
+        if !configuration.apiKey.isEmpty {
+            urlRequest.setValue(configuration.apiKey, forHTTPHeaderField: "x-api-key")
+        }
         urlRequest.setValue(Self.apiVersion, forHTTPHeaderField: "anthropic-version")
+        if let timeout = configuration.timeout {
+            urlRequest.timeoutInterval = timeout
+        }
 
         let body = WireRequest(request: request, model: request.model, stream: stream)
         do {
-            urlRequest.httpBody = try JSONEncoder().encode(body)
+            urlRequest.httpBody = try mergedRequestBody(
+                encoded: JSONEncoder().encode(body),
+                extraBody: request.extraBody,
+                reservedKeys: Self.reservedBodyKeys
+            )
         } catch {
             throw LLMError.encodingFailed(String(describing: error))
         }
@@ -267,15 +287,30 @@ private struct StreamEvent: Decodable {
         let input_tokens: Int?
         let output_tokens: Int?
     }
+    struct StartMessage: Decodable {
+        let usage: Usage?
+    }
     let type: String
     let index: Int?
     let delta: Delta?
     let content_block: Block?
     let usage: Usage?
-    // Tracks tool_use ids by content-block index across events within a stream.
+    let message: StartMessage?
 
+    /// Anthropic reports usage across two events: input tokens arrive in
+    /// `message_start`, the final output count in `message_delta`. The
+    /// Orchestrator merges these (it keeps the max of each field), so emitting
+    /// a partial `TokenUsage` from each event is correct.
     func chunks() -> [LLMResponseChunk] {
         switch type {
+        case "message_start":
+            if let usage = message?.usage {
+                return [.usage(TokenUsage(
+                    inputTokens: usage.input_tokens ?? 0,
+                    outputTokens: usage.output_tokens ?? 0
+                ))]
+            }
+            return []
         case "content_block_start":
             if content_block?.type == "tool_use" {
                 return [.toolUseStart(
@@ -295,6 +330,7 @@ private struct StreamEvent: Decodable {
         case "content_block_stop":
             return [.toolUseStop(id: String(index ?? 0))]
         case "message_delta":
+            var result: [LLMResponseChunk] = []
             if let reason = delta?.stop_reason {
                 let stop: StopReason
                 switch reason {
@@ -304,9 +340,15 @@ private struct StreamEvent: Decodable {
                 case "stop_sequence": stop = .stopSequence
                 default: stop = .other(reason)
                 }
-                return [.stop(stop)]
+                result.append(.stop(stop))
             }
-            return []
+            if let usage {
+                result.append(.usage(TokenUsage(
+                    inputTokens: usage.input_tokens ?? 0,
+                    outputTokens: usage.output_tokens ?? 0
+                )))
+            }
+            return result
         case "message_stop":
             if let usage {
                 return [.usage(TokenUsage(

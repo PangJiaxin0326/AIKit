@@ -8,6 +8,11 @@ public struct LLMRequest: Sendable, Hashable {
     public var tools: [ToolDescriptor]
     public var temperature: Double?
     public var maxTokens: Int?
+    /// Provider-specific knobs merged into the request body. Local models need
+    /// these (`num_ctx`, `keep_alive`, `stop`, `top_p`, `seed`, …). Reserved
+    /// keys owned by the wire encoder (`model`, `messages`, `stream`, …) are
+    /// never overwritten by these values.
+    public var extraBody: [String: JSONValue]
 
     public init(
         model: String,
@@ -15,7 +20,8 @@ public struct LLMRequest: Sendable, Hashable {
         messages: [Message] = [],
         tools: [ToolDescriptor] = [],
         temperature: Double? = nil,
-        maxTokens: Int? = nil
+        maxTokens: Int? = nil,
+        extraBody: [String: JSONValue] = [:]
     ) {
         self.model = model
         self.system = system
@@ -23,6 +29,7 @@ public struct LLMRequest: Sendable, Hashable {
         self.tools = tools
         self.temperature = temperature
         self.maxTokens = maxTokens
+        self.extraBody = extraBody
     }
 }
 

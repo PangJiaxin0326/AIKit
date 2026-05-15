@@ -2,11 +2,19 @@ import Foundation
 
 /// `LLMProvider` backed by the OpenAI Chat Completions API. Tool use is mapped
 /// to function calling.
+///
+/// Works unmodified against any OpenAI-compatible backend (Ollama, llama.cpp,
+/// vLLM, LM Studio). For no-auth local backends pass an empty `apiKey`: the
+/// `Authorization` header is then omitted entirely. The base URL tolerates a
+/// trailing `/v1` so `http://localhost:11434/v1` does not become
+/// `/v1/v1/chat/completions`.
 public struct OpenAIProvider: LLMProvider {
     public static let defaultBaseURL = URL(string: "https://api.openai.com")!
     public static let defaultModel = "gpt-4o"
 
     let configuration: LLMProviderConfiguration
+
+    public var defaultModel: String { configuration.defaultModel }
 
     public init(configuration: LLMProviderConfiguration) {
         self.configuration = configuration
@@ -16,12 +24,14 @@ public struct OpenAIProvider: LLMProvider {
         apiKey: String,
         model: String = OpenAIProvider.defaultModel,
         baseURL: URL = OpenAIProvider.defaultBaseURL,
+        timeout: TimeInterval? = nil,
         session: URLSession = .shared
     ) {
         self.init(configuration: .init(
             apiKey: apiKey,
             baseURL: baseURL,
             defaultModel: model,
+            timeout: timeout,
             session: session
         ))
     }
@@ -34,7 +44,7 @@ public struct OpenAIProvider: LLMProvider {
         do {
             (data, response) = try await configuration.session.data(for: urlRequest)
         } catch {
-            throw LLMError.transport(error.localizedDescription)
+            throw LLMError.from(transport: error)
         }
         try Self.validate(response, data: data)
         do {
@@ -60,6 +70,7 @@ public struct OpenAIProvider: LLMProvider {
                     try Self.validate(response, data: Data())
                     var activeToolIDs: [Int: String] = [:]
                     for try await line in bytes.lines {
+                        try Task.checkCancellation()
                         guard line.hasPrefix("data:") else { continue }
                         let json = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
                         guard !json.isEmpty else { continue }
@@ -77,7 +88,7 @@ public struct OpenAIProvider: LLMProvider {
                 } catch let error as LLMError {
                     continuation.finish(throwing: error)
                 } catch {
-                    continuation.finish(throwing: LLMError.transport(error.localizedDescription))
+                    continuation.finish(throwing: LLMError.from(transport: error))
                 }
             }
             continuation.onTermination = { _ in task.cancel() }
@@ -86,20 +97,34 @@ public struct OpenAIProvider: LLMProvider {
 
     // MARK: - Request construction
 
+    /// Body keys owned by the wire encoder; `extraBody` may not override these.
+    private static let reservedBodyKeys: Set<String> = [
+        "model", "messages", "tools", "temperature", "max_tokens",
+        "stream", "stream_options",
+    ]
+
     private func makeURLRequest(_ request: LLMRequest, stream: Bool) throws -> URLRequest {
-        guard !configuration.apiKey.isEmpty else { throw LLMError.missingAPIKey }
-        var urlRequest = URLRequest(
-            url: configuration.baseURL.appendingPathComponent("v1/chat/completions")
+        let url = configuration.baseURL.resolvingEndpoint(
+            apiPrefix: "v1", endpoint: "chat/completions"
         )
+        var urlRequest = URLRequest(url: url)
         urlRequest.httpMethod = "POST"
         urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        urlRequest.setValue(
-            "Bearer \(configuration.apiKey)",
-            forHTTPHeaderField: "Authorization"
-        )
+        if !configuration.apiKey.isEmpty {
+            urlRequest.setValue(
+                "Bearer \(configuration.apiKey)",
+                forHTTPHeaderField: "Authorization"
+            )
+        }
+        if let timeout = configuration.timeout {
+            urlRequest.timeoutInterval = timeout
+        }
         do {
-            urlRequest.httpBody = try JSONEncoder().encode(
-                WireRequest(request: request, model: request.model, stream: stream)
+            let wire = WireRequest(request: request, model: request.model, stream: stream)
+            urlRequest.httpBody = try mergedRequestBody(
+                encoded: JSONEncoder().encode(wire),
+                extraBody: request.extraBody,
+                reservedKeys: Self.reservedBodyKeys
             )
         } catch {
             throw LLMError.encodingFailed(String(describing: error))
@@ -125,10 +150,16 @@ private struct WireRequest: Encodable {
     let temperature: Double?
     let max_tokens: Int?
     let stream: Bool
+    let stream_options: StreamOptions?
+
+    struct StreamOptions: Encodable {
+        let include_usage: Bool
+    }
 
     init(request: LLMRequest, model: String, stream: Bool) {
         self.model = model
         self.stream = stream
+        self.stream_options = stream ? StreamOptions(include_usage: true) : nil
         self.temperature = request.temperature
         self.max_tokens = request.maxTokens
 
@@ -286,7 +317,24 @@ private struct StreamEvent: Decodable {
         let delta: Delta
         let finish_reason: String?
     }
+    struct Usage: Decodable {
+        let prompt_tokens: Int?
+        let completion_tokens: Int?
+    }
+    // The trailing usage chunk (requested via `stream_options.include_usage`)
+    // carries an empty `choices` array, so it must default to empty.
     let choices: [Choice]
+    let usage: Usage?
+
+    enum CodingKeys: String, CodingKey {
+        case choices, usage
+    }
+
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.choices = try container.decodeIfPresent([Choice].self, forKey: .choices) ?? []
+        self.usage = try container.decodeIfPresent(Usage.self, forKey: .usage)
+    }
 
     func chunks(activeToolIDs: inout [Int: String]) -> [LLMResponseChunk] {
         var result: [LLMResponseChunk] = []
@@ -317,6 +365,12 @@ private struct StreamEvent: Decodable {
             case let other?: result.append(.stop(.other(other)))
             case nil: break
             }
+        }
+        if let usage {
+            result.append(.usage(TokenUsage(
+                inputTokens: usage.prompt_tokens ?? 0,
+                outputTokens: usage.completion_tokens ?? 0
+            )))
         }
         return result
     }

@@ -17,6 +17,10 @@ public struct RetryPolicy: Sendable, Hashable {
         case none
         case fixed(seconds: Double)
         case exponential(base: Double, cap: Double)
+        /// Exponential backoff with full jitter: a uniformly random delay in
+        /// `0...exponential`. Spreads retries so concurrent failures don't
+        /// stampede the provider in lockstep.
+        case exponentialJitter(base: Double, cap: Double)
 
         public func delay(forAttempt attempt: Int) -> Double {
             switch self {
@@ -26,6 +30,9 @@ public struct RetryPolicy: Sendable, Hashable {
                 return seconds
             case .exponential(let base, let cap):
                 return min(cap, base * pow(2, Double(max(0, attempt - 1))))
+            case .exponentialJitter(let base, let cap):
+                let ceiling = min(cap, base * pow(2, Double(max(0, attempt - 1))))
+                return Double.random(in: 0...max(0, ceiling))
             }
         }
     }
@@ -60,9 +67,13 @@ public enum ErrorClassifier {
         case let llmError as LLMError:
             switch llmError {
             case .httpStatus(let code, _):
-                return (500..<600).contains(code) ? .transient : .fatal
-            case .transport:
+                // 429 (rate limited) and 5xx are worth a retry; other 4xx are
+                // client errors that will fail again identically.
+                return (code == 429 || (500..<600).contains(code)) ? .transient : .fatal
+            case .transport, .timeout:
                 return .transient
+            case .cancelled:
+                return .fatal
             default:
                 return .fatal
             }

@@ -9,6 +9,10 @@ public struct LLMClient: Sendable {
         self.provider = provider
     }
 
+    /// The provider's default model, used by the Runtime when the orchestrator
+    /// options don't pin a model explicitly.
+    public var defaultModel: String { provider.defaultModel }
+
     public func complete(_ request: LLMRequest) async throws -> LLMResponse {
         try await provider.complete(request)
     }

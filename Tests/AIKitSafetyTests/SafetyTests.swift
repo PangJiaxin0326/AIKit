@@ -41,6 +41,35 @@ import AIKitCapability
         #expect(outcome == .pass)
     }
 
+    @Test func piiRedactorRedactModeRewritesAndPasses() async {
+        let rail = PIIRedactor(mode: .redact)
+        let payload = GuardrailPayload.preToolUse(ToolCall(
+            name: "setProfile",
+            input: .object([
+                "bio": .string("reach me at a@b.com or 555-12-6789"),
+                "ok": .string("nothing sensitive"),
+            ])
+        ))
+        guard case .preToolUse(let call)? = await rail.rewrite(payload) else {
+            Issue.record("expected a rewritten payload")
+            return
+        }
+        let bio = call.input.objectValue?["bio"]?.stringValue
+        #expect(bio?.contains("[REDACTED]") == true)
+        #expect(bio?.contains("a@b.com") == false)
+        #expect(call.input.objectValue?["ok"]?.stringValue == "nothing sensitive")
+        // The sanitized payload now passes evaluation.
+        #expect(await rail.evaluate(.preToolUse(call)) == .pass)
+    }
+
+    @Test func piiRedactorRedactModeLeavesCleanInputUntouched() async {
+        let rail = PIIRedactor(mode: .redact)
+        let clean = GuardrailPayload.preToolUse(ToolCall(
+            name: "navigate", input: .object(["destination": .string("home")])
+        ))
+        #expect(await rail.rewrite(clean) == nil)
+    }
+
     @Test func outputLengthCapBlocksLong() async {
         let rail = OutputLengthCap(maxCharacters: 5)
         let outcome = await rail.evaluate(.finalResult("way too long"))
@@ -94,6 +123,25 @@ import AIKitCapability
         // OutputLengthCap only binds finalResult; a preToolUse check is a no-op.
         try await engine.verify(
             .preToolUse, .preToolUse(ToolCall(name: "x", input: .object([:])))
+        )
+    }
+
+    @Test func replaceAndUnregisterToggleRailsAtRuntime() async throws {
+        let engine = PolicyEngine(rails: [AllowlistedTools(allowed: ["navigate"])])
+        await #expect(throws: GuardrailViolation.self) {
+            try await engine.verify(
+                .preToolUse, .preToolUse(ToolCall(name: "evil", input: .object([:])))
+            )
+        }
+        // Replace by id keeps position but swaps behavior.
+        await engine.replace(AllowlistedTools(allowed: ["evil"]))
+        try await engine.verify(
+            .preToolUse, .preToolUse(ToolCall(name: "evil", input: .object([:])))
+        )
+        // Unregister removes it entirely.
+        await engine.unregister(id: "builtin.allowlistedTools")
+        try await engine.verify(
+            .preToolUse, .preToolUse(ToolCall(name: "anything", input: .object([:])))
         )
     }
 }

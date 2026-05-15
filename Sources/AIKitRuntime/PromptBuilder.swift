@@ -12,6 +12,16 @@ public enum PromptBuilder {
     the task is complete, reply with a concise final answer and no tool calls.
     """
 
+    /// Appended when `toolCallFallbackHint` is set and tools are available.
+    /// Models without native function calling (common for local models) can
+    /// still drive tools by emitting this fenced block, which `OutputParser`
+    /// recovers. Models with native tool support ignore it.
+    public static let toolFallbackInstruction = """
+    If you cannot emit a native tool call, request a tool by writing a fenced \
+    code block tagged `tool` containing a single JSON object: \
+    {"name": "<toolName>", "input": { ... }}. Emit nothing after that block.
+    """
+
     public static func build(
         instruction: String,
         context: ResolvedContext,
@@ -20,7 +30,9 @@ public enum PromptBuilder {
         toolManifest: [ToolDescriptor],
         model: String,
         temperature: Double? = nil,
-        maxTokens: Int? = nil
+        maxTokens: Int? = nil,
+        extraBody: [String: JSONValue] = [:],
+        toolCallFallbackHint: Bool = false
     ) -> LLMRequest {
         var systemParts = [basePreamble]
         if !context.systemPromptFragment.isEmpty {
@@ -40,13 +52,18 @@ public enum PromptBuilder {
             ? toolManifest
             : toolManifest.filter { context.toolNames.contains($0.name) }
 
+        if toolCallFallbackHint, !tools.isEmpty {
+            systemParts.append(toolFallbackInstruction)
+        }
+
         return LLMRequest(
             model: model,
             system: systemParts.joined(separator: "\n\n"),
             messages: messages,
             tools: tools,
             temperature: temperature,
-            maxTokens: maxTokens
+            maxTokens: maxTokens,
+            extraBody: extraBody
         )
     }
 
