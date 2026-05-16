@@ -4,14 +4,14 @@ A Swift package providing the foundation for AI-native apps. AIKit composes UI,
 business logic, and profile/settings mutations through a unified agent pipeline
 driven by an LLM.
 
-Swift 6 · strict concurrency · iOS 17 / macOS 14 / visionOS 1 · no third-party
-dependencies.
+Swift 6 · strict concurrency · iOS 26.5 / macOS 26.5 / visionOS 26.5 · no
+third-party dependencies.
 
 ## Modules
 
 | Module            | Role                                                  |
 |-------------------|-------------------------------------------------------|
-| `AIKitCore`       | Stateless LLM transport (Anthropic / OpenAI)          |
+| `AIKitCore`       | Stateless LLM transport                               |
 | `AIKitCapability` | Tools, view context, memory store                     |
 | `AIKitRuntime`    | Orchestration loop, prompt builder, parser, retries   |
 | `AIKitSafety`     | Verifier, guardrails, policy engine                   |
@@ -31,8 +31,10 @@ Add the `AIKit` product to your target.
 ```swift
 import AIKit
 
-// 1. Provider — the host owns the API key.
+// 1. Provider — remote providers use host-owned API keys.
 let provider = AnthropicProvider(apiKey: myKey)
+// Or use Apple's on-device model, when Apple Intelligence is available:
+// let provider = AppleIntelligenceProvider()
 let llm = LLMClient(provider: provider)
 
 // 2. Tools available to the agent.
@@ -87,6 +89,14 @@ for try await event in await orchestrator.run("Take me to settings") {
     }
 }
 ```
+
+## Providers
+
+AIKit ships providers for Anthropic, OpenAI, Ollama, and Apple Intelligence.
+`AppleIntelligenceProvider` uses Apple's on-device Foundation Models framework,
+requires Apple Intelligence to be available on the device, and does not need an
+API key. It reports `supportsNativeTools == false`, so AIKit enables the fenced
+tool-call fallback and keeps dispatching tools through `ToolRegistry`.
 
 ## SwiftUI
 

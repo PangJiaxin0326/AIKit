@@ -109,7 +109,9 @@ AIKit/
 │   │   ├── Message.swift
 │   │   └── Providers/
 │   │       ├── AnthropicProvider.swift
-│   │       └── OpenAIProvider.swift
+│   │       ├── OpenAIProvider.swift
+│   │       ├── OllamaProvider.swift
+│   │       └── AppleIntelligenceProvider.swift
 │   ├── AIKitCapability/        ← Part 1: tools, context, memory
 │   │   ├── Tools/
 │   │   │   ├── Tool.swift
@@ -315,12 +317,16 @@ public struct LLMClient: Sendable {
 ### Provider configuration
 
 `LLMProvider` implementations are constructed by the host app and injected. The
-package ships two:
+package ships four:
 
 - **AnthropicProvider** — Messages API, default model
   `claude-opus-4-7`. Supports tool use blocks natively.
 - **OpenAIProvider** — Chat Completions API, default model
   `gpt-4o`. Maps tool use to function calling.
+- **OllamaProvider** — native Ollama chat API, default model `llama3.1`.
+  Reports non-guaranteed native tools so AIKit enables the fenced fallback.
+- **AppleIntelligenceProvider** — on-device Foundation Models framework.
+  Requires Apple Intelligence availability and uses the fenced tool fallback.
 
 Credentials come from `LLMProvider.Configuration` (passed in init); the package
 never reads environment variables itself. The host app decides where keys live.
@@ -556,7 +562,8 @@ Implement strictly in this order. Each phase ends with a green test target.
 3. Implement `AnthropicProvider` against the Messages API. Streaming via
    `URLSession.bytes(for:)`.
 4. Implement `OpenAIProvider` against Chat Completions.
-5. Add a `MockProvider` in tests that returns scripted responses.
+5. Implement `OllamaProvider` and `AppleIntelligenceProvider`.
+6. Add a `MockProvider` in tests that returns scripted responses.
 
 **Exit:** Round‑trip a hello‑world request against `MockProvider` with both
 streaming and non‑streaming codepaths.
@@ -607,8 +614,9 @@ executes → mock LLM emits final answer → orchestrator yields `.finalAnswer`.
 - Use **Swift Testing** (`import Testing`, `@Test`, `#expect`).
 - One test target per source target plus an `AIKitIntegrationTests` target that
   exercises the full loop with `MockProvider`.
-- **No network in tests.** `AnthropicProvider` / `OpenAIProvider` get their
-  `URLSession` injected; tests use a `URLProtocol` stub.
+- **No network in tests.** HTTP providers get their `URLSession` injected;
+  tests use a `URLProtocol` stub. Apple Intelligence tests cover request
+  shaping without requiring the on-device model.
 - Use the **MockProvider** from §7 Phase 1 for all runtime + safety tests.
 - Property‑style tests for `OutputParser` (round‑trip random tool calls through
   encode → parse).

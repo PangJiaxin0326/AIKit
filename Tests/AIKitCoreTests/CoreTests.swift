@@ -98,8 +98,45 @@ import AIKitTestSupport
     /// providers still report `true`.
     @Test func nativeToolGuarantees() {
         #expect(OllamaProvider().supportsNativeTools == false)
+        #expect(AppleIntelligenceProvider().supportsNativeTools == false)
         #expect(AnthropicProvider(apiKey: "k").supportsNativeTools == true)
         #expect(OpenAIProvider(apiKey: "k").supportsNativeTools == true)
+    }
+
+    @Test func appleIntelligencePromptIncludesToolManifest() {
+        let request = LLMRequest(
+            model: AppleIntelligenceProvider.defaultModel,
+            system: "You are embedded in an app.",
+            messages: [
+                .init(role: .user, text: "Open settings"),
+                .init(role: .tool, content: [
+                    .toolResult(
+                        toolUseID: "t1",
+                        content: "{\"navigated\":true}",
+                        isError: false
+                    ),
+                ]),
+            ],
+            tools: [
+                ToolDescriptor(
+                    name: "navigate",
+                    description: "Navigate to a screen.",
+                    inputSchema: .object([
+                        "type": .string("object"),
+                        "properties": .object([
+                            "destination": .object(["type": .string("string")]),
+                        ]),
+                    ])
+                ),
+            ]
+        )
+
+        let rendered = AppleIntelligenceProvider.renderedPrompt(for: request)
+        #expect(rendered.instructions?.contains("You are embedded in an app.") == true)
+        #expect(rendered.instructions?.contains("Available AIKit tools") == true)
+        #expect(rendered.instructions?.contains("navigate") == true)
+        #expect(rendered.prompt.contains("User:\nOpen settings"))
+        #expect(rendered.prompt.contains("Tool result"))
     }
 }
 
