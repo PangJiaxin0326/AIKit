@@ -247,8 +247,9 @@ environment object) to push/pop on the resolver.
 ### 3.3 Memory
 
 A rolling, persisted log of user→agent interactions. It is **append‑only** with
-windowed reads. Storage backend is pluggable; default is a SQLite‑backed store
-in v1, with an in‑memory implementation for tests.
+windowed reads; the only destructive operation is `delete(id:)`, which forgets
+a single record. Storage backend is pluggable; default is a SwiftData‑backed
+store in v1, with an in‑memory implementation for tests.
 
 ```swift
 public struct UsageEvent: Codable, Sendable, Identifiable {
@@ -267,6 +268,7 @@ public protocol MemoryStore: Sendable {
     func append(_ event: UsageEvent) async throws
     func recent(limit: Int, view: ViewContext.ID?) async throws -> [UsageEvent]
     func search(query: String, limit: Int) async throws -> [UsageEvent]
+    func delete(id: UUID) async throws
 }
 ```
 
@@ -559,8 +561,8 @@ streaming and non‑streaming codepaths.
 ### Phase 2 — Capability (1 day)
 1. `Tool` protocol + `ToolRegistry` actor + JSON dispatch.
 2. `ViewContext` + `ContextResolver` actor.
-3. `MemoryStore` protocol + `InMemoryMemoryStore` + `SQLiteMemoryStore` (use
-   `sqlite3` via `import SQLite3`, no third‑party deps).
+3. `MemoryStore` protocol + `InMemoryMemoryStore` + `SwiftDataMemoryStore`
+   (use SwiftData via `import SwiftData`, no third‑party deps).
 4. Built‑in tools: `navigate`, `setProfile`, `setSetting`, `searchMemory`.
 
 **Exit:** Register a fake tool, invoke it through `ToolRegistry.invoke(name:…)`,

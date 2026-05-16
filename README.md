@@ -64,7 +64,7 @@ let policy = PolicyEngine(rails: [
 let orchestrator = Orchestrator(
     llm: llm,
     tools: tools,
-    memory: try SQLiteMemoryStore(path: dbPath),
+    memory: try SwiftDataMemoryStore(path: dbPath),
     contextResolver: resolver,
     guardrails: policy,
     options: .init(model: "claude-opus-4-7")

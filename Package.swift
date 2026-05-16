@@ -29,8 +29,7 @@ let package = Package(
         .target(
             name: "AIKitCapability",
             dependencies: ["AIKitCore"],
-            swiftSettings: swiftSettings,
-            linkerSettings: [.linkedLibrary("sqlite3")]
+            swiftSettings: swiftSettings
         ),
         .target(
             name: "AIKitSafety",

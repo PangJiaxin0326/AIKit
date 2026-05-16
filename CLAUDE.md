@@ -10,7 +10,7 @@ swift test
 ```
 
 Swift 6, strict concurrency, language mode v6. No third-party dependencies.
-`AIKitCapability` links the system `sqlite3`.
+`AIKitCapability` persists memory via SwiftData (`SwiftDataMemoryStore`).
 
 ## Module dependency order
 
@@ -21,8 +21,8 @@ URLProtocolStub) is a non-shipping target the test targets depend on.
 ## Conventions
 
 - Every public type is `Sendable`; shared mutable state lives in actors.
-- No `@unchecked Sendable` in public API. The one internal use
-  (`SQLiteConnection`) carries a justification comment.
+- No `@unchecked Sendable` anywhere. Non-`Sendable` SwiftData types
+  (`ModelContext`) stay actor-isolated inside `SwiftDataMemoryStore`.
 - Typed errors only: `LLMError`, `ToolError`, `OutputParser.ParserError`,
   `GuardrailViolation`. Never throw `NSError`/`String`.
 - Logging via `OSLog`; subsystems are `com.aikit.<module>` (see `AIKitLog`).

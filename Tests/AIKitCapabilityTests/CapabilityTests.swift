@@ -131,8 +131,19 @@ private struct EchoTool: Tool {
         #expect(found.count == 1)
     }
 
-    @Test func sqliteRoundTrip() async throws {
-        let store = try SQLiteMemoryStore(path: nil)
+    @Test func inMemoryDeleteForgetsEntry() async throws {
+        let store = InMemoryMemoryStore()
+        let keep = UsageEvent(viewID: .init("a"), kind: .userInstruction, text: "keep")
+        let drop = UsageEvent(viewID: .init("a"), kind: .userInstruction, text: "drop")
+        try await store.append(keep)
+        try await store.append(drop)
+        try await store.delete(id: drop.id)
+        let remaining = try await store.recent(limit: 10, view: nil)
+        #expect(remaining.map(\.id) == [keep.id])
+    }
+
+    @Test func swiftDataRoundTrip() async throws {
+        let store = try SwiftDataMemoryStore(path: nil)
         let event = UsageEvent(viewID: .init("home"), kind: .toolResult, text: "result payload")
         try await store.append(event)
         let recent = try await store.recent(limit: 10, view: .init("home"))
@@ -144,8 +155,8 @@ private struct EchoTool: Tool {
         #expect(none.isEmpty)
     }
 
-    @Test func sqliteSearchEscapesLikeWildcards() async throws {
-        let store = try SQLiteMemoryStore(path: nil)
+    @Test func swiftDataSearchTreatsQueryLiterally() async throws {
+        let store = try SwiftDataMemoryStore(path: nil)
         try await store.append(UsageEvent(
             viewID: .init("a"), kind: .userInstruction, text: "100% sure"
         ))
@@ -159,5 +170,17 @@ private struct EchoTool: Tool {
         // "_" likewise literal.
         let underscore = try await store.search(query: "_", limit: 10)
         #expect(underscore.isEmpty)
+    }
+
+    @Test func swiftDataDeleteForgetsEntry() async throws {
+        let store = try SwiftDataMemoryStore(path: nil)
+        let keep = UsageEvent(viewID: .init("home"), kind: .toolResult, text: "keep me")
+        let drop = UsageEvent(viewID: .init("home"), kind: .toolResult, text: "forget me")
+        try await store.append(keep)
+        try await store.append(drop)
+        try await store.delete(id: drop.id)
+        let remaining = try await store.recent(limit: 10, view: .init("home"))
+        #expect(remaining.map(\.id) == [keep.id])
+        #expect(try await store.search(query: "forget", limit: 10).isEmpty)
     }
 }
