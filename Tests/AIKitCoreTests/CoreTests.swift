@@ -23,10 +23,36 @@ import AIKitTestSupport
         ])
         #expect(Set(value.allStrings) == ["x", "y"])
     }
+
+    /// REVIEW2 finding **C**: integral knobs must serialize as integers so
+    /// strict backends (Ollama/llama.cpp/vLLM) accept `num_ctx` etc.
+    @Test func intEncodesWithoutDecimalPoint() throws {
+        let value: JSONValue = .object(["num_ctx": .int(4096), "t": .number(0.5)])
+        let json = String(decoding: try value.data(), as: UTF8.self)
+        #expect(json.contains("\"num_ctx\":4096"))
+        #expect(!json.contains("4096.0"))
+        #expect(json.contains("\"t\":0.5"))
+    }
+
+    @Test func integerLiteralProducesIntCase() {
+        let v: JSONValue = 4096
+        #expect(v == .int(4096))
+        #expect(v.intValue == 4096)
+        #expect(JSONValue.number(8.0).intValue == 8)
+        #expect(JSONValue.number(8.5).intValue == nil)
+        #expect(JSONValue.string("x").intValue == nil)
+    }
+
+    @Test func numbersStillDecodeAsNumberForLosslessRoundTrip() throws {
+        // Decoding never yields `.int`; whole-number doubles stay `.number`
+        // so existing equality/round-trip semantics are unchanged.
+        let decoded = try JSONValue(data: Data("{\"n\":3}".utf8))
+        #expect(decoded == .object(["n": .number(3)]))
+    }
 }
 
 @Suite struct EndpointResolutionTests {
-    @Test func toleratesV1SuffixAndTrailingSlash() {
+    @Test func toleratesV1SuffixAndTrailingSlash() throws {
         let cases: [(String, String)] = [
             ("https://api.openai.com", "https://api.openai.com/v1/chat/completions"),
             ("http://localhost:11434/v1", "http://localhost:11434/v1/chat/completions"),
@@ -34,20 +60,20 @@ import AIKitTestSupport
             ("http://h/v1/chat/completions", "http://h/v1/chat/completions"),
         ]
         for (input, expected) in cases {
-            let resolved = URL(string: input)!
+            let resolved = try URL(string: input)!
                 .resolvingEndpoint(apiPrefix: "v1", endpoint: "chat/completions")
             #expect(resolved.absoluteString == expected)
         }
     }
 
-    @Test func ollamaApiPrefix() {
+    @Test func ollamaApiPrefix() throws {
         #expect(
-            URL(string: "http://localhost:11434")!
+            try URL(string: "http://localhost:11434")!
                 .resolvingEndpoint(apiPrefix: "api", endpoint: "chat")
                 .absoluteString == "http://localhost:11434/api/chat"
         )
         #expect(
-            URL(string: "http://localhost:11434/api")!
+            try URL(string: "http://localhost:11434/api")!
                 .resolvingEndpoint(apiPrefix: "api", endpoint: "chat")
                 .absoluteString == "http://localhost:11434/api/chat"
         )
@@ -197,6 +223,23 @@ import AIKitTestSupport
         #expect(response.toolUses.first?.input.objectValue?["destination"]?.stringValue == "home")
         #expect(response.usage.inputTokens == 8)
         #expect(response.usage.outputTokens == 3)
+    }
+
+    /// REVIEW2 finding **F2**: tool calls mean `.toolUse` regardless of
+    /// `done_reason` — the single `stopReason()` source must enforce that.
+    @Test func ollamaToolCallsOverrideLengthDoneReason() async throws {
+        let body = """
+        {"model":"llama3.1","message":{"role":"assistant","content":"",\
+        "tool_calls":[{"function":{"name":"navigate","arguments":{"to":"x"}}}]},\
+        "done":true,"done_reason":"length","prompt_eval_count":1,"eval_count":1}
+        """.data(using: .utf8)!
+        URLProtocolStub.setStub(.init(body: body))
+        let provider = OllamaProvider(session: URLProtocolStub.makeSession())
+        let response = try await provider.complete(
+            LLMRequest(model: "llama3.1", messages: [.init(role: .user, text: "hi")])
+        )
+        #expect(response.stopReason == .toolUse)
+        #expect(response.toolUses.first?.name == "navigate")
     }
 
     @Test func decodesChatCompletion() async throws {

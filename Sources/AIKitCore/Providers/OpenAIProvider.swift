@@ -104,7 +104,7 @@ public struct OpenAIProvider: LLMProvider {
     ]
 
     private func makeURLRequest(_ request: LLMRequest, stream: Bool) throws -> URLRequest {
-        let url = configuration.baseURL.resolvingEndpoint(
+        let url = try configuration.baseURL.resolvingEndpoint(
             apiPrefix: "v1", endpoint: "chat/completions"
         )
         var urlRequest = URLRequest(url: url)

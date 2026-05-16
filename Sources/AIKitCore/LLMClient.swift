@@ -13,6 +13,11 @@ public struct LLMClient: Sendable {
     /// options don't pin a model explicitly.
     public var defaultModel: String { provider.defaultModel }
 
+    /// Whether the underlying provider speaks a native function-calling
+    /// protocol. The Runtime uses this to decide whether to inject the fenced
+    /// tool-call fallback when `Options.toolCallFallback` is left unset.
+    public var supportsNativeTools: Bool { provider.supportsNativeTools }
+
     public func complete(_ request: LLMRequest) async throws -> LLMResponse {
         try await provider.complete(request)
     }

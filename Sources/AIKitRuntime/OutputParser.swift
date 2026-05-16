@@ -113,6 +113,12 @@ public enum OutputParser {
         if let fullRange = Range(match.range, in: text) {
             remaining.removeSubrange(fullRange)
         }
-        return (ToolCall(name: name, input: spec.resolvedInput), remaining)
+        // Synthesize a stable id. The model emitted raw JSON with no native
+        // tool-use id, but the Orchestrator needs one so the assistant turn
+        // it records carries a real `tool_use` block whose id the following
+        // `tool_result` can reference. Without it, wire encoders emit a
+        // `tool`/`tool_calls`-less message pair that backends reject.
+        let id = "fallback-\(UUID().uuidString)"
+        return (ToolCall(id: id, name: name, input: spec.resolvedInput), remaining)
     }
 }

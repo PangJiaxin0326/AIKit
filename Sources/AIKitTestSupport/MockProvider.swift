@@ -11,18 +11,26 @@ public final class MockProvider: LLMProvider, @unchecked Sendable {
     public private(set) var receivedRequests: [LLMRequest] = []
 
     public let defaultModel: String
+    public let supportsNativeTools: Bool
 
-    public init(responses: [LLMResponse], defaultModel: String = "mock-model") {
+    public init(
+        responses: [LLMResponse],
+        defaultModel: String = "mock-model",
+        supportsNativeTools: Bool = true
+    ) {
         self.scripted = responses.map { .success($0) }
         self.defaultModel = defaultModel
+        self.supportsNativeTools = supportsNativeTools
     }
 
     public init(
         results: [Result<LLMResponse, LLMError>],
-        defaultModel: String = "mock-model"
+        defaultModel: String = "mock-model",
+        supportsNativeTools: Bool = true
     ) {
         self.scripted = results
         self.defaultModel = defaultModel
+        self.supportsNativeTools = supportsNativeTools
     }
 
     /// Convenience: a single final-text response.

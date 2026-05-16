@@ -35,8 +35,20 @@ public protocol LLMProvider: Sendable {
     /// Runtime resolve a single source of truth for "which model".
     var defaultModel: String { get }
 
+    /// Whether this provider speaks a native function-calling protocol
+    /// (Anthropic tool_use, OpenAI/Ollama tool_calls). When `false`, the
+    /// Runtime injects the fenced-```tool``` fallback instruction and parses
+    /// it back; when `true` it leaves it out so the model isn't prompted to
+    /// emit both a native call and a redundant fenced block. Defaults to
+    /// `true`; a host wrapping a tool-less local model can override it.
+    var supportsNativeTools: Bool { get }
+
     func complete(_ request: LLMRequest) async throws -> LLMResponse
     func stream(_ request: LLMRequest) -> AsyncThrowingStream<LLMResponseChunk, any Error>
+}
+
+public extension LLMProvider {
+    var supportsNativeTools: Bool { true }
 }
 
 /// Merges provider-specific `extraBody` keys into an already-encoded request
@@ -72,17 +84,27 @@ extension URL {
     /// - `http://host:11434/v1`            → `…/v1/chat/completions` (no double `v1`)
     /// - `http://host:11434/v1/`           → trailing slash tolerated
     /// - `http://host/v1/chat/completions` → used verbatim (full override)
-    func resolvingEndpoint(apiPrefix: String, endpoint: String) -> URL {
+    ///
+    /// Throws `LLMError.unsupported` rather than silently returning `self`
+    /// when the composed string isn't a valid URL: a misconfigured base URL
+    /// should surface as a clear configuration error, not an opaque 404 from
+    /// a request that quietly went to the bare base URL instead.
+    func resolvingEndpoint(apiPrefix: String, endpoint: String) throws -> URL {
         let trimmed = absoluteString.hasSuffix("/")
             ? String(absoluteString.dropLast())
             : absoluteString
         let fullPath = "\(apiPrefix)/\(endpoint)"
+        let composed: String
         if trimmed.hasSuffix("/\(fullPath)") {
-            return URL(string: trimmed) ?? self
+            composed = trimmed
+        } else if trimmed.hasSuffix("/\(apiPrefix)") {
+            composed = "\(trimmed)/\(endpoint)"
+        } else {
+            composed = "\(trimmed)/\(fullPath)"
         }
-        if trimmed.hasSuffix("/\(apiPrefix)") {
-            return URL(string: "\(trimmed)/\(endpoint)") ?? self
+        guard let url = URL(string: composed) else {
+            throw LLMError.unsupported("invalid endpoint URL: \(composed)")
         }
-        return URL(string: "\(trimmed)/\(fullPath)") ?? self
+        return url
     }
 }

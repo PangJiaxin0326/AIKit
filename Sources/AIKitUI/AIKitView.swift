@@ -39,6 +39,9 @@ public final class AIKitSession {
         if let iteration = error as? IterationLimitExceeded {
             return "Stopped after reaching the \(iteration.limit)-iteration limit."
         }
+        if let deadline = error as? TurnDeadlineExceeded {
+            return "Stopped after exceeding the \(Int(deadline.budget))s turn budget."
+        }
         if let llmError = error as? LLMError {
             return llmError.errorDescription ?? "\(llmError)"
         }
@@ -136,6 +139,15 @@ public struct AIKitView: View {
                     .font(.footnote)
                     .foregroundStyle(.red)
                     .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal)
+            }
+
+            let usage = session.totalUsage
+            if usage.inputTokens > 0 || usage.outputTokens > 0 {
+                Text("Tokens — in \(usage.inputTokens), out \(usage.outputTokens)")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
                     .padding(.horizontal)
             }
 

@@ -94,7 +94,7 @@ public struct AnthropicProvider: LLMProvider {
     ]
 
     private func makeURLRequest(_ request: LLMRequest, stream: Bool) throws -> URLRequest {
-        let url = configuration.baseURL.resolvingEndpoint(
+        let url = try configuration.baseURL.resolvingEndpoint(
             apiPrefix: "v1", endpoint: "messages"
         )
         var urlRequest = URLRequest(url: url)

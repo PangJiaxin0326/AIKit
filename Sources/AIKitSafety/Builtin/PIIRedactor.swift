@@ -78,12 +78,21 @@ public struct PIIRedactor: Guardrail {
 
     // MARK: - Detection / rewriting
 
+    /// Detection runs per string, at the same granularity as `redactStrings`.
+    /// Joining every scalar with a space (the old approach) "detected" PII
+    /// that only existed across the join boundary or split across two fields —
+    /// matches the per-string rewriter could never remove, so redact-mode
+    /// would then falsely `.block("…still contains PII")`. Per-string keeps
+    /// the detector and rewriter consistent.
     private static func matchedKinds(in value: JSONValue) -> [String] {
-        let haystack = value.allStrings.joined(separator: " ")
-        guard !haystack.isEmpty else { return [] }
-        let range = NSRange(haystack.startIndex..., in: haystack)
+        let strings = value.allStrings.filter { !$0.isEmpty }
+        guard !strings.isEmpty else { return [] }
         return patterns.compactMap { kind, regex in
-            regex.firstMatch(in: haystack, range: range) != nil ? kind : nil
+            let hit = strings.contains { string in
+                let range = NSRange(string.startIndex..., in: string)
+                return regex.firstMatch(in: string, range: range) != nil
+            }
+            return hit ? kind : nil
         }
     }
 
@@ -98,7 +107,7 @@ public struct PIIRedactor: Guardrail {
             return .array(values.map { redactStrings(in: $0, placeholder: placeholder) })
         case .object(let object):
             return .object(object.mapValues { redactStrings(in: $0, placeholder: placeholder) })
-        case .null, .bool, .number:
+        case .null, .bool, .int, .number:
             return value
         }
     }

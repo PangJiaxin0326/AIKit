@@ -29,31 +29,44 @@ public actor Orchestrator {
         public var maxIterations: Int
         public var stream: Bool
         public var retry: RetryPolicy
+        /// An overall wall-clock budget for the whole turn (all iterations and
+        /// retries combined). `nil` (default) is unbounded. Bounds the case
+        /// where a too-low `configuration.timeout` against a slow local model
+        /// is classified transient and retried `maxAttempts` times, costing
+        /// ≈ N × timeout before aborting; with a budget set the turn aborts
+        /// with `TurnDeadlineExceeded` instead of stacking slow failures.
+        public var maxTurnDuration: TimeInterval?
         public var memoryWindow: Int
         public var temperature: Double?
         public var maxTokens: Int?
         /// Provider-specific request knobs (`num_ctx`, `keep_alive`, `stop`,
         /// `top_p`, `seed`, …) forwarded on every LLM call this turn.
         public var extraBody: [String: JSONValue]
-        /// When true, the prompt asks models without native function calling to
-        /// emit a fenced ```tool block, which `OutputParser` then recovers.
-        public var toolCallFallback: Bool
+        /// Controls the fenced-```tool``` fallback (prompt instruction +
+        /// recovery parsing). `nil` (the default) auto-resolves per turn:
+        /// enabled only when the provider does not support native function
+        /// calling, so native-capable backends don't waste context or get
+        /// prompted to emit a redundant fenced block. Set `true`/`false` to
+        /// force it (e.g. a tool-less model behind a native-looking provider).
+        public var toolCallFallback: Bool?
 
         public init(
             model: String? = nil,
             maxIterations: Int = 8,
             stream: Bool = true,
             retry: RetryPolicy = .default,
+            maxTurnDuration: TimeInterval? = nil,
             memoryWindow: Int = 20,
             temperature: Double? = nil,
             maxTokens: Int? = nil,
             extraBody: [String: JSONValue] = [:],
-            toolCallFallback: Bool = true
+            toolCallFallback: Bool? = nil
         ) {
             self.model = model
             self.maxIterations = maxIterations
             self.stream = stream
             self.retry = retry
+            self.maxTurnDuration = maxTurnDuration
             self.memoryWindow = memoryWindow
             self.temperature = temperature
             self.maxTokens = maxTokens
@@ -101,7 +114,7 @@ public actor Orchestrator {
 
     private func loop(
         _ instruction: String,
-        emit: @Sendable (OrchestratorEvent) -> Void
+        emit: @escaping @Sendable (OrchestratorEvent) -> Void
     ) async {
         let context = await contextResolver.merged()
         let viewID = context.leafID
@@ -109,12 +122,26 @@ public actor Orchestrator {
             viewID: viewID, kind: .userInstruction, text: instruction
         ))
 
+        // Resolve the fenced-tool fallback once per turn: an explicit option
+        // wins; otherwise enable it only for providers without native tools.
+        let useFallback = options.toolCallFallback ?? !llm.supportsNativeTools
+
+        let deadline = options.maxTurnDuration.map {
+            ContinuousClock.now.advanced(by: .seconds($0))
+        }
+
         var transcript: [TranscriptEntry] = []
         var pendingCorrection: String?
         var attempt = 0
 
         for iteration in 0..<options.maxIterations {
             if Task.isCancelled { return }
+            if let deadline, ContinuousClock.now >= deadline {
+                emit(.error(TurnDeadlineExceeded(
+                    budget: options.maxTurnDuration ?? 0
+                )))
+                return
+            }
             do {
                 if let correction = pendingCorrection {
                     transcript.append(.toolResult(
@@ -140,7 +167,7 @@ public actor Orchestrator {
                     temperature: options.temperature,
                     maxTokens: options.maxTokens,
                     extraBody: options.extraBody,
-                    toolCallFallbackHint: options.toolCallFallback
+                    toolCallFallbackHint: useFallback
                 )
                 let rendered = RenderedPrompt(request: request, toolNames: context.toolNames)
                 emit(.promptBuilt(rendered))
@@ -150,10 +177,12 @@ public actor Orchestrator {
                     emit(.verification(stage: .prePrompt, outcome: .warn(reason: warning)))
                 }
 
-                let response = try await callLLM(request, emit: emit)
+                let response = try await withTurnDeadline(deadline) {
+                    try await self.callLLM(request, emit: emit)
+                }
                 emit(.usage(response.usage))
                 let parsed = try OutputParser.parse(
-                    response, allowToolCallFallback: options.toolCallFallback
+                    response, allowToolCallFallback: useFallback
                 )
 
                 switch parsed {
@@ -167,8 +196,9 @@ public actor Orchestrator {
                     return
 
                 case .toolCalls(let calls):
-                    transcript.append(.assistant(response.content))
-                    for call in calls {
+                    let (entry, resolved) = Self.assistantTurn(text: nil, calls: calls)
+                    transcript.append(entry)
+                    for call in resolved {
                         try await execute(
                             call, viewID: viewID, transcript: &transcript, emit: emit
                         )
@@ -181,8 +211,9 @@ public actor Orchestrator {
                     if !options.stream, !text.isEmpty {
                         emit(.llmDelta(text))
                     }
-                    transcript.append(.assistant(response.content))
-                    for call in calls {
+                    let (entry, resolved) = Self.assistantTurn(text: text, calls: calls)
+                    transcript.append(entry)
+                    for call in resolved {
                         try await execute(
                             call, viewID: viewID, transcript: &transcript, emit: emit
                         )
@@ -210,6 +241,34 @@ public actor Orchestrator {
             }
         }
         emit(.error(IterationLimitExceeded(limit: options.maxIterations)))
+    }
+
+    /// Rebuilds the assistant transcript entry from the parsed output rather
+    /// than the raw `LLMResponse.content`. This is what makes the fenced-tool
+    /// fallback correct: the model's content there is plain text holding the
+    /// JSON, with no `tool_use` block, so trusting it would emit a `tool`
+    /// message with no preceding `tool_calls` (rejected by OpenAI-compatible
+    /// backends, mishandled by Ollama). Reconstructing also normalizes the
+    /// native path: any call missing a usable id gets a stable synthetic one
+    /// so the following `tool_result` references a real `tool_use` id.
+    private static func assistantTurn(
+        text: String?,
+        calls: [ToolCall]
+    ) -> (entry: TranscriptEntry, calls: [ToolCall]) {
+        var blocks: [ContentBlock] = []
+        if let text, !text.isEmpty { blocks.append(.text(text)) }
+        var resolved: [ToolCall] = []
+        resolved.reserveCapacity(calls.count)
+        for call in calls {
+            let id = (call.id?.isEmpty == false)
+                ? call.id!
+                : "fallback-\(UUID().uuidString)"
+            var c = call
+            c.id = id
+            resolved.append(c)
+            blocks.append(.toolUse(id: id, name: c.name, input: c.input))
+        }
+        return (.assistant(blocks), resolved)
     }
 
     // MARK: - Tool execution
@@ -274,6 +333,35 @@ public actor Orchestrator {
         ))
     }
 
+    // MARK: - Deadline
+
+    /// Races `operation` against the turn deadline. Returning the operation's
+    /// value cancels the timer; the timer firing first throws
+    /// `TurnDeadlineExceeded` and cancels the in-flight LLM call so a single
+    /// slow request can't outlive the whole turn budget.
+    private func withTurnDeadline<T: Sendable>(
+        _ deadline: ContinuousClock.Instant?,
+        _ operation: @escaping @Sendable () async throws -> T
+    ) async throws -> T {
+        guard let deadline else { return try await operation() }
+        let budget = options.maxTurnDuration ?? 0
+        if ContinuousClock.now >= deadline {
+            throw TurnDeadlineExceeded(budget: budget)
+        }
+        return try await withThrowingTaskGroup(of: T.self) { group in
+            group.addTask { try await operation() }
+            group.addTask {
+                try await Task.sleep(until: deadline, clock: ContinuousClock())
+                throw TurnDeadlineExceeded(budget: budget)
+            }
+            defer { group.cancelAll() }
+            guard let result = try await group.next() else {
+                throw TurnDeadlineExceeded(budget: budget)
+            }
+            return result
+        }
+    }
+
     // MARK: - LLM
 
     private func callLLM(
@@ -289,6 +377,10 @@ public actor Orchestrator {
         var usage = TokenUsage.zero
 
         for try await chunk in llm.stream(request) {
+            // Make deadline/host cancellation prompt: without this the loop
+            // would keep draining the provider stream after the turn budget
+            // fired or the caller cancelled.
+            try Task.checkCancellation()
             switch chunk {
             case .textDelta(let delta):
                 text += delta

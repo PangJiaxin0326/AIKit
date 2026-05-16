@@ -4,9 +4,18 @@ import Foundation
 ///
 /// Used for tool input schemas, tool inputs, and opaque payloads where a
 /// concrete `Codable` type is not known at compile time.
+///
+/// `int` exists because JSON has no integer/float distinction but several
+/// backends do: Ollama / llama.cpp / vLLM reject a float where they expect an
+/// integer (`num_ctx`, `seed`, `top_k`, `num_predict`). Construct `.int` (or
+/// use an integer literal) for those `extraBody` knobs so the wire encoder
+/// emits `4096`, not `4096.0`. Decoding never yields `.int` — every JSON
+/// number decodes as `.number(Double)` so round-tripping stays lossless and
+/// equality stays predictable; `.int` is purely an output-fidelity affordance.
 public enum JSONValue: Sendable, Hashable, Codable {
     case null
     case bool(Bool)
+    case int(Int)
     case number(Double)
     case string(String)
     case array([JSONValue])
@@ -39,6 +48,7 @@ public enum JSONValue: Sendable, Hashable, Codable {
         switch self {
         case .null: try container.encodeNil()
         case .bool(let value): try container.encode(value)
+        case .int(let value): try container.encode(value)
         case .number(let value): try container.encode(value)
         case .string(let value): try container.encode(value)
         case .array(let value): try container.encode(value)
@@ -68,15 +78,33 @@ extension JSONValue {
         return nil
     }
 
+    /// The integer value, accepting a whole-number `.number` too (decoded JSON
+    /// numbers are always `.number`, so callers that mean "an integer" still
+    /// resolve `4096` or `4096.0`).
+    public var intValue: Int? {
+        switch self {
+        case .int(let value):
+            return value
+        case .number(let value) where value.rounded() == value:
+            return Int(value)
+        default:
+            return nil
+        }
+    }
+
     /// Recursively collects every string scalar reachable from this value.
     public var allStrings: [String] {
         switch self {
         case .string(let value): return [value]
         case .array(let values): return values.flatMap(\.allStrings)
         case .object(let object): return object.values.flatMap(\.allStrings)
-        case .null, .bool, .number: return []
+        case .null, .bool, .int, .number: return []
         }
     }
+}
+
+extension JSONValue: ExpressibleByIntegerLiteral {
+    public init(integerLiteral value: Int) { self = .int(value) }
 }
 
 extension JSONValue: ExpressibleByStringLiteral {

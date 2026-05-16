@@ -101,7 +101,7 @@ public struct OllamaProvider: LLMProvider {
     ]
 
     private func makeURLRequest(_ request: LLMRequest, stream: Bool) throws -> URLRequest {
-        let url = configuration.baseURL.resolvingEndpoint(
+        let url = try configuration.baseURL.resolvingEndpoint(
             apiPrefix: "api", endpoint: "chat"
         )
         var urlRequest = URLRequest(url: url)
@@ -131,7 +131,7 @@ public struct OllamaProvider: LLMProvider {
             options["temperature"] = .number(temperature)
         }
         if let maxTokens = request.maxTokens {
-            options["num_predict"] = .number(Double(maxTokens))
+            options["num_predict"] = .int(maxTokens)
         }
         // `keep_alive` is a top-level Ollama key; everything else flows into
         // `options` (num_ctx, top_p, seed, stop, …) unless it shadows a
@@ -244,9 +244,16 @@ private struct WireResponse: Decodable {
     let prompt_eval_count: Int?
     let eval_count: Int?
 
+    private var hasToolCalls: Bool {
+        message?.tool_calls?.isEmpty == false
+    }
+
+    /// Tool calls always mean `.toolUse` regardless of `done_reason`; this is
+    /// the single source of truth so callers don't re-apply the ternary.
     private func stopReason() -> StopReason {
+        if hasToolCalls { return .toolUse }
         switch done_reason {
-        case "stop", nil: return (message?.tool_calls?.isEmpty == false) ? .toolUse : .endTurn
+        case "stop", nil: return .endTurn
         case "length": return .maxTokens
         case let other?: return .other(other)
         }
@@ -271,10 +278,9 @@ private struct WireResponse: Decodable {
                 input: call.function.arguments ?? .object([:])
             ))
         }
-        let stop = stopReason()
         return LLMResponse(
             content: blocks,
-            stopReason: (message?.tool_calls?.isEmpty == false) ? .toolUse : stop,
+            stopReason: stopReason(),
             usage: usage()
         )
     }
@@ -299,8 +305,7 @@ private struct WireResponse: Decodable {
             result.append(.toolUseStop(id: id))
         }
         if done == true {
-            let hasTools = message?.tool_calls?.isEmpty == false
-            result.append(.stop(hasTools ? .toolUse : stopReason()))
+            result.append(.stop(stopReason()))
             result.append(.usage(usage()))
         }
         return result

@@ -58,3 +58,11 @@ public struct IterationLimitExceeded: Error, Sendable {
     public let limit: Int
     public init(limit: Int) { self.limit = limit }
 }
+
+/// Raised when a turn exceeds `Orchestrator.Options.maxTurnDuration`. Aborts
+/// rather than letting transient-classified timeouts retry past the budget.
+public struct TurnDeadlineExceeded: Error, Sendable {
+    /// The configured budget, in seconds.
+    public let budget: TimeInterval
+    public init(budget: TimeInterval) { self.budget = budget }
+}

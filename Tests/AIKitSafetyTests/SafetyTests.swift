@@ -62,6 +62,19 @@ import AIKitCapability
         #expect(await rail.evaluate(.preToolUse(call)) == .pass)
     }
 
+    /// REVIEW2 finding **D**: detection runs per string, like the rewriter.
+    /// Two clean fields that would only match if joined must not be detected,
+    /// so redact-mode no longer falsely blocks "…still contains PII".
+    @Test func piiRedactorRedactModeNoFalseBlockAcrossFields() async {
+        let rail = PIIRedactor(mode: .redact)
+        let payload = GuardrailPayload.preToolUse(ToolCall(
+            name: "setProfile",
+            input: .object(["a": .string("1234"), "b": .string("567890")])
+        ))
+        #expect(await rail.rewrite(payload) == nil)
+        #expect(await rail.evaluate(payload) == .pass)
+    }
+
     @Test func piiRedactorRedactModeLeavesCleanInputUntouched() async {
         let rail = PIIRedactor(mode: .redact)
         let clean = GuardrailPayload.preToolUse(ToolCall(

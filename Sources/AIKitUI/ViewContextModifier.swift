@@ -20,11 +20,14 @@ private struct AIContextModifier: ViewModifier {
 
     func body(content: Content) -> some View {
         content
-            // `.task(id:)` runs on appear and is cancelled on disappear or when
-            // the context id changes. Pushing here and popping the exact token
-            // when the task ends keeps push/pop balanced even with two live
-            // views sharing an id.
-            .task(id: context.id) {
+            // `.task(id:)` runs on appear and is cancelled on disappear or
+            // when the keyed value changes. Keying on the whole `context`
+            // (not just `context.id`) means mutating `systemPromptFragment`
+            // or `toolNames` while keeping the same id re-pushes a fresh
+            // frame instead of stranding the stale one. Pushing here and
+            // popping the exact token when the task ends keeps push/pop
+            // balanced even with two live views sharing an id.
+            .task(id: context) {
                 let token = await resolver.push(context)
                 do {
                     // Park until the task is cancelled (view disappeared or

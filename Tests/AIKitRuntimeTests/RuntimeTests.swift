@@ -311,3 +311,172 @@ private actor SeenInput {
     private(set) var value: String?
     func record(_ v: String) { value = v }
 }
+
+/// Always sleeps before answering, so a turn deadline must interrupt it.
+private final class SlowProvider: LLMProvider, @unchecked Sendable {
+    let defaultModel = "slow"
+    private let delay: Duration
+    init(delay: Duration) { self.delay = delay }
+
+    func complete(_ request: LLMRequest) async throws -> LLMResponse {
+        try await Task.sleep(for: delay)
+        return LLMResponse(content: [.text("late")], stopReason: .endTurn)
+    }
+
+    func stream(
+        _ request: LLMRequest
+    ) -> AsyncThrowingStream<LLMResponseChunk, any Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task {
+                do {
+                    try await Task.sleep(for: delay)
+                    continuation.yield(.textDelta("late"))
+                    continuation.yield(.stop(.endTurn))
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+}
+
+@Suite struct FallbackTranscriptTests {
+    /// REVIEW2 finding **A**: a fenced-fallback recovery must be recorded as a
+    /// structured `tool_use` block, with the following `tool_result` carrying
+    /// the matching id — not the raw JSON as assistant text.
+    @Test func fencedFallbackRecordsStructuredToolUse() async throws {
+        let registry = ToolRegistry()
+        await registry.register(NavigateTool { input, _ in
+            .init(navigated: input.destination == "settings")
+        })
+        let resolver = ContextResolver()
+        await resolver.push(ViewContext(
+            id: .init("home"), displayName: "Home",
+            systemPromptFragment: "You can navigate.", toolNames: ["navigate"]
+        ))
+        let fenced = "Working on it.\n```tool\n"
+            + "{\"name\":\"navigate\",\"input\":{\"destination\":\"settings\"}}\n```"
+        let provider = MockProvider(responses: [
+            LLMResponse(content: [.text(fenced)], stopReason: .endTurn),
+            LLMResponse(content: [.text("Done.")], stopReason: .endTurn),
+        ])
+        let orchestrator = Orchestrator(
+            llm: LLMClient(provider: provider),
+            tools: registry,
+            memory: InMemoryMemoryStore(),
+            contextResolver: resolver,
+            guardrails: PolicyEngine(),
+            options: .init(model: "test", stream: false, toolCallFallback: true)
+        )
+
+        var toolCalled = false
+        var final: String?
+        for try await event in await orchestrator.run("go to settings") {
+            if case .toolCall(let n, _) = event { toolCalled = (n == "navigate") }
+            if case .finalAnswer(let t) = event { final = t }
+            if case .error(let e) = event { Issue.record("unexpected: \(e)") }
+        }
+        #expect(toolCalled)
+        #expect(final == "Done.")
+
+        let second = try #require(provider.receivedRequests.dropFirst().first)
+        let assistant = try #require(second.messages.first { $0.role == .assistant })
+        let toolUseID = try #require(assistant.content.compactMap { block -> String? in
+            if case .toolUse(let id, let name, _) = block, name == "navigate" {
+                return id
+            }
+            return nil
+        }.first)
+        #expect(!toolUseID.isEmpty)
+        // The raw fenced JSON must not survive as assistant text.
+        #expect(!assistant.content.contains { block in
+            if case .text(let t) = block { return t.contains("```tool") }
+            return false
+        })
+        let toolMessage = try #require(second.messages.first { $0.role == .tool })
+        let resultID = try #require(toolMessage.content.compactMap { block -> String? in
+            if case .toolResult(let id, _, _) = block { return id }
+            return nil
+        }.first)
+        #expect(resultID == toolUseID)
+    }
+
+    /// REVIEW2 finding **B**: the fenced-fallback prompt instruction is gated
+    /// on provider capability when `toolCallFallback` is left unset.
+    @Test func fallbackHintGatedByProviderCapability() async throws {
+        func systemPrompt(nativeTools: Bool) async throws -> String {
+            let resolver = ContextResolver()
+            await resolver.push(ViewContext(
+                id: .init("v"), displayName: "V", toolNames: ["navigate"]
+            ))
+            let registry = ToolRegistry()
+            await registry.register(NavigateTool { _, _ in .init(navigated: true) })
+            let provider = MockProvider(
+                responses: [LLMResponse(content: [.text("ok")], stopReason: .endTurn)],
+                supportsNativeTools: nativeTools
+            )
+            let orchestrator = Orchestrator(
+                llm: LLMClient(provider: provider),
+                tools: registry,
+                memory: InMemoryMemoryStore(),
+                contextResolver: resolver,
+                guardrails: PolicyEngine(),
+                options: .init(model: "test", stream: false)
+            )
+            for try await _ in await orchestrator.run("hi") {}
+            return try #require(provider.receivedRequests.first?.system)
+        }
+        let native = try await systemPrompt(nativeTools: true)
+        let local = try await systemPrompt(nativeTools: false)
+        #expect(!native.contains(PromptBuilder.toolFallbackInstruction))
+        #expect(local.contains(PromptBuilder.toolFallbackInstruction))
+    }
+}
+
+@Suite struct TurnDeadlineTests {
+    /// REVIEW2 finding **E**: a zero budget aborts before any work.
+    @Test func zeroBudgetAbortsImmediately() async throws {
+        let resolver = ContextResolver()
+        await resolver.push(ViewContext(id: .init("v"), displayName: "V"))
+        let orchestrator = Orchestrator(
+            llm: LLMClient(provider: MockProvider(finalText: "hi")),
+            tools: ToolRegistry(),
+            memory: InMemoryMemoryStore(),
+            contextResolver: resolver,
+            guardrails: PolicyEngine(),
+            options: .init(model: "test", stream: false, maxTurnDuration: 0)
+        )
+        var caught: (any Error)?
+        var final: String?
+        for try await event in await orchestrator.run("hi") {
+            if case .error(let e) = event { caught = e }
+            if case .finalAnswer(let t) = event { final = t }
+        }
+        #expect(caught is TurnDeadlineExceeded)
+        #expect(final == nil)
+    }
+
+    /// The deadline must interrupt an in-flight slow call, not wait it out.
+    @Test func deadlineInterruptsSlowCall() async throws {
+        let resolver = ContextResolver()
+        await resolver.push(ViewContext(id: .init("v"), displayName: "V"))
+        let orchestrator = Orchestrator(
+            llm: LLMClient(provider: SlowProvider(delay: .seconds(5))),
+            tools: ToolRegistry(),
+            memory: InMemoryMemoryStore(),
+            contextResolver: resolver,
+            guardrails: PolicyEngine(),
+            options: .init(model: "test", stream: false, maxTurnDuration: 0.2)
+        )
+        let start = ContinuousClock.now
+        var caught: (any Error)?
+        for try await event in await orchestrator.run("hi") {
+            if case .error(let e) = event { caught = e }
+        }
+        let elapsed = ContinuousClock.now - start
+        #expect(caught is TurnDeadlineExceeded)
+        #expect(elapsed < .seconds(3))
+    }
+}
