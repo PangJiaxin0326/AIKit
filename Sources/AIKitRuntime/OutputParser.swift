@@ -31,6 +31,10 @@ public enum OutputParser {
             switch block {
             case .text(let value):
                 text += value
+            case .reasoning:
+                // Not part of the parsed intent; the Orchestrator surfaces it
+                // separately as a reasoning event.
+                continue
             case .toolUse(let id, let name, let input):
                 // A tool_use block whose input failed to decode upstream is
                 // surfaced so the ErrorHandler can re-prompt.
@@ -63,6 +67,43 @@ public enum OutputParser {
         case (false, false):
             return .mixed(text: trimmed, toolCalls: calls)
         }
+    }
+
+    // MARK: - Near-miss diagnostic
+
+    // Any fenced block plus its (possibly empty) info string. Used only to
+    // *detect* a mis-tagged tool call for a diagnostic — never to recover one,
+    // since acting on bare / ```json fences would derail legitimate answers
+    // that merely contain fenced JSON.
+    private static let nearMissRegex = try? NSRegularExpression(
+        pattern: "```[ \\t]*([A-Za-z0-9_+.\\-]*)[ \\t]*\\r?\\n(.*?)```",
+        options: [.dotMatchesLineSeparators]
+    )
+
+    /// `true` when the text holds a fenced block that decodes as a tool call
+    /// but is *not* tagged ```` ```tool ```` (commonly ```` ```json ````). The
+    /// Orchestrator surfaces this as a warning when the fallback is active and
+    /// nothing was recovered, so a near-miss isn't silently delivered as the
+    /// final answer with no signal.
+    public static func nearMissFencedToolBlock(in text: String) -> Bool {
+        guard let regex = nearMissRegex else { return false }
+        let range = NSRange(text.startIndex..., in: text)
+        for match in regex.matches(in: text, range: range) {
+            guard let tagRange = Range(match.range(at: 1), in: text),
+                  let bodyRange = Range(match.range(at: 2), in: text)
+            else { continue }
+            if text[tagRange].lowercased() == "tool" { continue }
+            let body = String(text[bodyRange])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard body.contains("\"name\"") || body.contains("\"tool\"")
+            else { continue }
+            if let data = body.data(using: .utf8),
+               let spec = try? JSONDecoder().decode(FencedSpec.self, from: data),
+               let name = spec.resolvedName, !name.isEmpty {
+                return true
+            }
+        }
+        return false
     }
 
     // MARK: - Fenced tool-call fallback

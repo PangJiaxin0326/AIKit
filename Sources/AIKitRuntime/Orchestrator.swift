@@ -8,6 +8,10 @@ import AIKitSafety
 public enum OrchestratorEvent: Sendable {
     case promptBuilt(RenderedPrompt)
     case llmDelta(String)
+    /// A chunk of model reasoning / chain-of-thought. Streaming emits these
+    /// incrementally; non-streaming emits one with the whole reasoning text.
+    /// Empty when the model or provider produced no reasoning.
+    case reasoningDelta(String)
     case toolCall(name: String, input: Data)
     case toolResult(name: String, output: Data)
     case verification(stage: Verifier.Stage, outcome: Verifier.Outcome)
@@ -35,6 +39,11 @@ public actor Orchestrator {
         /// is classified transient and retried `maxAttempts` times, costing
         /// ≈ N × timeout before aborting; with a budget set the turn aborts
         /// with `TurnDeadlineExceeded` instead of stacking slow failures.
+        ///
+        /// The budget races every blocking await in the turn — LLM calls,
+        /// guardrail passes, and tool invocations — so a hung tool or a slow
+        /// rail can't overrun it; it is a hard wall-clock cap, not just a
+        /// per-iteration-boundary check.
         public var maxTurnDuration: TimeInterval?
         public var memoryWindow: Int
         public var temperature: Double?
@@ -172,7 +181,9 @@ public actor Orchestrator {
                 let rendered = RenderedPrompt(request: request, toolNames: context.toolNames)
                 emit(.promptBuilt(rendered))
 
-                let warnings = try await guardrails.verify(.prePrompt, .prePrompt(rendered))
+                let warnings = try await withTurnDeadline(deadline) {
+                    try await self.guardrails.verify(.prePrompt, .prePrompt(rendered))
+                }
                 for warning in warnings {
                     emit(.verification(stage: .prePrompt, outcome: .warn(reason: warning)))
                 }
@@ -181,13 +192,35 @@ public actor Orchestrator {
                     try await self.callLLM(request, emit: emit)
                 }
                 emit(.usage(response.usage))
+                // Streaming already emitted reasoning incrementally inside
+                // `callLLM`; for one-shot calls surface it once here.
+                if !options.stream {
+                    let reasoning = response.reasoning
+                    if !reasoning.isEmpty { emit(.reasoningDelta(reasoning)) }
+                }
                 let parsed = try OutputParser.parse(
                     response, allowToolCallFallback: useFallback
                 )
 
                 switch parsed {
                 case .final(let text):
-                    try await guardrails.verify(.finalResult, .finalResult(text))
+                    // A model coached only by the generic fallback instruction
+                    // sometimes fences a tool call as ```json instead of
+                    // ```tool. It can't be recovered (that would derail real
+                    // answers), but flag it so it isn't delivered silently.
+                    if useFallback, OutputParser.nearMissFencedToolBlock(in: text) {
+                        emit(.verification(stage: .finalResult, outcome: .warn(
+                            reason: "Response contains a fenced JSON block that "
+                                + "looks like a tool call but is not tagged "
+                                + "`tool`; delivered as the final answer instead "
+                                + "of being executed."
+                        )))
+                    }
+                    _ = try await withTurnDeadline(deadline) {
+                        try await self.guardrails.verify(
+                            .finalResult, .finalResult(text)
+                        )
+                    }
                     emit(.verification(stage: .finalResult, outcome: .pass))
                     try? await memory.append(UsageEvent(
                         viewID: viewID, kind: .llmResponse, text: text
@@ -200,7 +233,8 @@ public actor Orchestrator {
                     transcript.append(entry)
                     for call in resolved {
                         try await execute(
-                            call, viewID: viewID, transcript: &transcript, emit: emit
+                            call, viewID: viewID, deadline: deadline,
+                            transcript: &transcript, emit: emit
                         )
                     }
 
@@ -215,7 +249,8 @@ public actor Orchestrator {
                     transcript.append(entry)
                     for call in resolved {
                         try await execute(
-                            call, viewID: viewID, transcript: &transcript, emit: emit
+                            call, viewID: viewID, deadline: deadline,
+                            transcript: &transcript, emit: emit
                         )
                     }
                 }
@@ -276,14 +311,16 @@ public actor Orchestrator {
     private func execute(
         _ call: ToolCall,
         viewID: ViewContext.ID,
+        deadline: ContinuousClock.Instant?,
         transcript: inout [TranscriptEntry],
         emit: @Sendable (OrchestratorEvent) -> Void
     ) async throws {
         // `resolve` runs payload-rewriting rails (e.g. PIIRedactor in redact
         // mode) before the block checks, so the tool sees the sanitized input.
-        let (resolvedPayload, warnings) = try await guardrails.resolve(
-            .preToolUse, .preToolUse(call)
-        )
+        // Raced against the turn budget so a slow rail can't overrun it.
+        let (resolvedPayload, warnings) = try await withTurnDeadline(deadline) {
+            try await self.guardrails.resolve(.preToolUse, .preToolUse(call))
+        }
         for warning in warnings {
             emit(.verification(stage: .preToolUse, outcome: .warn(reason: warning)))
         }
@@ -305,19 +342,25 @@ public actor Orchestrator {
         let context = ToolContext(viewID: viewID, memory: memory, logger: logger)
         let output: Data
         do {
-            output = try await tools.invoke(
-                name: effectiveCall.name, jsonInput: inputData, context: context
-            )
+            // A hung or slow tool must not be able to overrun the turn budget,
+            // so the invocation is raced against the deadline too.
+            output = try await withTurnDeadline(deadline) {
+                try await self.tools.invoke(
+                    name: effectiveCall.name, jsonInput: inputData, context: context
+                )
+            }
         } catch {
             // Surface to the catch-site classifier (tool-retriable, fatal, …).
             throw error
         }
 
         let isError = false
-        try await guardrails.verify(
-            .postToolUse,
-            .postToolUse(name: effectiveCall.name, output: output, isError: isError)
-        )
+        _ = try await withTurnDeadline(deadline) {
+            try await self.guardrails.verify(
+                .postToolUse,
+                .postToolUse(name: effectiveCall.name, output: output, isError: isError)
+            )
+        }
         emit(.verification(stage: .postToolUse, outcome: .pass))
         emit(.toolResult(name: effectiveCall.name, output: output))
         try? await memory.append(UsageEvent(
@@ -372,6 +415,7 @@ public actor Orchestrator {
             return try await llm.complete(request)
         }
         var text = ""
+        var reasoning = ""
         var toolBlocks: [(id: String, name: String, json: String)] = []
         var stopReason: StopReason = .endTurn
         var usage = TokenUsage.zero
@@ -385,6 +429,9 @@ public actor Orchestrator {
             case .textDelta(let delta):
                 text += delta
                 emit(.llmDelta(delta))
+            case .reasoningDelta(let delta):
+                reasoning += delta
+                emit(.reasoningDelta(delta))
             case .toolUseStart(let id, let name):
                 toolBlocks.append((id, name, ""))
             case .toolUseInputDelta(let id, let json):
@@ -409,6 +456,7 @@ public actor Orchestrator {
         }
 
         var blocks: [ContentBlock] = []
+        if !reasoning.isEmpty { blocks.append(.reasoning(reasoning)) }
         if !text.isEmpty { blocks.append(.text(text)) }
         for tool in toolBlocks {
             let input: JSONValue

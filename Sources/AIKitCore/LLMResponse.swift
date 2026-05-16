@@ -21,6 +21,12 @@ public struct LLMResponse: Sendable, Codable, Hashable {
         content.compactMap(\.text).joined()
     }
 
+    /// Concatenated text of all `.reasoning` blocks (empty when the model or
+    /// provider emitted none).
+    public var reasoning: String {
+        content.compactMap(\.reasoning).joined()
+    }
+
     /// All `.toolUse` blocks in order.
     public var toolUses: [(id: String, name: String, input: JSONValue)] {
         content.compactMap { block in
@@ -35,6 +41,8 @@ public struct LLMResponse: Sendable, Codable, Hashable {
 /// An incremental chunk emitted by a streaming completion.
 public enum LLMResponseChunk: Sendable, Hashable {
     case textDelta(String)
+    /// An incremental chunk of model reasoning / chain-of-thought.
+    case reasoningDelta(String)
     case toolUseStart(id: String, name: String)
     case toolUseInputDelta(id: String, json: String)
     case toolUseStop(id: String)

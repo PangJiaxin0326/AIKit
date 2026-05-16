@@ -35,12 +35,25 @@ public protocol LLMProvider: Sendable {
     /// Runtime resolve a single source of truth for "which model".
     var defaultModel: String { get }
 
-    /// Whether this provider speaks a native function-calling protocol
-    /// (Anthropic tool_use, OpenAI/Ollama tool_calls). When `false`, the
-    /// Runtime injects the fenced-```tool``` fallback instruction and parses
-    /// it back; when `true` it leaves it out so the model isn't prompted to
-    /// emit both a native call and a redundant fenced block. Defaults to
-    /// `true`; a host wrapping a tool-less local model can override it.
+    /// Whether the Runtime can rely on native function calling for **every**
+    /// model this provider serves.
+    ///
+    /// This is deliberately a guarantee, not a "the wire protocol has a
+    /// `tool_calls` field" flag. When `true` the Runtime omits the
+    /// fenced-```tool``` fallback (instruction + recovery parsing) so a
+    /// native-capable model isn't prompted to emit both a native call and a
+    /// redundant fenced block. When `false` it enables the fallback, which is
+    /// purely *additive*: it only fires when a response carries no native tool
+    /// call **and** contains a fenced block, so a native-capable model behind a
+    /// `false` provider is unaffected.
+    ///
+    /// Because the fallback is additive, a provider whose tool support varies
+    /// **per model** (Ollama: `llama3.1` calls tools natively, `gemma`/`phi`
+    /// don't) must report `false` — it cannot truthfully guarantee native tool
+    /// calling for an arbitrary model. Reporting `true` there silently breaks
+    /// tool use for every tool-less local model under the default
+    /// auto-resolution. Defaults to `true` for providers that target a fixed
+    /// API contract (Anthropic, OpenAI).
     var supportsNativeTools: Bool { get }
 
     func complete(_ request: LLMRequest) async throws -> LLMResponse

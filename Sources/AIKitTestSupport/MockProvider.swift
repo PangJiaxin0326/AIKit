@@ -69,6 +69,8 @@ public final class MockProvider: LLMProvider, @unchecked Sendable {
                     switch block {
                     case .text(let text):
                         continuation.yield(.textDelta(text))
+                    case .reasoning(let text):
+                        continuation.yield(.reasoningDelta(text))
                     case .toolUse(let id, let name, let input):
                         continuation.yield(.toolUseStart(id: id, name: name))
                         if let data = try? input.data(),

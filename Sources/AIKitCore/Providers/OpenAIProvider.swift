@@ -254,6 +254,9 @@ private struct WireResponse: Decodable {
     struct Choice: Decodable {
         struct Msg: Decodable {
             let content: String?
+            // Reasoning models behind the Chat Completions shim (DeepSeek-R1,
+            // QwQ, Ollama's `/v1`) put chain-of-thought here.
+            let reasoning_content: String?
             let tool_calls: [WireToolCall]?
         }
         let message: Msg
@@ -271,6 +274,9 @@ private struct WireResponse: Decodable {
             throw LLMError.decodingFailed("no choices in response")
         }
         var blocks: [ContentBlock] = []
+        if let reasoning = choice.message.reasoning_content, !reasoning.isEmpty {
+            blocks.append(.reasoning(reasoning))
+        }
         if let text = choice.message.content, !text.isEmpty {
             blocks.append(.text(text))
         }
@@ -312,6 +318,7 @@ private struct StreamEvent: Decodable {
     struct Choice: Decodable {
         struct Delta: Decodable {
             let content: String?
+            let reasoning_content: String?
             let tool_calls: [WireToolCall]?
         }
         let delta: Delta
@@ -339,6 +346,9 @@ private struct StreamEvent: Decodable {
     func chunks(activeToolIDs: inout [Int: String]) -> [LLMResponseChunk] {
         var result: [LLMResponseChunk] = []
         for choice in choices {
+            if let reasoning = choice.delta.reasoning_content, !reasoning.isEmpty {
+                result.append(.reasoningDelta(reasoning))
+            }
             if let text = choice.delta.content, !text.isEmpty {
                 result.append(.textDelta(text))
             }

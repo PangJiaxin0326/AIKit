@@ -151,18 +151,25 @@ private struct WireRequest: Encodable {
         if let system = request.system { systemParts.append(system) }
         var wireMessages: [WireMessage] = []
         for message in request.messages {
+            // Reasoning blocks are never sent back to a provider; the
+            // Orchestrator already strips them when rebuilding assistant turns,
+            // but filter defensively so a hand-built message can't leak CoT.
+            let blocks = message.content.filter {
+                if case .reasoning = $0 { return false }
+                return true
+            }
             switch message.role {
             case .system:
                 systemParts.append(message.plainText)
             case .user, .assistant:
                 wireMessages.append(WireMessage(
                     role: message.role == .assistant ? "assistant" : "user",
-                    content: message.content.map(WireContent.init)
+                    content: blocks.map(WireContent.init)
                 ))
             case .tool:
                 wireMessages.append(WireMessage(
                     role: "user",
-                    content: message.content.map(WireContent.init)
+                    content: blocks.map(WireContent.init)
                 ))
             }
         }
@@ -192,6 +199,12 @@ private struct WireContent: Encodable {
         var container = encoder.container(keyedBy: CodingKeys.self)
         switch block {
         case .text(let text):
+            try container.encode("text", forKey: .type)
+            try container.encode(text, forKey: .text)
+        case .reasoning(let text):
+            // Unreachable: reasoning is filtered out before wire mapping.
+            // Encoded as text so the switch stays total and a future caller
+            // can't silently drop content.
             try container.encode("text", forKey: .type)
             try container.encode(text, forKey: .text)
         case .toolUse(let id, let name, let input):
@@ -224,6 +237,7 @@ private struct WireResponse: Decodable {
     struct Block: Decodable {
         let type: String
         let text: String?
+        let thinking: String?
         let id: String?
         let name: String?
         let input: JSONValue?
@@ -241,6 +255,8 @@ private struct WireResponse: Decodable {
             switch block.type {
             case "text":
                 return .text(block.text ?? "")
+            case "thinking", "redacted_thinking":
+                return .reasoning(block.thinking ?? block.text ?? "")
             case "tool_use":
                 return .toolUse(
                     id: block.id ?? "",
@@ -275,6 +291,7 @@ private struct StreamEvent: Decodable {
     struct Delta: Decodable {
         let type: String?
         let text: String?
+        let thinking: String?
         let partial_json: String?
         let stop_reason: String?
     }
@@ -322,6 +339,9 @@ private struct StreamEvent: Decodable {
         case "content_block_delta":
             if let text = delta?.text {
                 return [.textDelta(text)]
+            }
+            if let thinking = delta?.thinking {
+                return [.reasoningDelta(thinking)]
             }
             if let json = delta?.partial_json {
                 return [.toolUseInputDelta(id: String(index ?? 0), json: json)]

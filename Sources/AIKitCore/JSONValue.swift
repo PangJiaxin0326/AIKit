@@ -10,8 +10,14 @@ import Foundation
 /// integer (`num_ctx`, `seed`, `top_k`, `num_predict`). Construct `.int` (or
 /// use an integer literal) for those `extraBody` knobs so the wire encoder
 /// emits `4096`, not `4096.0`. Decoding never yields `.int` — every JSON
-/// number decodes as `.number(Double)` so round-tripping stays lossless and
-/// equality stays predictable; `.int` is purely an output-fidelity affordance.
+/// number decodes as `.number(Double)` so round-tripping stays lossless;
+/// `.int` is purely an output-fidelity affordance.
+///
+/// Equality and hashing are **numerically canonical**: a constructed `.int(5)`
+/// compares equal to and hashes the same as a decoded `.number(5.0)`, so
+/// comparing a hand-built input against a round-tripped one (caches, dedupe,
+/// test assertions, `LLMRequest`/`ToolCall` equality) does not spuriously
+/// mismatch. A `.number` that is not an exact whole number stays distinct.
 public enum JSONValue: Sendable, Hashable, Codable {
     case null
     case bool(Bool)
@@ -99,6 +105,76 @@ extension JSONValue {
         case .array(let values): return values.flatMap(\.allStrings)
         case .object(let object): return object.values.flatMap(\.allStrings)
         case .null, .bool, .int, .number: return []
+        }
+    }
+}
+
+// MARK: - Numerically canonical Equatable / Hashable
+
+extension JSONValue {
+    /// `Int` view of a `Double` that is exactly a whole number within `Int`
+    /// range. This is the bridge that lets `.int(5)` and a decoded
+    /// `.number(5.0)` compare and hash alike. Returns `nil` for fractional,
+    /// NaN, infinite, or out-of-range values so those stay distinct.
+    private static func integral(_ value: Double) -> Int? {
+        guard value.isFinite, value.rounded() == value,
+              value >= Double(Int.min), value < Double(Int.max)
+        else { return nil }
+        return Int(value)
+    }
+
+    public static func == (lhs: JSONValue, rhs: JSONValue) -> Bool {
+        switch (lhs, rhs) {
+        case (.null, .null):
+            return true
+        case let (.bool(a), .bool(b)):
+            return a == b
+        case let (.string(a), .string(b)):
+            return a == b
+        case let (.array(a), .array(b)):
+            return a == b
+        case let (.object(a), .object(b)):
+            return a == b
+        case let (.int(a), .int(b)):
+            return a == b
+        case let (.number(a), .number(b)):
+            return a == b
+        case let (.int(a), .number(b)), let (.number(b), .int(a)):
+            return Self.integral(b) == a
+        default:
+            return false
+        }
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        switch self {
+        case .null:
+            hasher.combine(0)
+        case .bool(let value):
+            hasher.combine(1)
+            hasher.combine(value)
+        case .int(let value):
+            hasher.combine(2)
+            hasher.combine(value)
+        case .number(let value):
+            // Whole numbers hash in the same bucket as `.int` so equal values
+            // never land in different buckets.
+            if let int = Self.integral(value) {
+                hasher.combine(2)
+                hasher.combine(int)
+            } else {
+                hasher.combine(3)
+                hasher.combine(value)
+            }
+        case .string(let value):
+            hasher.combine(4)
+            hasher.combine(value)
+        case .array(let value):
+            hasher.combine(5)
+            hasher.combine(value)
+        case .object(let value):
+            hasher.combine(6)
+            hasher.combine(value)
         }
     }
 }

@@ -11,11 +11,21 @@ public enum Role: String, Sendable, Codable, Hashable {
 /// A single block of content within a message or response.
 public enum ContentBlock: Sendable, Codable, Hashable {
     case text(String)
+    /// Model-emitted chain-of-thought / reasoning (Ollama `thinking`, OpenAI
+    /// `reasoning_content`, Anthropic extended-thinking blocks). Surfaced so a
+    /// host can show or log it; never re-sent to a provider (the Orchestrator
+    /// rebuilds assistant turns from final text + tool calls only).
+    case reasoning(String)
     case toolUse(id: String, name: String, input: JSONValue)
     case toolResult(toolUseID: String, content: String, isError: Bool)
 
     public var text: String? {
         if case .text(let value) = self { return value }
+        return nil
+    }
+
+    public var reasoning: String? {
+        if case .reasoning(let value) = self { return value }
         return nil
     }
 }

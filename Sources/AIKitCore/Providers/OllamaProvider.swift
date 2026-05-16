@@ -18,6 +18,17 @@ public struct OllamaProvider: LLMProvider {
 
     public var defaultModel: String { configuration.defaultModel }
 
+    /// Ollama tool support is a property of the *model*, not the endpoint:
+    /// `llama3.1` emits native `tool_calls`, but `gemma`, `phi`, and most older
+    /// tags emit neither `tool_calls` nor a fenced block. A single
+    /// provider-level boolean can't express that, so this reports `false`: the
+    /// Runtime then enables the fenced-`tool` fallback by default, which is
+    /// additive (it only fires when there is no native call and a fenced block
+    /// is present), so native-capable models are unaffected while tool-less
+    /// ones still work. A host that knows its model calls tools natively can
+    /// pin `Orchestrator.Options.toolCallFallback = false` to opt out.
+    public var supportsNativeTools: Bool { false }
+
     public init(configuration: LLMProviderConfiguration) {
         self.configuration = configuration
     }
@@ -236,6 +247,9 @@ private struct WireResponse: Decodable {
             let function: Function
         }
         let content: String?
+        // Reasoning-capable local models (gemma, qwq, deepseek-r1, …) return
+        // chain-of-thought here alongside `content` on `/api/chat`.
+        let thinking: String?
         let tool_calls: [ToolCall]?
     }
     let message: WireMessage?
@@ -268,6 +282,9 @@ private struct WireResponse: Decodable {
 
     func toResponse() -> LLMResponse {
         var blocks: [ContentBlock] = []
+        if let thinking = message?.thinking, !thinking.isEmpty {
+            blocks.append(.reasoning(thinking))
+        }
         if let text = message?.content, !text.isEmpty {
             blocks.append(.text(text))
         }
@@ -290,6 +307,9 @@ private struct WireResponse: Decodable {
     /// in one go.
     func chunks(toolIndex: inout Int) -> [LLMResponseChunk] {
         var result: [LLMResponseChunk] = []
+        if let thinking = message?.thinking, !thinking.isEmpty {
+            result.append(.reasoningDelta(thinking))
+        }
         if let text = message?.content, !text.isEmpty {
             result.append(.textDelta(text))
         }

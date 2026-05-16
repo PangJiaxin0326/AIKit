@@ -44,10 +44,62 @@ import AIKitTestSupport
     }
 
     @Test func numbersStillDecodeAsNumberForLosslessRoundTrip() throws {
-        // Decoding never yields `.int`; whole-number doubles stay `.number`
-        // so existing equality/round-trip semantics are unchanged.
+        // Decoding never yields `.int`; whole-number doubles stay `.number`.
         let decoded = try JSONValue(data: Data("{\"n\":3}".utf8))
         #expect(decoded == .object(["n": .number(3)]))
+    }
+
+    /// REVIEW3 finding **#4**: a constructed `.int` and a decoded whole-number
+    /// `.number` must compare and hash alike, recursively.
+    @Test func canonicalNumericEquality() throws {
+        #expect(JSONValue.int(5) == JSONValue.number(5.0))
+        #expect(JSONValue.number(5.0) == JSONValue.int(5))
+        #expect(JSONValue.number(-0.0) == JSONValue.int(0))
+        #expect(JSONValue.int(5) != JSONValue.number(5.5))
+        #expect(JSONValue.int(5) != JSONValue.number(6.0))
+
+        let built: JSONValue = .object(["a": .array([.int(1), .int(2)])])
+        let decoded = try JSONValue(data: Data("{\"a\":[1,2]}".utf8))
+        #expect(built == decoded)
+    }
+
+    @Test func canonicalNumericHashing() {
+        #expect(JSONValue.int(5).hashValue == JSONValue.number(5.0).hashValue)
+        var set: Set<JSONValue> = [.int(4096)]
+        #expect(set.contains(.number(4096.0)))
+        set.insert(.number(4096.0))
+        #expect(set.count == 1)
+    }
+
+    /// The exact footgun: a hand-built request vs. one whose `extraBody`
+    /// numbers came back through a JSON round-trip.
+    @Test func requestEqualityAcrossIntAndNumber() {
+        let built = LLMRequest(model: "m", extraBody: ["num_ctx": .int(4096)])
+        let decoded = LLMRequest(model: "m", extraBody: ["num_ctx": .number(4096)])
+        #expect(built == decoded)
+        #expect(built.hashValue == decoded.hashValue)
+    }
+
+    /// Non-finite / out-of-range doubles must stay distinct and never trap.
+    @Test func nonFiniteNumbersAreSafe() {
+        #expect(JSONValue.number(.nan) != JSONValue.int(0))
+        #expect(JSONValue.number(.infinity) != JSONValue.int(0))
+        #expect(JSONValue.number(1e30) != JSONValue.int(0))
+        _ = JSONValue.number(.infinity).hashValue
+        _ = JSONValue.number(.nan).hashValue
+        _ = JSONValue.number(1e30).hashValue
+    }
+}
+
+@Suite struct ProviderCapabilityTests {
+    /// REVIEW3 finding **#1**: Ollama tool support is per-model, so the
+    /// provider cannot guarantee native tool calling and must report `false`
+    /// (which makes the additive fenced fallback the default). Fixed-contract
+    /// providers still report `true`.
+    @Test func nativeToolGuarantees() {
+        #expect(OllamaProvider().supportsNativeTools == false)
+        #expect(AnthropicProvider(apiKey: "k").supportsNativeTools == true)
+        #expect(OpenAIProvider(apiKey: "k").supportsNativeTools == true)
     }
 }
 
@@ -240,6 +292,80 @@ import AIKitTestSupport
         )
         #expect(response.stopReason == .toolUse)
         #expect(response.toolUses.first?.name == "navigate")
+    }
+
+    /// REVIEW3 finding **#3**: reasoning / chain-of-thought must be decoded
+    /// and exposed, not silently dropped.
+    @Test func anthropicDecodesThinkingBlock() async throws {
+        let body = """
+        {"content":[{"type":"thinking","thinking":"let me think"},\
+        {"type":"text","text":"answer"}],"stop_reason":"end_turn"}
+        """.data(using: .utf8)!
+        URLProtocolStub.setStub(.init(body: body))
+        let provider = AnthropicProvider(
+            apiKey: "k", session: URLProtocolStub.makeSession()
+        )
+        let response = try await provider.complete(
+            LLMRequest(model: "claude-opus-4-7")
+        )
+        #expect(response.reasoning == "let me think")
+        #expect(response.text == "answer")
+    }
+
+    @Test func ollamaDecodesThinking() async throws {
+        let body = """
+        {"model":"qwq","message":{"role":"assistant","content":"final",\
+        "thinking":"reasoned"},"done":true,"done_reason":"stop"}
+        """.data(using: .utf8)!
+        URLProtocolStub.setStub(.init(body: body))
+        let provider = OllamaProvider(session: URLProtocolStub.makeSession())
+        let response = try await provider.complete(LLMRequest(model: "qwq"))
+        #expect(response.reasoning == "reasoned")
+        #expect(response.text == "final")
+    }
+
+    @Test func openAIDecodesReasoningContent() async throws {
+        let body = """
+        {"choices":[{"message":{"content":"ans","reasoning_content":"cot"},\
+        "finish_reason":"stop"}]}
+        """.data(using: .utf8)!
+        URLProtocolStub.setStub(.init(body: body))
+        let provider = OpenAIProvider(
+            apiKey: "k", session: URLProtocolStub.makeSession()
+        )
+        let response = try await provider.complete(LLMRequest(model: "deepseek-r1"))
+        #expect(response.reasoning == "cot")
+        #expect(response.text == "ans")
+    }
+
+    @Test func anthropicStreamsThinkingDelta() async throws {
+        let sse = """
+        data: {"type":"content_block_delta","index":0,\
+        "delta":{"type":"thinking_delta","thinking":"hmm "}}
+
+        data: {"type":"content_block_delta","index":0,\
+        "delta":{"type":"thinking_delta","thinking":"ok"}}
+
+        data: {"type":"content_block_delta","index":1,\
+        "delta":{"type":"text_delta","text":"answer"}}
+
+        data: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}
+        """.data(using: .utf8)!
+        URLProtocolStub.setStub(.init(body: sse))
+        let provider = AnthropicProvider(
+            apiKey: "k", session: URLProtocolStub.makeSession()
+        )
+        var reasoning = ""
+        var text = ""
+        for try await chunk in provider.stream(LLMRequest(model: "claude-opus-4-7")) {
+            switch chunk {
+            case .reasoningDelta(let d): reasoning += d
+            case .textDelta(let d): text += d
+            default: break
+            }
+        }
+        #expect(reasoning == "hmm ok")
+        #expect(text == "answer")
     }
 
     @Test func decodesChatCompletion() async throws {

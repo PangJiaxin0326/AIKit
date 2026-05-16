@@ -312,6 +312,11 @@ private actor SeenInput {
     func record(_ v: String) { value = v }
 }
 
+private actor InvocationFlag {
+    private(set) var didInvoke = false
+    func mark() { didInvoke = true }
+}
+
 /// Always sleeps before answering, so a turn deadline must interrupt it.
 private final class SlowProvider: LLMProvider, @unchecked Sendable {
     let defaultModel = "slow"
@@ -435,6 +440,201 @@ private final class SlowProvider: LLMProvider, @unchecked Sendable {
     }
 }
 
+/// A guardrail that sleeps before answering, to prove the turn deadline races
+/// guardrail passes too (REVIEW3 #2).
+private struct SlowGuardrail: Guardrail {
+    let id = "slow"
+    let stages: Set<Verifier.Stage>
+    let delay: Duration
+    func evaluate(_ payload: GuardrailPayload) async -> Verifier.Outcome {
+        try? await Task.sleep(for: delay)
+        return .pass
+    }
+}
+
+@Suite struct ToolCallFallbackMatrixTests {
+    /// REVIEW3 finding **#1**: the fenced fallback must fire exactly when
+    /// intended across `supportsNativeTools` × `toolCallFallback`. The model
+    /// emits *only* a fenced ```tool block (no native tool_use), so the tool
+    /// runs iff the fallback is active.
+    private func run(
+        nativeTools: Bool, fallback: Bool?
+    ) async throws -> (toolRan: Bool, final: String?) {
+        let registry = ToolRegistry()
+        await registry.register(NavigateTool { _, _ in .init(navigated: true) })
+        let resolver = ContextResolver()
+        await resolver.push(ViewContext(
+            id: .init("home"), displayName: "Home", toolNames: ["navigate"]
+        ))
+        let fenced = "```tool\n{\"name\":\"navigate\","
+            + "\"input\":{\"destination\":\"home\"}}\n```"
+        let provider = MockProvider(
+            responses: [
+                LLMResponse(content: [.text(fenced)], stopReason: .endTurn),
+                LLMResponse(content: [.text("Done.")], stopReason: .endTurn),
+            ],
+            supportsNativeTools: nativeTools
+        )
+        let orchestrator = Orchestrator(
+            llm: LLMClient(provider: provider),
+            tools: registry,
+            memory: InMemoryMemoryStore(),
+            contextResolver: resolver,
+            guardrails: PolicyEngine(),
+            options: .init(
+                model: "test", stream: false, toolCallFallback: fallback
+            )
+        )
+        var toolRan = false
+        var final: String?
+        for try await event in await orchestrator.run("go home") {
+            if case .toolCall(let n, _) = event { toolRan = (n == "navigate") }
+            if case .finalAnswer(let t) = event { final = t }
+            if case .error(let e) = event { Issue.record("unexpected: \(e)") }
+        }
+        return (toolRan, final)
+    }
+
+    @Test func matrix() async throws {
+        // (nativeTools, toolCallFallback) -> fallback active?
+        let expectations: [(Bool, Bool?, Bool)] = [
+            (true,  nil,   false),  // native + auto  -> off
+            (true,  true,  true),   // forced on
+            (true,  false, false),  // forced off
+            (false, nil,   true),   // local + auto   -> ON (the #1 fix)
+            (false, true,  true),   // forced on
+            (false, false, false),  // forced off
+        ]
+        for (native, fallback, active) in expectations {
+            let (toolRan, final) = try await run(
+                nativeTools: native, fallback: fallback
+            )
+            let label: Comment = "native=\(native) fallback=\(String(describing: fallback))"
+            #expect(toolRan == active, label)
+            if active {
+                #expect(final == "Done.", label)
+            } else {
+                // Fenced JSON was delivered verbatim as the final answer.
+                #expect(final?.contains("navigate") == true, label)
+            }
+        }
+    }
+}
+
+@Suite struct ReasoningEventTests {
+    private func session(
+        stream: Bool
+    ) async -> Orchestrator {
+        let resolver = ContextResolver()
+        await resolver.push(ViewContext(id: .init("v"), displayName: "V"))
+        let provider = MockProvider(responses: [
+            LLMResponse(
+                content: [.reasoning("thinking..."), .text("answer")],
+                stopReason: .endTurn
+            )
+        ])
+        return Orchestrator(
+            llm: LLMClient(provider: provider),
+            tools: ToolRegistry(),
+            memory: InMemoryMemoryStore(),
+            contextResolver: resolver,
+            guardrails: PolicyEngine(),
+            options: .init(model: "test", stream: stream)
+        )
+    }
+
+    /// REVIEW3 finding **#3**: reasoning is surfaced as a distinct event.
+    @Test func nonStreamingEmitsReasoningOnce() async throws {
+        let orchestrator = await session(stream: false)
+        var reasoning = ""
+        var reasoningEvents = 0
+        var final: String?
+        for try await event in await orchestrator.run("hi") {
+            if case .reasoningDelta(let r) = event {
+                reasoning += r
+                reasoningEvents += 1
+            }
+            if case .finalAnswer(let t) = event { final = t }
+        }
+        #expect(reasoning == "thinking...")
+        #expect(reasoningEvents == 1)
+        #expect(final == "answer")
+    }
+
+    @Test func streamingEmitsReasoningDeltas() async throws {
+        let orchestrator = await session(stream: true)
+        var reasoning = ""
+        var deltas = ""
+        var final: String?
+        for try await event in await orchestrator.run("hi") {
+            if case .reasoningDelta(let r) = event { reasoning += r }
+            if case .llmDelta(let d) = event { deltas += d }
+            if case .finalAnswer(let t) = event { final = t }
+        }
+        #expect(reasoning == "thinking...")
+        #expect(deltas == "answer")
+        #expect(final == "answer")
+    }
+}
+
+@Suite struct NearMissDiagnosticTests {
+    @Test func detectsMistaggedFencedToolCall() {
+        let json = "Here you go:\n```json\n"
+            + "{\"name\":\"navigate\",\"input\":{\"destination\":\"home\"}}\n```"
+        #expect(OutputParser.nearMissFencedToolBlock(in: json))
+        // A correctly tagged block is not a near-miss (it gets recovered).
+        let tagged = "```tool\n{\"name\":\"x\",\"input\":{}}\n```"
+        #expect(!OutputParser.nearMissFencedToolBlock(in: tagged))
+        // Prose with no tool-shaped JSON is not a near-miss.
+        #expect(!OutputParser.nearMissFencedToolBlock(in: "All done, no tools."))
+        #expect(!OutputParser.nearMissFencedToolBlock(
+            in: "```json\n{\"result\": 42}\n```"
+        ))
+    }
+
+    /// REVIEW3 minor: a ```json-fenced tool call is delivered as the final
+    /// answer (never executed) but a diagnostic warning is surfaced.
+    @Test func emitsWarningAndDoesNotExecute() async throws {
+        let flag = InvocationFlag()
+        let registry = ToolRegistry()
+        await registry.register(NavigateTool { _, _ in
+            await flag.mark()
+            return .init(navigated: true)
+        })
+        let resolver = ContextResolver()
+        await resolver.push(ViewContext(
+            id: .init("home"), displayName: "Home", toolNames: ["navigate"]
+        ))
+        let mistagged = "```json\n"
+            + "{\"name\":\"navigate\",\"input\":{\"destination\":\"home\"}}\n```"
+        let provider = MockProvider(responses: [
+            LLMResponse(content: [.text(mistagged)], stopReason: .endTurn)
+        ])
+        let orchestrator = Orchestrator(
+            llm: LLMClient(provider: provider),
+            tools: registry,
+            memory: InMemoryMemoryStore(),
+            contextResolver: resolver,
+            guardrails: PolicyEngine(),
+            options: .init(model: "test", stream: false, toolCallFallback: true)
+        )
+        var warned = false
+        var final: String?
+        for try await event in await orchestrator.run("go home") {
+            if case .verification(let stage, let outcome) = event,
+               stage == .finalResult, case .warn = outcome {
+                warned = true
+            }
+            if case .finalAnswer(let t) = event { final = t }
+            if case .error(let e) = event { Issue.record("unexpected: \(e)") }
+        }
+        #expect(warned)
+        #expect(final?.contains("navigate") == true)
+        let invoked = await flag.didInvoke
+        #expect(invoked == false)
+    }
+}
+
 @Suite struct TurnDeadlineTests {
     /// REVIEW2 finding **E**: a zero budget aborts before any work.
     @Test func zeroBudgetAbortsImmediately() async throws {
@@ -478,5 +678,70 @@ private final class SlowProvider: LLMProvider, @unchecked Sendable {
         let elapsed = ContinuousClock.now - start
         #expect(caught is TurnDeadlineExceeded)
         #expect(elapsed < .seconds(3))
+    }
+
+    /// REVIEW3 finding **#2**: a hung tool must not be able to overrun the
+    /// budget — the invocation is raced against the deadline too.
+    @Test func deadlineInterruptsHangingTool() async throws {
+        let registry = ToolRegistry()
+        await registry.register(NavigateTool { _, _ in
+            try await Task.sleep(for: .seconds(5))
+            return .init(navigated: true)
+        })
+        let resolver = ContextResolver()
+        await resolver.push(ViewContext(
+            id: .init("home"), displayName: "Home", toolNames: ["navigate"]
+        ))
+        let provider = MockProvider(responses: [
+            LLMResponse(content: [.toolUse(
+                id: "t1", name: "navigate",
+                input: .object(["destination": .string("home")])
+            )], stopReason: .toolUse),
+            LLMResponse(content: [.text("late")], stopReason: .endTurn),
+        ])
+        let orchestrator = Orchestrator(
+            llm: LLMClient(provider: provider),
+            tools: registry,
+            memory: InMemoryMemoryStore(),
+            contextResolver: resolver,
+            guardrails: PolicyEngine(),
+            options: .init(
+                model: "test", stream: false,
+                retry: .init(maxAttempts: 1), maxTurnDuration: 0.2
+            )
+        )
+        let start = ContinuousClock.now
+        var caught: (any Error)?
+        for try await event in await orchestrator.run("go home") {
+            if case .error(let e) = event { caught = e }
+        }
+        #expect(caught is TurnDeadlineExceeded)
+        #expect(ContinuousClock.now - start < .seconds(3))
+    }
+
+    /// The budget must also race a slow guardrail pass, not just LLM calls.
+    @Test func deadlineInterruptsSlowGuardrail() async throws {
+        let resolver = ContextResolver()
+        await resolver.push(ViewContext(id: .init("v"), displayName: "V"))
+        let orchestrator = Orchestrator(
+            llm: LLMClient(provider: MockProvider(finalText: "hi")),
+            tools: ToolRegistry(),
+            memory: InMemoryMemoryStore(),
+            contextResolver: resolver,
+            guardrails: PolicyEngine(rails: [
+                SlowGuardrail(stages: [.prePrompt], delay: .seconds(5))
+            ]),
+            options: .init(
+                model: "test", stream: false,
+                retry: .init(maxAttempts: 1), maxTurnDuration: 0.2
+            )
+        )
+        let start = ContinuousClock.now
+        var caught: (any Error)?
+        for try await event in await orchestrator.run("hi") {
+            if case .error(let e) = event { caught = e }
+        }
+        #expect(caught is TurnDeadlineExceeded)
+        #expect(ContinuousClock.now - start < .seconds(3))
     }
 }

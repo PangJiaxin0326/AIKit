@@ -16,6 +16,9 @@ public final class AIKitSession {
     }
 
     public private(set) var streamingText: String = ""
+    /// Live model reasoning / chain-of-thought for the in-flight turn. Cleared
+    /// when the final answer arrives. Empty when the model emits no reasoning.
+    public private(set) var reasoningText: String = ""
     public private(set) var lines: [Line] = []
     public private(set) var isRunning = false
     public private(set) var lastError: String?
@@ -53,6 +56,7 @@ public final class AIKitSession {
         isRunning = true
         lastError = nil
         streamingText = ""
+        reasoningText = ""
         lines.append(Line(role: "you", text: instruction))
 
         do {
@@ -60,6 +64,8 @@ public final class AIKitSession {
                 switch event {
                 case .llmDelta(let delta):
                     streamingText += delta
+                case .reasoningDelta(let delta):
+                    reasoningText += delta
                 case .toolCall(let name, _):
                     lines.append(Line(role: "tool", text: "→ \(name)"))
                 case .toolResult(let name, let output):
@@ -84,6 +90,7 @@ public final class AIKitSession {
                 case .finalAnswer(let text):
                     lines.append(Line(role: "assistant", text: text))
                     streamingText = ""
+                    reasoningText = ""
                 case .error(let error):
                     let message = Self.describe(error)
                     lastError = message
@@ -124,6 +131,13 @@ public struct AIKitView: View {
                                 .textSelection(.enabled)
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    if !session.reasoningText.isEmpty {
+                        Text(session.reasoningText)
+                            .font(.caption)
+                            .italic()
+                            .foregroundStyle(.tertiary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
                     }
                     if !session.streamingText.isEmpty {
                         Text(session.streamingText)
