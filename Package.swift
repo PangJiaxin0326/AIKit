@@ -9,9 +9,9 @@ let swiftSettings: [SwiftSetting] = [
 let package = Package(
     name: "AIKit",
     platforms: [
-        .iOS(.v17),
-        .macOS(.v14),
-        .visionOS(.v1),
+        .iOS("26.5"),
+        .macOS("26.5"),
+        .visionOS("26.5"),
     ],
     products: [
         .library(name: "AIKit", targets: ["AIKit"]),
@@ -43,7 +43,7 @@ let package = Package(
         ),
         .target(
             name: "AIKitUI",
-            dependencies: ["AIKitCore", "AIKitCapability", "AIKitRuntime"],
+            dependencies: ["AIKitCore", "AIKitCapability", "AIKitRuntime", "AIKitSafety"],
             swiftSettings: swiftSettings
         ),
         .target(

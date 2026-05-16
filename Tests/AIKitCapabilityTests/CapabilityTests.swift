@@ -184,3 +184,63 @@ private struct EchoTool: Tool {
         #expect(try await store.search(query: "forget", limit: 10).isEmpty)
     }
 }
+
+@Suite struct AIKitConfigurationToolTests {
+    @Test func configurationToolsReadAndMutateStore() async throws {
+        let store = AIKitConfigurationStore()
+        let registry = ToolRegistry()
+        await AIKitConfigurationTools.register(in: registry, store: store)
+
+        let names = await registry.registeredNames()
+        #expect(names.contains(GetAIKitConfigurationTool.name))
+        #expect(names.contains(SetAIKitConfigurationTool.name))
+
+        let context = ToolContext(viewID: .init("settings"), memory: InMemoryMemoryStore())
+        let setInput = SetAIKitConfigurationTool.Input(
+            section: .runtime,
+            key: "maxIterations",
+            value: 4
+        )
+        let setData = try JSONEncoder().encode(setInput)
+        let outputData = try await registry.invoke(
+            name: SetAIKitConfigurationTool.name,
+            jsonInput: setData,
+            context: context
+        )
+        let output = try JSONDecoder().decode(
+            SetAIKitConfigurationTool.Output.self,
+            from: outputData
+        )
+
+        #expect(output.applied)
+        #expect(output.configuration.runtime.maxIterations == 4)
+
+        let snapshot = await store.snapshot()
+        #expect(snapshot.runtime.maxIterations == 4)
+
+        let getData = try JSONEncoder().encode(GetAIKitConfigurationTool.Input())
+        let readData = try await registry.invoke(
+            name: GetAIKitConfigurationTool.name,
+            jsonInput: getData,
+            context: context
+        )
+        let read = try JSONDecoder().decode(
+            GetAIKitConfigurationTool.Output.self,
+            from: readData
+        )
+        #expect(read.configuration.runtime.maxIterations == 4)
+        #expect(read.recentChanges.count == 1)
+    }
+
+    @Test func configurationStoreAcceptsStringSetUpdates() async throws {
+        let store = AIKitConfigurationStore()
+        _ = try await store.set(
+            section: .capability,
+            key: "enabledToolNames",
+            value: .array([.string("navigate"), .string("searchMemory")])
+        )
+
+        let snapshot = await store.snapshot()
+        #expect(snapshot.capability.enabledToolNames == ["navigate", "searchMemory"])
+    }
+}

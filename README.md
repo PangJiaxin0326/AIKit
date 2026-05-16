@@ -37,11 +37,13 @@ let llm = LLMClient(provider: provider)
 
 // 2. Tools available to the agent.
 let tools = ToolRegistry()
+let configurationStore = AIKitConfigurationStore()
 await tools.register(NavigateTool { input, _ in
     router.go(to: input.destination)
     return .init(navigated: true)
 })
 await tools.register(SearchMemoryTool())
+await AIKitConfigurationTools.register(in: tools, store: configurationStore)
 
 // 3. View context — which prompt fragment and tools are live.
 let resolver = ContextResolver()
@@ -49,12 +51,17 @@ await resolver.push(ViewContext(
     id: .init("home"),
     displayName: "Home",
     systemPromptFragment: "You help the user navigate the app.",
-    toolNames: ["navigate", "searchMemory"]
+    toolNames: ["navigate", "searchMemory", "getAIKitConfiguration", "setAIKitConfiguration"]
 ))
 
 // 4. Guardrails (all opt-in).
 let policy = PolicyEngine(rails: [
-    AllowlistedTools(allowed: ["navigate", "searchMemory"]),
+    AllowlistedTools(allowed: [
+        "navigate",
+        "searchMemory",
+        "getAIKitConfiguration",
+        "setAIKitConfiguration",
+    ]),
     PIIRedactor(),
     InjectionSniffer(),
     OutputLengthCap(),
@@ -87,19 +94,30 @@ for try await event in await orchestrator.run("Take me to settings") {
 struct RootView: View {
     let orchestrator: Orchestrator
     let resolver: ContextResolver
+    let configurationStore: AIKitConfigurationStore
+    let tools: ToolRegistry
 
     var body: some View {
-        AIKitView(orchestrator: orchestrator)
+        AIKitView(
+            orchestrator: orchestrator,
+            configurationStore: configurationStore,
+            toolRegistry: tools
+        )
             .aiContextResolver(resolver)
             .aiContext(ViewContext(
                 id: .init("root"),
                 displayName: "Root",
                 systemPromptFragment: "App-wide rules.",
-                toolNames: ["navigate"]
+                toolNames: ["navigate", "getAIKitConfiguration", "setAIKitConfiguration"]
             ))
     }
 }
 ```
+
+`AIKitView` renders the Core, Capability, Runtime, and Safety configuration
+dashboard. `AIKitChatbotOverlay` (also available as `ChatbotOverlay`) can be
+applied to any view with `.aiChatbotOverlay(orchestrator:)` when you want the
+assistant pet/dialog entry point without the dashboard.
 
 ## Architecture
 

@@ -1,3 +1,4 @@
+import Foundation
 import SwiftUI
 import Observation
 import AIKitCore
@@ -16,14 +17,13 @@ public final class AIKitSession {
     }
 
     public private(set) var streamingText: String = ""
-    /// Live model reasoning / chain-of-thought for the in-flight turn. Cleared
-    /// when the final answer arrives. Empty when the model emits no reasoning.
+    /// Live model reasoning for the in-flight turn. Cleared when the final
+    /// answer arrives. Empty when the model emits no reasoning.
     public private(set) var reasoningText: String = ""
     public private(set) var lines: [Line] = []
     public private(set) var isRunning = false
     public private(set) var lastError: String?
-    /// Cumulative token usage across every turn this session has run, so hosts
-    /// can show cost/telemetry without wiring the event stream themselves.
+    /// Cumulative token usage across every turn this session has run.
     public private(set) var totalUsage = TokenUsage.zero
 
     private let orchestrator: Orchestrator
@@ -32,9 +32,6 @@ public final class AIKitSession {
         self.orchestrator = orchestrator
     }
 
-    /// Renders an error with its safety detail intact. A `GuardrailViolation`
-    /// surfaced as a bare description loses the rail id and stage; spell them
-    /// out so the host gets a usable safety story out of the box.
     private static func describe(_ error: any Error) -> String {
         if let violation = error as? GuardrailViolation {
             return "Blocked by \(violation.railID) at \(violation.stage.rawValue): \(violation.reason)"
@@ -48,26 +45,30 @@ public final class AIKitSession {
         if let llmError = error as? LLMError {
             return llmError.errorDescription ?? "\(llmError)"
         }
+        if let configuration = error as? AIKitConfigurationError {
+            return configuration.message
+        }
         return "\(error)"
     }
 
     public func send(_ instruction: String) async {
-        guard !instruction.isEmpty, !isRunning else { return }
+        let trimmed = instruction.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !isRunning else { return }
         isRunning = true
         lastError = nil
         streamingText = ""
         reasoningText = ""
-        lines.append(Line(role: "you", text: instruction))
+        lines.append(Line(role: "you", text: trimmed))
 
         do {
-            for try await event in await orchestrator.run(instruction) {
+            for try await event in await orchestrator.run(trimmed) {
                 switch event {
                 case .llmDelta(let delta):
                     streamingText += delta
                 case .reasoningDelta(let delta):
                     reasoningText += delta
                 case .toolCall(let name, _):
-                    lines.append(Line(role: "tool", text: "→ \(name)"))
+                    lines.append(Line(role: "tool", text: "Calling \(name)"))
                 case .toolResult(let name, let output):
                     lines.append(Line(
                         role: "tool",
@@ -108,79 +109,639 @@ public final class AIKitSession {
     }
 }
 
-/// A minimal SwiftUI view that renders an `Orchestrator`'s event stream:
-/// a transcript, live streaming text, and a prompt field.
+/// A SwiftUI state-management surface for AIKit's Core, Capability, Runtime,
+/// and Safety configuration.
 public struct AIKitView: View {
-    @State private var session: AIKitSession
-    @State private var draft: String = ""
+    @State private var model: AIKitConfigurationViewModel
 
+    private let orchestrator: Orchestrator?
+
+    @MainActor
+    public init(
+        configurationStore: AIKitConfigurationStore = AIKitConfigurationStore(),
+        toolRegistry: ToolRegistry? = nil
+    ) {
+        self.orchestrator = nil
+        _model = State(initialValue: AIKitConfigurationViewModel(
+            store: configurationStore,
+            toolRegistry: toolRegistry
+        ))
+    }
+
+    @MainActor
+    public init(
+        orchestrator: Orchestrator,
+        configurationStore: AIKitConfigurationStore = AIKitConfigurationStore(),
+        toolRegistry: ToolRegistry? = nil
+    ) {
+        self.orchestrator = orchestrator
+        _model = State(initialValue: AIKitConfigurationViewModel(
+            store: configurationStore,
+            toolRegistry: toolRegistry
+        ))
+    }
+
+    public var body: some View {
+        dashboard
+            .task { await model.load() }
+            .refreshable { await model.load() }
+            .overlay(alignment: .bottomTrailing) {
+                if let orchestrator {
+                    AIKitChatbotOverlay(orchestrator: orchestrator)
+                }
+            }
+    }
+
+    private var dashboard: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                header
+                coreSection
+                capabilitySection
+                runtimeSection
+                safetySection
+                if !model.recentChanges.isEmpty {
+                    changeLogSection
+                }
+            }
+            .padding()
+            .frame(maxWidth: 920, alignment: .leading)
+        }
+    }
+
+    private var header: some View {
+        HStack(alignment: .firstTextBaseline) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("AIKit")
+                    .font(.title2.weight(.semibold))
+                Text("Core, Capability, Runtime, Safety")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 12)
+            if let status = model.status {
+                Text(status)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Button {
+                Task { await model.load() }
+            } label: {
+                Label("Refresh", systemImage: "arrow.clockwise")
+            }
+            Button {
+                Task { await model.apply() }
+            } label: {
+                Label("Apply", systemImage: "checkmark.circle")
+            }
+            .buttonStyle(.borderedProminent)
+        }
+    }
+
+    private var coreSection: some View {
+        AIKitConfigurationSection(title: "Core", systemImage: "cpu") {
+            LabeledContent("Provider") {
+                TextField("Provider", text: binding(\.core.providerName))
+                    .multilineTextAlignment(.trailing)
+            }
+            LabeledContent("Model") {
+                TextField("Model", text: binding(\.core.model))
+                    .multilineTextAlignment(.trailing)
+            }
+            LabeledContent("Base URL") {
+                TextField("Base URL", text: optionalStringBinding(\.core.baseURL))
+                    .multilineTextAlignment(.trailing)
+            }
+            LabeledContent("Timeout") {
+                TextField("Seconds", text: optionalDoubleBinding(\.core.timeout))
+                    .multilineTextAlignment(.trailing)
+            }
+            LabeledContent("Temperature") {
+                TextField("Default", text: optionalDoubleBinding(\.core.temperature))
+                    .multilineTextAlignment(.trailing)
+            }
+            LabeledContent("Max tokens") {
+                TextField("Default", text: optionalIntBinding(\.core.maxTokens))
+                    .multilineTextAlignment(.trailing)
+            }
+        }
+    }
+
+    private var capabilitySection: some View {
+        AIKitConfigurationSection(title: "Capability", systemImage: "slider.horizontal.3") {
+            LabeledContent("Context") {
+                TextField("Display name", text: binding(\.capability.contextDisplayName))
+                    .multilineTextAlignment(.trailing)
+            }
+            VStack(alignment: .leading, spacing: 6) {
+                Text("System prompt")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                TextEditor(text: binding(\.capability.systemPromptFragment))
+                    .font(.body)
+                    .frame(minHeight: 84)
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 6)
+                            .stroke(.quaternary)
+                    }
+            }
+            LabeledContent("Memory window") {
+                Stepper(
+                    "\(model.configuration.capability.memoryLimit)",
+                    value: binding(\.capability.memoryLimit),
+                    in: 0...500
+                )
+            }
+            if model.availableTools.isEmpty {
+                LabeledContent("Enabled tools") {
+                    TextField(
+                        "Comma-separated",
+                        text: setBinding(\.capability.enabledToolNames)
+                    )
+                    .multilineTextAlignment(.trailing)
+                }
+            } else {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Enabled tools")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                    ForEach(model.availableTools) { tool in
+                        Toggle(tool.name, isOn: toolBinding(tool.name))
+                    }
+                }
+            }
+        }
+    }
+
+    private var runtimeSection: some View {
+        AIKitConfigurationSection(title: "Runtime", systemImage: "point.3.connected.trianglepath.dotted") {
+            Toggle("Stream responses", isOn: binding(\.runtime.streamsResponses))
+            LabeledContent("Max iterations") {
+                Stepper(
+                    "\(model.configuration.runtime.maxIterations)",
+                    value: binding(\.runtime.maxIterations),
+                    in: 1...50
+                )
+            }
+            LabeledContent("Turn budget") {
+                TextField("Seconds", text: optionalDoubleBinding(\.runtime.maxTurnDuration))
+                    .multilineTextAlignment(.trailing)
+            }
+            Picker("Tool fallback", selection: binding(\.runtime.toolCallFallback)) {
+                ForEach(AIKitConfiguration.ToolCallFallbackMode.allCases, id: \.self) { mode in
+                    Text(mode.label).tag(mode)
+                }
+            }
+            .pickerStyle(.segmented)
+        }
+    }
+
+    private var safetySection: some View {
+        AIKitConfigurationSection(title: "Safety", systemImage: "shield.lefthalf.filled") {
+            Toggle("PII redaction", isOn: binding(\.safety.piiRedactionEnabled))
+            Toggle("Injection sniffing", isOn: binding(\.safety.injectionSniffingEnabled))
+            LabeledContent("Output cap") {
+                TextField("Characters", text: optionalIntBinding(\.safety.outputLengthLimit))
+                    .multilineTextAlignment(.trailing)
+            }
+            LabeledContent("Guardrails") {
+                TextField("Comma-separated", text: setBinding(\.safety.enabledGuardrailIDs))
+                    .multilineTextAlignment(.trailing)
+            }
+            LabeledContent("Tool allowlist") {
+                TextField("Comma-separated", text: setBinding(\.safety.allowlistedToolNames))
+                    .multilineTextAlignment(.trailing)
+            }
+        }
+    }
+
+    private var changeLogSection: some View {
+        AIKitConfigurationSection(title: "Configuration Activity", systemImage: "clock") {
+            ForEach(model.recentChanges) { change in
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(change.title)
+                        .font(.subheadline)
+                    Text(change.valueDescription)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+    }
+
+    private func binding<Value>(
+        _ keyPath: WritableKeyPath<AIKitConfiguration, Value>
+    ) -> Binding<Value> {
+        Binding(
+            get: { model.configuration[keyPath: keyPath] },
+            set: { model.configuration[keyPath: keyPath] = $0 }
+        )
+    }
+
+    private func optionalStringBinding(
+        _ keyPath: WritableKeyPath<AIKitConfiguration, String?>
+    ) -> Binding<String> {
+        Binding(
+            get: { model.configuration[keyPath: keyPath] ?? "" },
+            set: { model.configuration[keyPath: keyPath] = $0.emptyAsNil }
+        )
+    }
+
+    private func optionalDoubleBinding(
+        _ keyPath: WritableKeyPath<AIKitConfiguration, Double?>
+    ) -> Binding<String> {
+        Binding(
+            get: {
+                guard let value = model.configuration[keyPath: keyPath] else { return "" }
+                return String(value)
+            },
+            set: { model.configuration[keyPath: keyPath] = Double($0) }
+        )
+    }
+
+    private func optionalIntBinding(
+        _ keyPath: WritableKeyPath<AIKitConfiguration, Int?>
+    ) -> Binding<String> {
+        Binding(
+            get: {
+                guard let value = model.configuration[keyPath: keyPath] else { return "" }
+                return String(value)
+            },
+            set: { model.configuration[keyPath: keyPath] = Int($0) }
+        )
+    }
+
+    private func setBinding(
+        _ keyPath: WritableKeyPath<AIKitConfiguration, Set<String>>
+    ) -> Binding<String> {
+        Binding(
+            get: { model.configuration[keyPath: keyPath].sorted().joined(separator: ", ") },
+            set: { model.configuration[keyPath: keyPath] = $0.configurationSet }
+        )
+    }
+
+    private func toolBinding(_ name: String) -> Binding<Bool> {
+        Binding(
+            get: { model.configuration.capability.enabledToolNames.contains(name) },
+            set: { isEnabled in
+                if isEnabled {
+                    model.configuration.capability.enabledToolNames.insert(name)
+                } else {
+                    model.configuration.capability.enabledToolNames.remove(name)
+                }
+            }
+        )
+    }
+}
+
+/// Floating assistant entry point for apps that want AIKit available above
+/// their existing view hierarchy.
+public struct AIKitChatbotOverlay: View {
+    @State private var session: AIKitSession
+    @State private var isDialogPresented = false
+    @State private var selectedMenu = ChatbotMenu.context
+    @State private var draft = ""
+    @State private var snapshot: OrchestratorSnapshot?
+
+    private let orchestrator: Orchestrator
+
+    @MainActor
     public init(orchestrator: Orchestrator) {
+        self.orchestrator = orchestrator
         _session = State(initialValue: AIKitSession(orchestrator: orchestrator))
     }
 
     public var body: some View {
-        VStack(spacing: 12) {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 8) {
-                    ForEach(session.lines) { line in
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(line.role.uppercased())
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                            Text(line.text)
-                                .textSelection(.enabled)
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                    if !session.reasoningText.isEmpty {
-                        Text(session.reasoningText)
-                            .font(.caption)
-                            .italic()
-                            .foregroundStyle(.tertiary)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                    if !session.streamingText.isEmpty {
-                        Text(session.streamingText)
-                            .foregroundStyle(.secondary)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
+        VStack(alignment: .trailing, spacing: 12) {
+            if isDialogPresented {
+                dialog
+                    .transition(.scale.combined(with: .opacity))
+            }
+            petButton
+        }
+        .padding()
+        .task { await refreshSnapshot() }
+    }
+
+    private var petButton: some View {
+        Button {
+            withAnimation(.spring(duration: 0.24)) {
+                isDialogPresented.toggle()
+            }
+            if isDialogPresented {
+                Task { await refreshSnapshot() }
+            }
+        } label: {
+            ZStack {
+                Circle()
+                    .fill(.tint)
+                    .frame(width: 58, height: 58)
+                    .shadow(radius: 10, y: 4)
+                Image(systemName: "pawprint.fill")
+                    .font(.title2.weight(.semibold))
+                    .foregroundStyle(.white)
+            }
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("AIKit assistant")
+    }
+
+    private var dialog: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Label("AIKit Assistant", systemImage: "sparkles")
+                    .font(.headline)
+                Spacer()
+                Button {
+                    Task { await refreshSnapshot() }
+                } label: {
+                    Image(systemName: "arrow.clockwise")
                 }
-                .padding()
+                .buttonStyle(.borderless)
+                Button {
+                    withAnimation(.spring(duration: 0.24)) {
+                        isDialogPresented = false
+                    }
+                } label: {
+                    Image(systemName: "xmark")
+                }
+                .buttonStyle(.borderless)
+            }
+
+            Picker("Menu", selection: $selectedMenu) {
+                ForEach(ChatbotMenu.allCases) { menu in
+                    Text(menu.rawValue).tag(menu)
+                }
+            }
+            .pickerStyle(.segmented)
+
+            Divider()
+
+            ScrollView {
+                menuContent
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .frame(maxHeight: 260)
+
+            if !session.reasoningText.isEmpty {
+                Text(session.reasoningText)
+                    .font(.caption)
+                    .italic()
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(3)
+            }
+
+            if !session.streamingText.isEmpty {
+                Text(session.streamingText)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(4)
             }
 
             if let error = session.lastError {
                 Text(error)
-                    .font(.footnote)
+                    .font(.caption)
                     .foregroundStyle(.red)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal)
+                    .lineLimit(3)
             }
 
-            let usage = session.totalUsage
-            if usage.inputTokens > 0 || usage.outputTokens > 0 {
-                Text("Tokens — in \(usage.inputTokens), out \(usage.outputTokens)")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .trailing)
-                    .padding(.horizontal)
-            }
-
-            HStack {
-                TextField("Ask AIKit…", text: $draft)
+            HStack(alignment: .bottom, spacing: 8) {
+                TextField("Prompt", text: $draft, axis: .vertical)
                     .textFieldStyle(.roundedBorder)
+                    .lineLimit(1...4)
                     .disabled(session.isRunning)
                     .onSubmit(submit)
-                Button("Send", action: submit)
-                    .disabled(session.isRunning || draft.isEmpty)
+                Button(action: submit) {
+                    Image(systemName: "paperplane.fill")
+                }
+                .disabled(session.isRunning || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .buttonStyle(.borderedProminent)
             }
-            .padding(.horizontal)
-            .padding(.bottom)
+        }
+        .padding(14)
+        .frame(maxWidth: 380)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(.quaternary)
+        }
+    }
+
+    @ViewBuilder
+    private var menuContent: some View {
+        switch selectedMenu {
+        case .context:
+            contextContent
+        case .tools:
+            toolsContent
+        case .activity:
+            activityContent
+        }
+    }
+
+    private var contextContent: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if let snapshot, !snapshot.contexts.isEmpty {
+                ForEach(snapshot.contexts) { context in
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(context.displayName)
+                            .font(.subheadline.weight(.medium))
+                        Text(context.id.rawValue)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        if !context.systemPromptFragment.isEmpty {
+                            Text(context.systemPromptFragment)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(3)
+                        }
+                        if !context.toolNames.isEmpty {
+                            Text(context.toolNames.sorted().joined(separator: ", "))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(2)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            } else {
+                Text("No active context")
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private var toolsContent: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if let snapshot, !snapshot.availableTools.isEmpty {
+                ForEach(snapshot.availableTools) { tool in
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(tool.name)
+                            .font(.subheadline.weight(.medium))
+                        Text(tool.description)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(3)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            } else {
+                Text("No tools available")
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private var activityContent: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            let activity = snapshot?.recentActivities ?? []
+            if activity.isEmpty && session.lines.isEmpty {
+                Text("No recent activity")
+                    .foregroundStyle(.secondary)
+            }
+            ForEach(activity) { event in
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(event.kind.rawValue)
+                        .font(.caption.weight(.medium))
+                    Text(event.payloadText)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(3)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            ForEach(session.lines.suffix(8)) { line in
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(line.role.uppercased())
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    Text(line.text)
+                        .font(.caption)
+                        .lineLimit(4)
+                        .textSelection(.enabled)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
         }
     }
 
     private func submit() {
         let instruction = draft
         draft = ""
-        Task { await session.send(instruction) }
+        Task {
+            await session.send(instruction)
+            await refreshSnapshot()
+        }
+    }
+
+    private func refreshSnapshot() async {
+        snapshot = await orchestrator.snapshot(recentActivityLimit: 12)
+    }
+}
+
+public typealias ChatbotOverlay = AIKitChatbotOverlay
+
+public extension View {
+    func aiChatbotOverlay(orchestrator: Orchestrator) -> some View {
+        overlay(alignment: .bottomTrailing) {
+            AIKitChatbotOverlay(orchestrator: orchestrator)
+        }
+    }
+}
+
+@MainActor
+@Observable
+private final class AIKitConfigurationViewModel {
+    var configuration: AIKitConfiguration
+    var availableTools: [ToolDescriptor] = []
+    var recentChanges: [AIKitConfigurationChange] = []
+    var status: String?
+
+    private let store: AIKitConfigurationStore
+    private let toolRegistry: ToolRegistry?
+
+    init(store: AIKitConfigurationStore, toolRegistry: ToolRegistry?) {
+        self.store = store
+        self.toolRegistry = toolRegistry
+        self.configuration = .standard
+    }
+
+    func load() async {
+        configuration = await store.snapshot()
+        recentChanges = await store.recentChanges(limit: 6)
+        if let toolRegistry {
+            availableTools = await toolRegistry.manifest(for: [])
+        }
+        status = nil
+    }
+
+    func apply() async {
+        await store.replace(with: configuration, source: "AIKitView")
+        recentChanges = await store.recentChanges(limit: 6)
+        status = "Applied"
+    }
+}
+
+private struct AIKitConfigurationSection<Content: View>: View {
+    let title: String
+    let systemImage: String
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 12) {
+                content
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        } label: {
+            Label(title, systemImage: systemImage)
+                .font(.headline)
+        }
+        .groupBoxStyle(.automatic)
+    }
+}
+
+private enum ChatbotMenu: String, CaseIterable, Identifiable {
+    case context = "Context"
+    case tools = "Tools"
+    case activity = "Activity"
+
+    var id: String { rawValue }
+}
+
+private extension AIKitConfiguration.ToolCallFallbackMode {
+    var label: String {
+        switch self {
+        case .automatic: return "Auto"
+        case .enabled: return "On"
+        case .disabled: return "Off"
+        }
+    }
+}
+
+private extension AIKitConfigurationChange {
+    var title: String {
+        let target: String
+        if let section, let key {
+            target = "\(section.rawValue).\(key)"
+        } else {
+            target = "all"
+        }
+        return "\(source) updated \(target)"
+    }
+}
+
+private extension String {
+    var emptyAsNil: String? {
+        let trimmed = trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    var configurationSet: Set<String> {
+        Set(split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty })
     }
 }

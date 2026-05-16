@@ -22,6 +22,26 @@ public enum OrchestratorEvent: Sendable {
     case error(any Error)
 }
 
+/// A UI-friendly snapshot of the runtime state the orchestrator already owns.
+public struct OrchestratorSnapshot: Sendable, Hashable {
+    public var contexts: [ViewContext]
+    public var resolvedContext: ResolvedContext
+    public var availableTools: [ToolDescriptor]
+    public var recentActivities: [UsageEvent]
+
+    public init(
+        contexts: [ViewContext],
+        resolvedContext: ResolvedContext,
+        availableTools: [ToolDescriptor],
+        recentActivities: [UsageEvent]
+    ) {
+        self.contexts = contexts
+        self.resolvedContext = resolvedContext
+        self.availableTools = availableTools
+        self.recentActivities = recentActivities
+    }
+}
+
 /// The single entry point a host app calls once per user instruction. An actor
 /// so concurrent `run` calls on one instance serialize cleanly.
 public actor Orchestrator {
@@ -117,6 +137,23 @@ public actor Orchestrator {
             }
             continuation.onTermination = { _ in task.cancel() }
         }
+    }
+
+    public func snapshot(recentActivityLimit: Int = 10) async -> OrchestratorSnapshot {
+        let contexts = await contextResolver.current()
+        let resolved = await contextResolver.merged()
+        let manifest = await tools.manifest(for: resolved.toolNames)
+        let viewID = resolved.stack.isEmpty ? nil : resolved.leafID
+        let recent = (try? await memory.recent(
+            limit: recentActivityLimit,
+            view: viewID
+        )) ?? []
+        return OrchestratorSnapshot(
+            contexts: contexts,
+            resolvedContext: resolved,
+            availableTools: manifest,
+            recentActivities: recent
+        )
     }
 
     // MARK: - Loop

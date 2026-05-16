@@ -118,6 +118,8 @@ AIKit/
 │   │   ├── Context/
 │   │   │   ├── ViewContext.swift
 │   │   │   └── ContextResolver.swift
+│   │   ├── Configuration/
+│   │   │   └── AIKitConfiguration.swift
 │   │   └── Memory/
 │   │       ├── MemoryStore.swift
 │   │       └── UsageEvent.swift
@@ -201,7 +203,8 @@ Requirements:
 - Tool errors conform to `ToolError` and carry `isRetriable: Bool` so the
   ErrorHandler can decide whether to loop back.
 - Built‑in tools (provided by AIKit, opt‑in): `navigate`, `setProfile`,
-  `setSetting`, `searchMemory`. Each lives in
+  `setSetting`, `searchMemory`, `getAIKitConfiguration`, and
+  `setAIKitConfiguration`. Each lives in
   `Sources/AIKitCapability/Tools/Builtin/`.
 
 ### 3.2 Context
@@ -563,7 +566,8 @@ streaming and non‑streaming codepaths.
 2. `ViewContext` + `ContextResolver` actor.
 3. `MemoryStore` protocol + `InMemoryMemoryStore` + `SwiftDataMemoryStore`
    (use SwiftData via `import SwiftData`, no third‑party deps).
-4. Built‑in tools: `navigate`, `setProfile`, `setSetting`, `searchMemory`.
+4. Built‑in tools: `navigate`, `setProfile`, `setSetting`, `searchMemory`,
+   `getAIKitConfiguration`, `setAIKitConfiguration`.
 
 **Exit:** Register a fake tool, invoke it through `ToolRegistry.invoke(name:…)`,
 confirm event lands in memory.
@@ -587,10 +591,14 @@ executes → mock LLM emits final answer → orchestrator yields `.finalAnswer`.
 `GuardrailViolation` and never reaches the tool.
 
 ### Phase 5 — UI helpers & polish (½ day)
-1. `AIKitUI.AIKitView` — a SwiftUI view that takes an `Orchestrator` and renders
-   the event stream.
-2. `.aiContext(_:)` view modifier.
-3. README quickstart.
+1. `AIKitUI.AIKitView` — a SwiftUI view that renders the Core, Capability,
+   Runtime, and Safety configuration dashboard and can host the chatbot overlay
+   when initialized with an `Orchestrator`.
+2. `AIKitUI.AIKitChatbotOverlay` / `ChatbotOverlay` — a pet-style floating
+   assistant entry point that shows current context, available tools, recent
+   activity, and a prompt field.
+3. `.aiContext(_:)` view modifier.
+4. README quickstart.
 
 ---
 
