@@ -1,6 +1,9 @@
 import Foundation
 import SwiftUI
 import Observation
+#if canImport(UIKit)
+import UIKit
+#endif
 import AIKitCore
 import AIKitCapability
 import AIKitRuntime
@@ -407,12 +410,16 @@ public struct AIKitChatbotOverlay: View {
     @State private var session: AIKitSession
     /// Full assistant panel — opened by a long press on the pet.
     @State private var isDialogPresented = false
-    /// Compact status bubble — toggled by a tap; pet stays visible.
-    @State private var isBubblePresented = false
+    /// Whether the glass capsule (status field + action) is expanded next
+    /// to the pet. Toggled by a tap.
+    @State private var isExpanded = false
     @State private var selectedMenu = ChatbotMenu.context
     @State private var draft = ""
-    @State private var bubbleDraft = ""
-    @State private var bubbleSize: CGSize = .zero
+    @State private var capsuleDraft = ""
+    @State private var capsuleSize: CGSize = .zero
+    /// The last instruction sent from the capsule, carried as context into
+    /// a follow-up after a failure.
+    @State private var lastInstruction = ""
     @State private var snapshot: OrchestratorSnapshot?
     /// Live orchestrator activity, so the pet reflects any turn on this
     /// orchestrator — not just the overlay's own session.
@@ -420,6 +427,10 @@ public struct AIKitChatbotOverlay: View {
     /// True while a long press is being held (before it completes); drives
     /// the press scale-up.
     @GestureState private var longPressing = false
+    @FocusState private var fieldFocused: Bool
+    /// On-screen keyboard height (iOS); the capsule sticks just above it
+    /// while the field is focused, then returns to the pet's position.
+    @State private var keyboardHeight: CGFloat = 0
 
     /// Which screen edge the pet is docked to, and where along it
     /// (0 = top, 1 = bottom). The pet snaps to an edge when a drag ends.
@@ -444,36 +455,24 @@ public struct AIKitChatbotOverlay: View {
     public var body: some View {
         GeometryReader { proxy in
             let size = proxy.size
-            let petCenter = liveCenter(in: size)
             ZStack(alignment: .topLeading) {
                 if isDialogPresented {
                     dialog
                         .position(x: size.width / 2, y: size.height / 2)
                         .transition(.scale.combined(with: .opacity))
                 }
-                if isBubblePresented && !isDialogPresented {
-                    statusBubble
-                        .onGeometryChange(for: CGSize.self) { $0.size } action: { bubbleSize = $0 }
-                        .position(bubbleCenter(petCenter: petCenter, in: size))
-                        .transition(.scale(scale: 0.85).combined(with: .opacity))
+                if isExpanded && !isDialogPresented {
+                    capsuleGroup(in: size)
+                        .onGeometryChange(for: CGSize.self) { $0.size } action: { capsuleSize = $0 }
+                        .position(capsuleCenter(in: size))
+                        .transition(.opacity.combined(with: .scale(scale: 0.92)))
+                } else if !isDialogPresented {
+                    petButton(in: size)
+                        .position(liveCenter(in: size))
                 }
-                pet
-                    .scaleEffect((longPressing || isInteracting) ? 1.18 : 1)
-                    .onTapGesture { toggleBubble() }
-                    // Recognized independently of the drag, so it fires the
-                    // instant the 2s hold elapses — not on finger release.
-                    .simultaneousGesture(
-                        LongPressGesture(minimumDuration: 2.0, maximumDistance: 24)
-                            .updating($longPressing) { pressing, state, _ in
-                                state = pressing
-                            }
-                            .onEnded { _ in openFullPanel() }
-                    )
-                    .simultaneousGesture(moveGesture(in: size))
-                    .position(petCenter)
-                    .animation(.spring(duration: 0.2), value: longPressing)
-                    .animation(.spring(duration: 0.2), value: isInteracting)
             }
+            .animation(.spring(duration: 0.28), value: isExpanded)
+            .animation(.spring(duration: 0.25), value: keyboardHeight)
         }
         .task { await refreshSnapshot() }
         .task {
@@ -482,11 +481,49 @@ public struct AIKitChatbotOverlay: View {
             }
         }
         .onChange(of: activity.isBusy) { _, busy in
-            // When a turn finishes (busy → idle, not a failure), drop any
-            // stale draft so the working bubble is cleanly replaced by an
-            // empty idle prompt and the completed turn can't be re-sent.
-            if !busy && !activity.hasFailed { bubbleDraft = "" }
+            // When a turn finishes (busy → idle, not a failure), drop the
+            // stale draft so a completed turn can't be re-sent.
+            if !busy && !activity.hasFailed { capsuleDraft = "" }
         }
+        .onChange(of: activity.hasFailed) { _, failed in
+            // Surface a failure immediately so the reason panel is visible.
+            if failed { withAnimation(.spring(duration: 0.28)) { isExpanded = true } }
+        }
+        #if os(iOS)
+        .onReceive(NotificationCenter.default.publisher(
+            for: UIResponder.keyboardWillShowNotification
+        )) { note in
+            if let frame = note.userInfo?[UIResponder.keyboardFrameEndUserInfoKey]
+                as? CGRect {
+                keyboardHeight = frame.height
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(
+            for: UIResponder.keyboardWillHideNotification
+        )) { _ in
+            keyboardHeight = 0
+        }
+        #endif
+    }
+
+    /// The pet circle plus its tap / long-press / drag recognizers. Used
+    /// standalone when collapsed and inside the capsule when expanded.
+    private func petButton(in size: CGSize) -> some View {
+        pet
+            .scaleEffect((longPressing || isInteracting) ? 1.12 : 1)
+            .onTapGesture { toggleExpanded() }
+            // Recognized independently of the drag, so it fires the
+            // instant the 2s hold elapses — not on finger release.
+            .simultaneousGesture(
+                LongPressGesture(minimumDuration: 2.0, maximumDistance: 24)
+                    .updating($longPressing) { pressing, state, _ in
+                        state = pressing
+                    }
+                    .onEnded { _ in openFullPanel() }
+            )
+            .simultaneousGesture(moveGesture(in: size))
+            .animation(.spring(duration: 0.2), value: longPressing)
+            .animation(.spring(duration: 0.2), value: isInteracting)
     }
 
     private var pet: some View {
@@ -571,6 +608,10 @@ public struct AIKitChatbotOverlay: View {
         DragGesture(minimumDistance: 8, coordinateSpace: .global)
             .updating($isInteracting) { _, state, _ in state = true }
             .onChanged { value in
+                if isExpanded {
+                    fieldFocused = false
+                    withAnimation(.spring(duration: 0.2)) { isExpanded = false }
+                }
                 dragTranslation = value.translation
             }
             .onEnded { value in
@@ -589,133 +630,198 @@ public struct AIKitChatbotOverlay: View {
 
     // MARK: - Tap / long-press actions
 
-    private func toggleBubble() {
-        withAnimation(.spring(duration: 0.22)) {
-            isBubblePresented.toggle()
-        }
-        if isBubblePresented {
+    private func toggleExpanded() {
+        withAnimation(.spring(duration: 0.28)) { isExpanded.toggle() }
+        if isExpanded {
             isDialogPresented = false
             Task { await refreshSnapshot() }
+        } else {
+            fieldFocused = false
         }
     }
 
     private func openFullPanel() {
+        fieldFocused = false
         withAnimation(.spring(duration: 0.24)) {
-            isBubblePresented = false
+            isExpanded = false
             isDialogPresented = true
         }
         Task { await refreshSnapshot() }
     }
 
-    private func sendFromBubble() {
-        let text = bubbleDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+    /// Sends the capsule's text. After a failure the previous request and
+    /// the failure reason are folded in so the model treats the follow-up
+    /// as a clarification of the same request, not a brand-new one.
+    private func sendCapsule() {
+        let text = capsuleDraft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, !activity.isBusy else { return }
-        bubbleDraft = ""
-        Task { await session.send(text) }
+        capsuleDraft = ""
+        let instruction = activity.hasFailed
+            ? contextualFollowUp(
+                previous: lastInstruction,
+                reason: activity.failureReason,
+                followUp: text
+              )
+            : text
+        lastInstruction = text
+        Task { await session.send(instruction) }
+    }
+
+    private func contextualFollowUp(
+        previous: String,
+        reason: String?,
+        followUp: String
+    ) -> String {
+        var parts = ["This is a follow-up to a request you could not complete."]
+        if !previous.isEmpty {
+            parts.append("Your earlier request was: \"\(previous)\"")
+        }
+        if let reason, !reason.isEmpty {
+            parts.append("It could not be completed because: \(reason)")
+        }
+        parts.append("Clarification / new instruction: \(followUp)")
+        parts.append(
+            "Treat the earlier request and this clarification as one request."
+        )
+        return parts.joined(separator: "\n")
     }
 
     private func cancelCurrentWork() {
         Task { await orchestrator.cancelActiveTurns() }
     }
 
-    // MARK: - Status bubble
+    /// Clears a sticky failure (returns the orchestrator to idle) and
+    /// collapses the capsule.
+    private func dismissFailure() {
+        fieldFocused = false
+        Task { await orchestrator.cancelActiveTurns() }
+        withAnimation(.spring(duration: 0.24)) { isExpanded = false }
+    }
 
-    /// A compact, state-aware popover anchored to the pet (pet stays
-    /// visible): failure reason + cancel + follow-up, the live task while
-    /// busy, or a prompt field when idle.
-    private var statusBubble: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 8) {
-                Text(bubbleTitle)
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(activity.hasFailed ? .red : .primary)
-                Spacer(minLength: 8)
-                Button {
-                    withAnimation(.spring(duration: 0.22)) { isBubblePresented = false }
-                } label: {
-                    Image(systemName: "xmark")
-                }
-                .buttonStyle(.borderless)
-            }
+    // MARK: - Glass capsule
 
+    private let capsuleWidth: CGFloat = 300
+
+    /// The fail-reason panel (when failed) stacked above the capsule row,
+    /// aligned to the pet's docked edge so it grows toward screen interior.
+    private func capsuleGroup(in size: CGSize) -> some View {
+        VStack(
+            alignment: petEdge == .leading ? .leading : .trailing,
+            spacing: 8
+        ) {
             if activity.hasFailed, let reason = activity.failureReason {
-                Text(reason)
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                HStack {
-                    Button("Cancel", role: .cancel, action: cancelCurrentWork)
-                        .buttonStyle(.bordered)
-                    Spacer()
-                }
-                followUpField(placeholder: "Try rephrasing…")
-            } else if activity.isBusy {
-                HStack(spacing: 8) {
-                    ProgressView().controlSize(.small)
-                    Text(activity.statusText)
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(2)
-                }
-                Button("Cancel", role: .cancel, action: cancelCurrentWork)
-                    .buttonStyle(.bordered)
-            } else {
-                followUpField(placeholder: "Ask the assistant…")
+                reasonPanel(reason)
             }
+            capsuleRow(in: size)
         }
-        .padding(14)
-        .frame(width: 260, alignment: .leading)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
-        .overlay {
-            RoundedRectangle(cornerRadius: 14)
-                .stroke(activity.hasFailed ? AnyShapeStyle(.red.opacity(0.4)) : AnyShapeStyle(.quaternary))
+    }
+
+    private func capsuleRow(in size: CGSize) -> some View {
+        HStack(spacing: 8) {
+            if petEdge == .leading { petButton(in: size) }
+            statusField
+            interactButton
+            if petEdge == .trailing { petButton(in: size) }
         }
+        .padding(6)
+        .frame(width: capsuleWidth)
+        .background(.ultraThinMaterial, in: Capsule())
+        .overlay(Capsule().strokeBorder(.white.opacity(0.15), lineWidth: 1))
         .shadow(radius: 12, y: 4)
     }
 
-    private var bubbleTitle: String {
-        if activity.hasFailed { return "Couldn't do that" }
-        if activity.isBusy { return "Working…" }
-        return "Assistant"
-    }
-
-    private func followUpField(placeholder: String) -> some View {
-        HStack(spacing: 8) {
-            TextField(placeholder, text: $bubbleDraft, axis: .vertical)
-                .textFieldStyle(.roundedBorder)
-                .lineLimit(1...3)
-                .disabled(activity.isBusy)
-                .onSubmit(sendFromBubble)
-            Button(action: sendFromBubble) {
-                Image(systemName: "paperplane.fill")
+    @ViewBuilder
+    private var statusField: some View {
+        if activity.isBusy {
+            HStack(spacing: 6) {
+                ProgressView().controlSize(.small)
+                Text(activity.statusText)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
             }
-            .buttonStyle(.borderedProminent)
-            .disabled(
-                activity.isBusy
-                || bubbleDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            .frame(maxWidth: .infinity, alignment: .leading)
+        } else {
+            TextField(
+                activity.hasFailed ? "Add a clarification…" : "Ask the assistant…",
+                text: $capsuleDraft,
+                axis: .vertical
             )
+            .textFieldStyle(.plain)
+            .lineLimit(1...3)
+            .focused($fieldFocused)
+            .submitLabel(.send)
+            .onSubmit(sendCapsule)
+            .frame(maxWidth: .infinity)
         }
     }
 
-    /// Bubble center: docked to the pet's edge, opening above the pet when
-    /// there is room and below it otherwise, always kept fully on screen.
-    private func bubbleCenter(petCenter: CGPoint, in size: CGSize) -> CGPoint {
-        let width = bubbleSize.width
-        let height = bubbleSize.height
+    @ViewBuilder
+    private var interactButton: some View {
+        let trimmedEmpty = capsuleDraft
+            .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        if activity.isBusy {
+            Button(action: cancelCurrentWork) {
+                Image(systemName: "stop.fill")
+            }
+            .tint(.red)
+            .buttonStyle(.borderedProminent)
+            .buttonBorderShape(.circle)
+            .accessibilityLabel("Cancel")
+        } else if activity.hasFailed && trimmedEmpty {
+            Button(action: dismissFailure) {
+                Image(systemName: "xmark")
+            }
+            .buttonStyle(.bordered)
+            .buttonBorderShape(.circle)
+            .accessibilityLabel("Dismiss")
+        } else {
+            Button(action: sendCapsule) {
+                Image(systemName: "paperplane.fill")
+            }
+            .buttonStyle(.borderedProminent)
+            .buttonBorderShape(.circle)
+            .disabled(trimmedEmpty)
+            .accessibilityLabel("Send")
+        }
+    }
+
+    private func reasonPanel(_ reason: String) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.red)
+            Text(reason)
+                .font(.callout)
+                .foregroundStyle(.primary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(12)
+        .frame(width: capsuleWidth, alignment: .leading)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
+        .overlay(
+            RoundedRectangle(cornerRadius: 16)
+                .strokeBorder(.red.opacity(0.35), lineWidth: 1)
+        )
+        .shadow(radius: 10, y: 4)
+    }
+
+    /// Centers the capsule group: docked to the pet's edge at the pet's
+    /// vertical position — or pinned just above the keyboard while the
+    /// field is focused.
+    private func capsuleCenter(in size: CGSize) -> CGPoint {
+        let width = capsuleSize.width
+        let height = capsuleSize.height
         let minX = edgeInset + width / 2
         let maxX = size.width - edgeInset - width / 2
         let x = maxX >= minX
             ? (petEdge == .leading ? minX : maxX)
             : size.width / 2
-        let gap: CGFloat = 12
         let minY = edgeInset + height / 2
-        let maxY = size.height - edgeInset - height / 2
-        var y = petCenter.y - petDiameter / 2 - gap - height / 2
-        if y < minY {
-            y = petCenter.y + petDiameter / 2 + gap + height / 2
-        }
-        y = maxY >= minY ? y.clamped(to: minY...maxY) : size.height / 2
-        return CGPoint(x: x, y: y)
+        let maxY = max(minY, size.height - edgeInset - height / 2)
+        let targetY = fieldFocused && keyboardHeight > 0
+            ? size.height - keyboardHeight - 8 - height / 2
+            : restingCenter(in: size).y
+        return CGPoint(x: x, y: targetY.clamped(to: minY...maxY))
     }
 
     private var dialog: some View {
