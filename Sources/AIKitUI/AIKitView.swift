@@ -145,7 +145,7 @@ public struct AIKitView: View {
         dashboard
             .task { await model.load() }
             .refreshable { await model.load() }
-            .overlay(alignment: .bottomTrailing) {
+            .overlay {
                 if let orchestrator {
                     AIKitChatbotOverlay(orchestrator: orchestrator)
                 }
@@ -405,7 +405,18 @@ public struct AIKitChatbotOverlay: View {
     @State private var draft = ""
     @State private var snapshot: OrchestratorSnapshot?
 
+    /// Which screen edge the pet is docked to, and where along it
+    /// (0 = top, 1 = bottom). The pet snaps to an edge when a drag ends;
+    /// the dialog opens on the same side.
+    @State private var petEdge: HorizontalEdge = .trailing
+    @State private var petVerticalFraction: CGFloat = 0.85
+    @State private var dragTranslation: CGSize = .zero
+    @State private var dialogSize: CGSize = .zero
+
     private let orchestrator: Orchestrator
+
+    private let petDiameter: CGFloat = 58
+    private let edgeInset: CGFloat = 16
 
     @MainActor
     public init(orchestrator: Orchestrator) {
@@ -414,38 +425,114 @@ public struct AIKitChatbotOverlay: View {
     }
 
     public var body: some View {
-        VStack(alignment: .trailing, spacing: 12) {
-            if isDialogPresented {
-                dialog
-                    .transition(.scale.combined(with: .opacity))
+        GeometryReader { proxy in
+            let size = proxy.size
+            let petCenter = liveCenter(in: size)
+            ZStack(alignment: .topLeading) {
+                if isDialogPresented {
+                    dialog
+                        .onGeometryChange(for: CGSize.self) { $0.size } action: { dialogSize = $0 }
+                        .position(dialogCenter(petCenter: petCenter, in: size))
+                        .transition(.scale.combined(with: .opacity))
+                }
+                pet
+                    .position(petCenter)
+                    .gesture(dragGesture(in: size))
             }
-            petButton
         }
-        .padding()
         .task { await refreshSnapshot() }
     }
 
-    private var petButton: some View {
-        Button {
+    private var pet: some View {
+        ZStack {
+            Circle()
+                .fill(.tint)
+                .frame(width: petDiameter, height: petDiameter)
+                .shadow(radius: 10, y: 4)
+            Image(systemName: "pawprint.fill")
+                .font(.title2.weight(.semibold))
+                .foregroundStyle(.white)
+        }
+        .contentShape(Circle())
+        .onTapGesture {
             withAnimation(.spring(duration: 0.24)) {
                 isDialogPresented.toggle()
             }
             if isDialogPresented {
                 Task { await refreshSnapshot() }
             }
-        } label: {
-            ZStack {
-                Circle()
-                    .fill(.tint)
-                    .frame(width: 58, height: 58)
-                    .shadow(radius: 10, y: 4)
-                Image(systemName: "pawprint.fill")
-                    .font(.title2.weight(.semibold))
-                    .foregroundStyle(.white)
-            }
         }
-        .buttonStyle(.plain)
         .accessibilityLabel("AIKit assistant")
+        .accessibilityAddTraits(.isButton)
+    }
+
+    // MARK: - Pet placement
+
+    /// Pet center while resting: derived from the docked edge and vertical
+    /// fraction, clamped so the pet stays fully on screen with `edgeInset`
+    /// padding.
+    private func restingCenter(in size: CGSize) -> CGPoint {
+        let x = petEdge == .leading
+            ? edgeInset + petDiameter / 2
+            : size.width - edgeInset - petDiameter / 2
+        let minY = edgeInset + petDiameter / 2
+        let maxY = max(minY, size.height - edgeInset - petDiameter / 2)
+        let y = minY + petVerticalFraction * (maxY - minY)
+        return CGPoint(x: x, y: y.clamped(to: minY...maxY))
+    }
+
+    /// Pet center during an in-progress drag: follows the finger but stays
+    /// within the on-screen bounds.
+    private func liveCenter(in size: CGSize) -> CGPoint {
+        let base = restingCenter(in: size)
+        let minX = edgeInset + petDiameter / 2
+        let maxX = max(minX, size.width - edgeInset - petDiameter / 2)
+        let minY = edgeInset + petDiameter / 2
+        let maxY = max(minY, size.height - edgeInset - petDiameter / 2)
+        return CGPoint(
+            x: (base.x + dragTranslation.width).clamped(to: minX...maxX),
+            y: (base.y + dragTranslation.height).clamped(to: minY...maxY)
+        )
+    }
+
+    private func dragGesture(in size: CGSize) -> some Gesture {
+        DragGesture(minimumDistance: 8)
+            .onChanged { value in
+                dragTranslation = value.translation
+            }
+            .onEnded { value in
+                let base = restingCenter(in: size)
+                let minY = edgeInset + petDiameter / 2
+                let maxY = max(minY, size.height - edgeInset - petDiameter / 2)
+                let droppedX = base.x + value.translation.width
+                let droppedY = (base.y + value.translation.height).clamped(to: minY...maxY)
+                withAnimation(.spring(duration: 0.3)) {
+                    petEdge = droppedX < size.width / 2 ? .leading : .trailing
+                    petVerticalFraction = maxY > minY ? (droppedY - minY) / (maxY - minY) : 0.5
+                    dragTranslation = .zero
+                }
+            }
+    }
+
+    /// Dialog center: docked to the pet's edge, opening above the pet when
+    /// there is room and below it otherwise, always kept fully on screen.
+    private func dialogCenter(petCenter: CGPoint, in size: CGSize) -> CGPoint {
+        let width = dialogSize.width
+        let height = dialogSize.height
+        let minX = edgeInset + width / 2
+        let maxX = size.width - edgeInset - width / 2
+        let x = maxX >= minX
+            ? (petEdge == .leading ? minX : maxX)
+            : size.width / 2
+        let gap: CGFloat = 12
+        let minY = edgeInset + height / 2
+        let maxY = size.height - edgeInset - height / 2
+        var y = petCenter.y - petDiameter / 2 - gap - height / 2
+        if y < minY {
+            y = petCenter.y + petDiameter / 2 + gap + height / 2
+        }
+        y = maxY >= minY ? y.clamped(to: minY...maxY) : size.height / 2
+        return CGPoint(x: x, y: y)
     }
 
     private var dialog: some View {
@@ -645,7 +732,7 @@ public typealias ChatbotOverlay = AIKitChatbotOverlay
 
 public extension View {
     func aiChatbotOverlay(orchestrator: Orchestrator) -> some View {
-        overlay(alignment: .bottomTrailing) {
+        overlay {
             AIKitChatbotOverlay(orchestrator: orchestrator)
         }
     }
@@ -733,6 +820,12 @@ private extension AIKitConfigurationChange {
     }
 }
 
+private extension Comparable {
+    func clamped(to range: ClosedRange<Self>) -> Self {
+        min(max(self, range.lowerBound), range.upperBound)
+    }
+}
+
 private extension String {
     var emptyAsNil: String? {
         let trimmed = trimmingCharacters(in: .whitespacesAndNewlines)
@@ -744,4 +837,8 @@ private extension String {
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty })
     }
+}
+
+#Preview {
+    AIKitView()
 }
