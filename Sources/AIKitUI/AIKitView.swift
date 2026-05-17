@@ -428,9 +428,9 @@ public struct AIKitChatbotOverlay: View {
     /// the press scale-up.
     @GestureState private var longPressing = false
     @FocusState private var fieldFocused: Bool
-    /// On-screen keyboard height (iOS); the capsule sticks just above it
-    /// while the field is focused, then returns to the pet's position.
-    @State private var keyboardHeight: CGFloat = 0
+    /// On-screen keyboard frame (iOS); the floating control sticks just
+    /// above it, then returns to the pet's position.
+    @State private var keyboardFrame: CGRect?
 
     /// Which screen edge the pet is docked to, and where along it
     /// (0 = top, 1 = bottom). The pet snaps to an edge when a drag ends.
@@ -455,6 +455,9 @@ public struct AIKitChatbotOverlay: View {
     public var body: some View {
         GeometryReader { proxy in
             let size = proxy.size
+            let frame = proxy.frame(in: .global)
+            let keyboardOverlap = keyboardOverlap(in: frame)
+            let keyboardVisible = keyboardVisible(in: frame)
             ZStack(alignment: .topLeading) {
                 if isDialogPresented {
                     dialog
@@ -467,12 +470,20 @@ public struct AIKitChatbotOverlay: View {
                             capsuleGroup(in: size)
                         }
                     }
-                    .padding()
+                    .onGeometryChange(for: CGSize.self) { proxy in
+                        proxy.size
+                    } action: { newSize in
+                        capsuleSize = newSize
+                    }
                     .glassEffect(.regular.interactive().tint(petFill), in: .capsule)
-                    .position(liveCenter(in: size))
+                    .position(floatingCenter(
+                        in: size,
+                        keyboardOverlap: keyboardOverlap,
+                        keyboardVisible: keyboardVisible
+                    ))
                 }
             }
-            .animation(.spring(duration: 0.25), value: keyboardHeight)
+            .animation(.spring(duration: 0.25), value: keyboardFrame?.minY)
         }
         .task { await refreshSnapshot() }
         .task {
@@ -491,17 +502,17 @@ public struct AIKitChatbotOverlay: View {
         }
         #if os(iOS)
         .onReceive(NotificationCenter.default.publisher(
-            for: UIResponder.keyboardWillShowNotification
+            for: UIResponder.keyboardWillChangeFrameNotification
         )) { note in
             if let frame = note.userInfo?[UIResponder.keyboardFrameEndUserInfoKey]
                 as? CGRect {
-                keyboardHeight = frame.height
+                keyboardFrame = frame
             }
         }
         .onReceive(NotificationCenter.default.publisher(
             for: UIResponder.keyboardWillHideNotification
         )) { _ in
-            keyboardHeight = 0
+            keyboardFrame = nil
         }
         #endif
     }
@@ -510,6 +521,7 @@ public struct AIKitChatbotOverlay: View {
     /// standalone when collapsed and inside the capsule when expanded.
     private func petButton(in size: CGSize) -> some View {
         Image(systemName: petSymbol)
+            .padding()
             .contentShape(Circle())
             .font(.title2.weight(.semibold))
             .foregroundStyle(.white)
@@ -518,9 +530,9 @@ public struct AIKitChatbotOverlay: View {
             .scaleEffect((longPressing || isInteracting) ? 1.2 : 1)
             .onTapGesture { toggleExpanded() }
             // Recognized independently of the drag, so it fires the
-            // instant the 2s hold elapses — not on finger release.
+            // instant the 1s hold elapses — not on finger release.
             .simultaneousGesture(isExpanded ? nil :
-                LongPressGesture(minimumDuration: 2.0, maximumDistance: 24)
+                LongPressGesture(minimumDuration: 1.0, maximumDistance: 24)
                     .updating($longPressing) { pressing, state, _ in
                         state = pressing
                     }
@@ -573,20 +585,52 @@ public struct AIKitChatbotOverlay: View {
         return CGPoint(x: x, y: y.clamped(to: minY...maxY))
     }
 
+    /// Center for the rendered floating control, switching between the
+    /// expanded capsule row and the collapsed pet button.
+    private func floatingCenter(
+        in size: CGSize,
+        keyboardOverlap: CGFloat,
+        keyboardVisible: Bool
+    ) -> CGPoint {
+        isExpanded
+            ? capsuleCenter(
+                in: size,
+                keyboardOverlap: keyboardOverlap,
+                keyboardVisible: keyboardVisible
+              )
+            : liveCenter(
+                in: size,
+                keyboardOverlap: keyboardOverlap,
+                keyboardVisible: keyboardVisible
+              )
+    }
+
     /// Pet center during an in-progress drag: follows the finger but stays
-    /// within the on-screen bounds.
-    private func liveCenter(in size: CGSize) -> CGPoint {
+    /// within the on-screen bounds and above the keyboard.
+    private func liveCenter(
+        in size: CGSize,
+        keyboardOverlap: CGFloat,
+        keyboardVisible: Bool
+    ) -> CGPoint {
         let base = restingCenter(in: size)
-        if isExpanded {
-            return CGPoint(x: size.width / 2, y: base.y)
-        }
         let minX = edgeInset + petDiameter / 2
         let maxX = max(minX, size.width - edgeInset - petDiameter / 2)
-        let minY = edgeInset + petDiameter / 2
-        let maxY = max(minY, size.height - edgeInset - petDiameter / 2)
+        let height = floatingControlHeight
+        let minY = edgeInset + height / 2
+        let maxY = max(
+            minY,
+            maxFloatingCenterY(
+                in: size,
+                controlHeight: height,
+                keyboardOverlap: keyboardOverlap
+            )
+        )
+        let targetY = keyboardVisible && dragTranslation == .zero
+            ? maxY
+            : base.y + dragTranslation.height
         return CGPoint(
             x: (base.x + dragTranslation.width).clamped(to: minX...maxX),
-            y: (base.y + dragTranslation.height).clamped(to: minY...maxY)
+            y: targetY.clamped(to: minY...maxY)
         )
     }
 
@@ -785,22 +829,57 @@ public struct AIKitChatbotOverlay: View {
     }
 
     /// Centers the capsule group: docked to the pet's edge at the pet's
-    /// vertical position — or pinned just above the keyboard while the
-    /// field is focused.
-    private func capsuleCenter(in size: CGSize) -> CGPoint {
-        let width = capsuleSize.width
-        let height = capsuleSize.height
+    /// vertical position — or pinned just above the keyboard.
+    private func capsuleCenter(
+        in size: CGSize,
+        keyboardOverlap: CGFloat,
+        keyboardVisible: Bool
+    ) -> CGPoint {
+        let width = max(capsuleSize.width, petDiameter)
+        let height = floatingControlHeight
         let minX = edgeInset + width / 2
         let maxX = size.width - edgeInset - width / 2
         let x = maxX >= minX
             ? (petEdge == .leading ? minX : maxX)
             : size.width / 2
         let minY = edgeInset + height / 2
-        let maxY = max(minY, size.height - edgeInset - height / 2)
-        let targetY = fieldFocused && keyboardHeight > 0
-            ? size.height - keyboardHeight - 8 - height / 2
+        let maxY = max(
+            minY,
+            maxFloatingCenterY(
+                in: size,
+                controlHeight: height,
+                keyboardOverlap: keyboardOverlap
+            )
+        )
+        let targetY = keyboardVisible
+            ? maxY
             : restingCenter(in: size).y
         return CGPoint(x: x, y: targetY.clamped(to: minY...maxY))
+    }
+
+    private var floatingControlHeight: CGFloat {
+        max(capsuleSize.height, petDiameter)
+    }
+
+    private func maxFloatingCenterY(
+        in size: CGSize,
+        controlHeight: CGFloat,
+        keyboardOverlap: CGFloat
+    ) -> CGFloat {
+        let screenLimit = size.height - edgeInset - controlHeight / 2
+        guard keyboardOverlap > 0 else { return screenLimit }
+        let keyboardLimit = size.height - keyboardOverlap - 8 - controlHeight / 2
+        return min(screenLimit, keyboardLimit)
+    }
+
+    private func keyboardOverlap(in frame: CGRect) -> CGFloat {
+        guard let keyboardFrame else { return 0 }
+        return min(frame.height, max(0, frame.maxY - keyboardFrame.minY))
+    }
+
+    private func keyboardVisible(in frame: CGRect) -> Bool {
+        guard let keyboardFrame else { return false }
+        return !keyboardFrame.isEmpty && keyboardFrame.minY <= frame.maxY
     }
 
     private var dialog: some View {
