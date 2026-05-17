@@ -406,12 +406,13 @@ public struct AIKitChatbotOverlay: View {
     @State private var snapshot: OrchestratorSnapshot?
 
     /// Which screen edge the pet is docked to, and where along it
-    /// (0 = top, 1 = bottom). The pet snaps to an edge when a drag ends;
-    /// the dialog opens on the same side.
+    /// (0 = top, 1 = bottom). The pet snaps to an edge when a drag ends.
     @State private var petEdge: HorizontalEdge = .trailing
     @State private var petVerticalFraction: CGFloat = 0.85
     @State private var dragTranslation: CGSize = .zero
-    @State private var dialogSize: CGSize = .zero
+    /// True while the pet is pressed or dragged; drives the touch-down
+    /// scale-up. Auto-resets when the gesture ends.
+    @GestureState private var isInteracting = false
 
     private let orchestrator: Orchestrator
 
@@ -427,17 +428,18 @@ public struct AIKitChatbotOverlay: View {
     public var body: some View {
         GeometryReader { proxy in
             let size = proxy.size
-            let petCenter = liveCenter(in: size)
             ZStack(alignment: .topLeading) {
                 if isDialogPresented {
                     dialog
-                        .onGeometryChange(for: CGSize.self) { $0.size } action: { dialogSize = $0 }
-                        .position(dialogCenter(petCenter: petCenter, in: size))
+                        .position(x: size.width / 2, y: size.height / 2)
                         .transition(.scale.combined(with: .opacity))
+                } else {
+                    pet
+                        .scaleEffect(isInteracting ? 1.18 : 1)
+                        .gesture(petGesture(in: size))
+                        .position(liveCenter(in: size))
+                        .animation(.spring(duration: 0.2), value: isInteracting)
                 }
-                pet
-                    .position(petCenter)
-                    .gesture(dragGesture(in: size))
             }
         }
         .task { await refreshSnapshot() }
@@ -449,20 +451,14 @@ public struct AIKitChatbotOverlay: View {
                 .fill(.tint)
                 .frame(width: petDiameter, height: petDiameter)
                 .shadow(radius: 10, y: 4)
-            Image(systemName: "pawprint.fill")
+            Image(systemName: session.isRunning ? "ellipsis" : "pawprint.fill")
                 .font(.title2.weight(.semibold))
                 .foregroundStyle(.white)
+                .contentTransition(.symbolEffect(.replace))
+                .symbolEffect(.pulse, options: .repeating, isActive: session.isRunning)
         }
         .contentShape(Circle())
-        .onTapGesture {
-            withAnimation(.spring(duration: 0.24)) {
-                isDialogPresented.toggle()
-            }
-            if isDialogPresented {
-                Task { await refreshSnapshot() }
-            }
-        }
-        .accessibilityLabel("AIKit assistant")
+        .accessibilityLabel(session.isRunning ? "AIKit assistant, working" : "AIKit assistant")
         .accessibilityAddTraits(.isButton)
     }
 
@@ -495,12 +491,25 @@ public struct AIKitChatbotOverlay: View {
         )
     }
 
-    private func dragGesture(in size: CGSize) -> some Gesture {
-        DragGesture(minimumDistance: 8)
+    /// One gesture for the whole pet: a touch-down (press) or drag scales
+    /// it up via `isInteracting`; a release that barely moved opens the
+    /// dialog, while a real drag snaps the pet to the nearest edge.
+    private func petGesture(in size: CGSize) -> some Gesture {
+        DragGesture(minimumDistance: 0)
+            .updating($isInteracting) { _, state, _ in state = true }
             .onChanged { value in
                 dragTranslation = value.translation
             }
             .onEnded { value in
+                let moved = hypot(value.translation.width, value.translation.height)
+                if moved < 10 {
+                    dragTranslation = .zero
+                    withAnimation(.spring(duration: 0.24)) {
+                        isDialogPresented = true
+                    }
+                    Task { await refreshSnapshot() }
+                    return
+                }
                 let base = restingCenter(in: size)
                 let minY = edgeInset + petDiameter / 2
                 let maxY = max(minY, size.height - edgeInset - petDiameter / 2)
@@ -512,27 +521,6 @@ public struct AIKitChatbotOverlay: View {
                     dragTranslation = .zero
                 }
             }
-    }
-
-    /// Dialog center: docked to the pet's edge, opening above the pet when
-    /// there is room and below it otherwise, always kept fully on screen.
-    private func dialogCenter(petCenter: CGPoint, in size: CGSize) -> CGPoint {
-        let width = dialogSize.width
-        let height = dialogSize.height
-        let minX = edgeInset + width / 2
-        let maxX = size.width - edgeInset - width / 2
-        let x = maxX >= minX
-            ? (petEdge == .leading ? minX : maxX)
-            : size.width / 2
-        let gap: CGFloat = 12
-        let minY = edgeInset + height / 2
-        let maxY = size.height - edgeInset - height / 2
-        var y = petCenter.y - petDiameter / 2 - gap - height / 2
-        if y < minY {
-            y = petCenter.y + petDiameter / 2 + gap + height / 2
-        }
-        y = maxY >= minY ? y.clamped(to: minY...maxY) : size.height / 2
-        return CGPoint(x: x, y: y)
     }
 
     private var dialog: some View {
