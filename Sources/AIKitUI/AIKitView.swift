@@ -460,18 +460,18 @@ public struct AIKitChatbotOverlay: View {
                     dialog
                         .position(x: size.width / 2, y: size.height / 2)
                         .transition(.scale.combined(with: .opacity))
-                }
-                if isExpanded && !isDialogPresented {
-                    capsuleGroup(in: size)
-                        .onGeometryChange(for: CGSize.self) { $0.size } action: { capsuleSize = $0 }
-                        .position(capsuleCenter(in: size))
-                        .transition(.opacity.combined(with: .scale(scale: 0.92)))
-                } else if !isDialogPresented {
-                    petButton(in: size)
-                        .position(liveCenter(in: size))
+                } else {
+                    HStack {
+                        petButton(in: size)
+                        if isExpanded {
+                            capsuleGroup(in: size)
+                        }
+                    }
+                    .padding()
+                    .glassEffect(.regular.interactive().tint(petFill), in: .capsule)
+                    .position(liveCenter(in: size))
                 }
             }
-            .animation(.spring(duration: 0.28), value: isExpanded)
             .animation(.spring(duration: 0.25), value: keyboardHeight)
         }
         .task { await refreshSnapshot() }
@@ -509,46 +509,35 @@ public struct AIKitChatbotOverlay: View {
     /// The pet circle plus its tap / long-press / drag recognizers. Used
     /// standalone when collapsed and inside the capsule when expanded.
     private func petButton(in size: CGSize) -> some View {
-        pet
-            .scaleEffect((longPressing || isInteracting) ? 1.12 : 1)
+        Image(systemName: petSymbol)
+            .contentShape(Circle())
+            .font(.title2.weight(.semibold))
+            .foregroundStyle(.white)
+            .contentTransition(.symbolEffect(.replace))
+            .symbolEffect(.pulse, options: .repeating, isActive: activity.isBusy)
+            .scaleEffect((longPressing || isInteracting) ? 1.2 : 1)
             .onTapGesture { toggleExpanded() }
             // Recognized independently of the drag, so it fires the
             // instant the 2s hold elapses — not on finger release.
-            .simultaneousGesture(
+            .simultaneousGesture(isExpanded ? nil :
                 LongPressGesture(minimumDuration: 2.0, maximumDistance: 24)
                     .updating($longPressing) { pressing, state, _ in
                         state = pressing
                     }
-                    .onEnded { _ in openFullPanel() }
+                    .onEnded { _ in openFullPanel() },
             )
-            .simultaneousGesture(moveGesture(in: size))
+            .simultaneousGesture(isExpanded ? nil : moveGesture(in: size))
             .animation(.spring(duration: 0.2), value: longPressing)
             .animation(.spring(duration: 0.2), value: isInteracting)
-    }
-
-    private var pet: some View {
-        ZStack {
-            Circle()
-                .fill(petFill)
-                .frame(width: petDiameter, height: petDiameter)
-                .shadow(radius: 10, y: 4)
-            Image(systemName: petSymbol)
-                .font(.title2.weight(.semibold))
-                .foregroundStyle(.white)
-                .contentTransition(.symbolEffect(.replace))
-                .symbolEffect(.pulse, options: .repeating, isActive: activity.isBusy)
-        }
-        .contentShape(Circle())
-        .animation(.easeInOut(duration: 0.2), value: activity)
-        .accessibilityLabel(petAccessibilityLabel)
-        .accessibilityAddTraits(.isButton)
+            .accessibilityLabel(petAccessibilityLabel)
+            .accessibilityAddTraits(.isButton)
     }
 
     /// Yellow while a turn runs, red after a failure, tint when idle.
-    private var petFill: AnyShapeStyle {
-        if activity.hasFailed { return AnyShapeStyle(.red) }
-        if activity.isBusy { return AnyShapeStyle(.yellow) }
-        return AnyShapeStyle(.tint)
+    private var petFill: Color {
+        if activity.hasFailed { return .red }
+        if activity.isBusy { return .yellow }
+        return .accentColor
     }
 
     /// A per-phase glyph so the pet says *what* it is doing, not just "busy".
@@ -588,6 +577,9 @@ public struct AIKitChatbotOverlay: View {
     /// within the on-screen bounds.
     private func liveCenter(in size: CGSize) -> CGPoint {
         let base = restingCenter(in: size)
+        if isExpanded {
+            return CGPoint(x: size.width / 2, y: base.y)
+        }
         let minX = edgeInset + petDiameter / 2
         let maxX = max(minX, size.width - edgeInset - petDiameter / 2)
         let minY = edgeInset + petDiameter / 2
@@ -718,16 +710,9 @@ public struct AIKitChatbotOverlay: View {
 
     private func capsuleRow(in size: CGSize) -> some View {
         HStack(spacing: 8) {
-            if petEdge == .leading { petButton(in: size) }
             statusField
             interactButton
-            if petEdge == .trailing { petButton(in: size) }
         }
-        .padding(6)
-        .frame(width: capsuleWidth)
-        .background(.ultraThinMaterial, in: Capsule())
-        .overlay(Capsule().strokeBorder(.white.opacity(0.15), lineWidth: 1))
-        .shadow(radius: 12, y: 4)
     }
 
     @ViewBuilder
@@ -790,19 +775,13 @@ public struct AIKitChatbotOverlay: View {
         HStack(alignment: .top, spacing: 8) {
             Image(systemName: "exclamationmark.triangle.fill")
                 .foregroundStyle(.red)
-            Text(reason)
-                .font(.callout)
-                .foregroundStyle(.primary)
-                .fixedSize(horizontal: false, vertical: true)
+            ScrollView(.horizontal, showsIndicators: false) {
+                Text(reason)
+                    .font(.callout)
+                    .foregroundStyle(.primary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
-        .padding(12)
-        .frame(width: capsuleWidth, alignment: .leading)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
-        .overlay(
-            RoundedRectangle(cornerRadius: 16)
-                .strokeBorder(.red.opacity(0.35), lineWidth: 1)
-        )
-        .shadow(radius: 10, y: 4)
     }
 
     /// Centers the capsule group: docked to the pet's edge at the pet's
@@ -1129,5 +1108,5 @@ private extension String {
 }
 
 #Preview {
-    AIKitView()
+    AIKitChatbotOverlay(orchestrator: .init(llm: .init(provider: OllamaProvider()), tools: .init(), memory: InMemoryMemoryStore(), contextResolver: .init(), guardrails: .init()))
 }
