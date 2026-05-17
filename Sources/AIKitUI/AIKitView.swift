@@ -404,6 +404,9 @@ public struct AIKitChatbotOverlay: View {
     @State private var selectedMenu = ChatbotMenu.context
     @State private var draft = ""
     @State private var snapshot: OrchestratorSnapshot?
+    /// Live orchestrator activity, so the pet reflects any turn on this
+    /// orchestrator — not just the overlay's own session.
+    @State private var activity: OrchestratorActivity = .idle
 
     /// Which screen edge the pet is docked to, and where along it
     /// (0 = top, 1 = bottom). The pet snaps to an edge when a drag ends.
@@ -443,6 +446,11 @@ public struct AIKitChatbotOverlay: View {
             }
         }
         .task { await refreshSnapshot() }
+        .task {
+            for await update in orchestrator.activityUpdates() {
+                activity = update
+            }
+        }
     }
 
     private var pet: some View {
@@ -451,7 +459,7 @@ public struct AIKitChatbotOverlay: View {
                 .fill(.tint)
                 .frame(width: petDiameter, height: petDiameter)
                 .shadow(radius: 10, y: 4)
-            if session.isRunning {
+            if activity.isBusy {
                 ProgressView()
                     .progressViewStyle(.circular)
                     .tint(.white)
@@ -462,7 +470,7 @@ public struct AIKitChatbotOverlay: View {
             }
         }
         .contentShape(Circle())
-        .accessibilityLabel(session.isRunning ? "AIKit assistant, working" : "AIKit assistant")
+        .accessibilityLabel(activity.isBusy ? "AIKit assistant, working" : "AIKit assistant")
         .accessibilityAddTraits(.isButton)
     }
 

@@ -42,6 +42,48 @@ public struct OrchestratorSnapshot: Sendable, Hashable {
     }
 }
 
+/// What the orchestrator is doing right now, for a single turn. Aggregated
+/// across all in-flight turns by `OrchestratorActivity`.
+public enum OrchestratorPhase: Sendable, Equatable {
+    /// No turn is using this slot.
+    case idle
+    /// Building the prompt / running pre-prompt guardrails.
+    case preparing
+    /// Waiting on / streaming from the model.
+    case thinking
+    /// Executing the named tool.
+    case callingTool(String)
+    /// Running a verification (guardrail) stage on a result.
+    case verifying
+}
+
+/// A `Sendable` snapshot of what an `Orchestrator` is doing. Delivered live
+/// via `Orchestrator.activityUpdates()` so UI can reflect any turn on the
+/// instance — including overlapping ones — regardless of which session
+/// started it.
+public struct OrchestratorActivity: Sendable, Equatable {
+    /// Turns currently in flight (overlapping `run` calls).
+    public let activeTurns: Int
+    /// The most user-visible phase across in-flight turns: a tool call
+    /// outranks thinking so it stays visible while another turn streams.
+    public let phase: OrchestratorPhase
+
+    public var isBusy: Bool { activeTurns > 0 }
+
+    public static let idle = OrchestratorActivity(activeTurns: 0, phase: .idle)
+
+    /// Higher rank wins when aggregating concurrent turns into one `phase`.
+    static func rank(_ phase: OrchestratorPhase) -> Int {
+        switch phase {
+        case .idle: 0
+        case .preparing: 1
+        case .verifying: 2
+        case .thinking: 3
+        case .callingTool: 4
+        }
+    }
+}
+
 /// The single entry point a host app calls once per user instruction. An actor
 /// so concurrent `run` calls on one instance serialize cleanly.
 public actor Orchestrator {
@@ -113,6 +155,63 @@ public actor Orchestrator {
     private let options: Options
     private let logger = AIKitLog.runtime
 
+    private var turnCounter = 0
+    /// Latest phase per in-flight turn id. Actor-isolated, so concurrent
+    /// turns mutate it safely without any extra synchronization.
+    private var turnPhases: [Int: OrchestratorPhase] = [:]
+    private var activityObservers: [UUID: AsyncStream<OrchestratorActivity>.Continuation] = [:]
+
+    private func nextTurnID() -> Int {
+        turnCounter += 1
+        return turnCounter
+    }
+
+    /// A live stream of this orchestrator's activity: the current state is
+    /// emitted immediately on subscription, then again on every phase or
+    /// turn-count change. Each subscriber gets an independent stream, so a
+    /// floating assistant button reflects turns started anywhere — including
+    /// overlapping ones — not just its own session's.
+    public nonisolated func activityUpdates() -> AsyncStream<OrchestratorActivity> {
+        AsyncStream { continuation in
+            let id = UUID()
+            Task { await self.registerActivityObserver(id, continuation) }
+            continuation.onTermination = { _ in
+                Task { await self.unregisterActivityObserver(id) }
+            }
+        }
+    }
+
+    private func registerActivityObserver(
+        _ id: UUID,
+        _ continuation: AsyncStream<OrchestratorActivity>.Continuation
+    ) {
+        activityObservers[id] = continuation
+        continuation.yield(currentActivity())
+    }
+
+    private func unregisterActivityObserver(_ id: UUID) {
+        activityObservers[id] = nil
+    }
+
+    private func currentActivity() -> OrchestratorActivity {
+        OrchestratorActivity(
+            activeTurns: turnPhases.count,
+            phase: turnPhases.values.max {
+                OrchestratorActivity.rank($0) < OrchestratorActivity.rank($1)
+            } ?? .idle
+        )
+    }
+
+    /// Sets (or, with `nil`, clears) a turn's phase and broadcasts the new
+    /// aggregate to every subscriber. Actor-isolated; no `await` hops.
+    private func setPhase(_ phase: OrchestratorPhase?, turn: Int) {
+        turnPhases[turn] = phase
+        let snapshot = currentActivity()
+        for continuation in activityObservers.values {
+            continuation.yield(snapshot)
+        }
+    }
+
     public init(
         llm: LLMClient,
         tools: ToolRegistry,
@@ -130,9 +229,12 @@ public actor Orchestrator {
     }
 
     public func run(_ instruction: String) -> AsyncThrowingStream<OrchestratorEvent, any Error> {
-        AsyncThrowingStream { continuation in
+        let turnID = nextTurnID()
+        setPhase(.preparing, turn: turnID)
+        return AsyncThrowingStream { continuation in
             let task = Task {
-                await self.loop(instruction, emit: { continuation.yield($0) })
+                await self.loop(instruction, turnID: turnID, emit: { continuation.yield($0) })
+                await self.setPhase(nil, turn: turnID)
                 continuation.finish()
             }
             continuation.onTermination = { _ in task.cancel() }
@@ -160,6 +262,7 @@ public actor Orchestrator {
 
     private func loop(
         _ instruction: String,
+        turnID: Int,
         emit: @escaping @Sendable (OrchestratorEvent) -> Void
     ) async {
         let context = await contextResolver.merged()
@@ -189,6 +292,7 @@ public actor Orchestrator {
                 return
             }
             do {
+                setPhase(.preparing, turn: turnID)
                 if let correction = pendingCorrection {
                     transcript.append(.toolResult(
                         id: "correction-\(iteration)",
@@ -225,6 +329,7 @@ public actor Orchestrator {
                     emit(.verification(stage: .prePrompt, outcome: .warn(reason: warning)))
                 }
 
+                setPhase(.thinking, turn: turnID)
                 let response = try await withTurnDeadline(deadline) {
                     try await self.callLLM(request, emit: emit)
                 }
@@ -253,6 +358,7 @@ public actor Orchestrator {
                                 + "of being executed."
                         )))
                     }
+                    setPhase(.verifying, turn: turnID)
                     _ = try await withTurnDeadline(deadline) {
                         try await self.guardrails.verify(
                             .finalResult, .finalResult(text)
@@ -270,7 +376,7 @@ public actor Orchestrator {
                     transcript.append(entry)
                     for call in resolved {
                         try await execute(
-                            call, viewID: viewID, deadline: deadline,
+                            call, viewID: viewID, turnID: turnID, deadline: deadline,
                             transcript: &transcript, emit: emit
                         )
                     }
@@ -286,7 +392,7 @@ public actor Orchestrator {
                     transcript.append(entry)
                     for call in resolved {
                         try await execute(
-                            call, viewID: viewID, deadline: deadline,
+                            call, viewID: viewID, turnID: turnID, deadline: deadline,
                             transcript: &transcript, emit: emit
                         )
                     }
@@ -348,6 +454,7 @@ public actor Orchestrator {
     private func execute(
         _ call: ToolCall,
         viewID: ViewContext.ID,
+        turnID: Int,
         deadline: ContinuousClock.Instant?,
         transcript: inout [TranscriptEntry],
         emit: @Sendable (OrchestratorEvent) -> Void
@@ -370,6 +477,7 @@ public actor Orchestrator {
         emit(.verification(stage: .preToolUse, outcome: .pass))
 
         let inputData = (try? effectiveCall.input.data()) ?? Data("{}".utf8)
+        setPhase(.callingTool(effectiveCall.name), turn: turnID)
         emit(.toolCall(name: effectiveCall.name, input: inputData))
         try? await memory.append(UsageEvent(
             viewID: viewID, kind: .toolInvoked,
