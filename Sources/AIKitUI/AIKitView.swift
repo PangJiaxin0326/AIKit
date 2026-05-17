@@ -753,9 +753,10 @@ public struct AIKitChatbotOverlay: View {
     }
 
     private func capsuleRow(in size: CGSize) -> some View {
-        HStack(spacing: 8) {
+        HStack {
             statusField
             interactButton
+                .padding(.horizontal)
         }
     }
 
