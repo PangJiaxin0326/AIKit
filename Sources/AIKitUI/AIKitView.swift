@@ -417,8 +417,9 @@ public struct AIKitChatbotOverlay: View {
     /// Live orchestrator activity, so the pet reflects any turn on this
     /// orchestrator — not just the overlay's own session.
     @State private var activity: OrchestratorActivity = .idle
-    /// Touch-down state from the long-press recognizer; drives press scale.
-    @State private var isPressing = false
+    /// True while a long press is being held (before it completes); drives
+    /// the press scale-up.
+    @GestureState private var longPressing = false
 
     /// Which screen edge the pet is docked to, and where along it
     /// (0 = top, 1 = bottom). The pet snaps to an edge when a drag ends.
@@ -457,18 +458,20 @@ public struct AIKitChatbotOverlay: View {
                         .transition(.scale(scale: 0.85).combined(with: .opacity))
                 }
                 pet
-                    .scaleEffect((isPressing || isInteracting) ? 1.18 : 1)
-                    .gesture(moveGesture(in: size))
+                    .scaleEffect((longPressing || isInteracting) ? 1.18 : 1)
                     .onTapGesture { toggleBubble() }
-                    .onLongPressGesture(
-                        minimumDuration: 0.5,
-                        maximumDistance: 24,
-                        perform: openFullPanel,
-                        onPressingChanged: { pressing in
-                            withAnimation(.spring(duration: 0.2)) { isPressing = pressing }
-                        }
+                    // Recognized independently of the drag, so it fires the
+                    // instant the 2s hold elapses — not on finger release.
+                    .simultaneousGesture(
+                        LongPressGesture(minimumDuration: 2.0, maximumDistance: 24)
+                            .updating($longPressing) { pressing, state, _ in
+                                state = pressing
+                            }
+                            .onEnded { _ in openFullPanel() }
                     )
+                    .simultaneousGesture(moveGesture(in: size))
                     .position(petCenter)
+                    .animation(.spring(duration: 0.2), value: longPressing)
                     .animation(.spring(duration: 0.2), value: isInteracting)
             }
         }
@@ -477,6 +480,12 @@ public struct AIKitChatbotOverlay: View {
             for await update in orchestrator.activityUpdates() {
                 activity = update
             }
+        }
+        .onChange(of: activity.isBusy) { _, busy in
+            // When a turn finishes (busy → idle, not a failure), drop any
+            // stale draft so the working bubble is cleanly replaced by an
+            // empty idle prompt and the completed turn can't be re-sent.
+            if !busy && !activity.hasFailed { bubbleDraft = "" }
         }
     }
 
@@ -600,7 +609,7 @@ public struct AIKitChatbotOverlay: View {
 
     private func sendFromBubble() {
         let text = bubbleDraft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
+        guard !text.isEmpty, !activity.isBusy else { return }
         bubbleDraft = ""
         Task { await session.send(text) }
     }
@@ -675,12 +684,16 @@ public struct AIKitChatbotOverlay: View {
             TextField(placeholder, text: $bubbleDraft, axis: .vertical)
                 .textFieldStyle(.roundedBorder)
                 .lineLimit(1...3)
+                .disabled(activity.isBusy)
                 .onSubmit(sendFromBubble)
             Button(action: sendFromBubble) {
                 Image(systemName: "paperplane.fill")
             }
             .buttonStyle(.borderedProminent)
-            .disabled(bubbleDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            .disabled(
+                activity.isBusy
+                || bubbleDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            )
         }
     }
 
