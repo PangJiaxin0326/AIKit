@@ -495,14 +495,17 @@ public struct AIKitChatbotOverlay: View {
     /// it up via `isInteracting`; a release that barely moved opens the
     /// dialog, while a real drag snaps the pet to the nearest edge.
     private func petGesture(in size: CGSize) -> some Gesture {
-        DragGesture(minimumDistance: 0)
+        // Measure in the global space: the pet is repositioned every frame
+        // from `dragTranslation`, so a local space would move with it and
+        // feed back into the translation, making the pet jitter.
+        DragGesture(minimumDistance: 0, coordinateSpace: .global)
             .updating($isInteracting) { _, state, _ in state = true }
             .onChanged { value in
                 dragTranslation = value.translation
             }
             .onEnded { value in
                 let moved = hypot(value.translation.width, value.translation.height)
-                if moved < 10 {
+                if moved < 4 {
                     dragTranslation = .zero
                     withAnimation(.spring(duration: 0.24)) {
                         isDialogPresented = true
