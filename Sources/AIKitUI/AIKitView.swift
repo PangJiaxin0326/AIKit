@@ -451,11 +451,15 @@ public struct AIKitChatbotOverlay: View {
                 .fill(.tint)
                 .frame(width: petDiameter, height: petDiameter)
                 .shadow(radius: 10, y: 4)
-            Image(systemName: session.isRunning ? "ellipsis" : "pawprint.fill")
-                .font(.title2.weight(.semibold))
-                .foregroundStyle(.white)
-                .contentTransition(.symbolEffect(.replace))
-                .symbolEffect(.pulse, options: .repeating, isActive: session.isRunning)
+            if session.isRunning {
+                ProgressView()
+                    .progressViewStyle(.circular)
+                    .tint(.white)
+            } else {
+                Image(systemName: "pawprint.fill")
+                    .font(.title2.weight(.semibold))
+                    .foregroundStyle(.white)
+            }
         }
         .contentShape(Circle())
         .accessibilityLabel(session.isRunning ? "AIKit assistant, working" : "AIKit assistant")
