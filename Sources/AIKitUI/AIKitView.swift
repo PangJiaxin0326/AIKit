@@ -152,12 +152,6 @@ public struct AIKitView: View {
     public var body: some View {
         dashboard
             .task { await model.load() }
-            .refreshable { await model.load() }
-            .overlay {
-                if let orchestrator {
-                    AIKitChatbotOverlay(orchestrator: orchestrator)
-                }
-            }
     }
 
     private var dashboard: some View {
@@ -171,6 +165,7 @@ public struct AIKitView: View {
                 if !model.recentChanges.isEmpty {
                     changeLogSection
                 }
+                resetFooter
             }
             .padding()
             .frame(maxWidth: 920, alignment: .leading)
@@ -192,17 +187,6 @@ public struct AIKitView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
-            Button {
-                Task { await model.load() }
-            } label: {
-                Label("Refresh", systemImage: "arrow.clockwise")
-            }
-            Button {
-                Task { await model.apply() }
-            } label: {
-                Label("Apply", systemImage: "checkmark.circle")
-            }
-            .buttonStyle(.borderedProminent)
         }
     }
 
@@ -339,12 +323,25 @@ public struct AIKitView: View {
         }
     }
 
+    private var resetFooter: some View {
+        HStack {
+            Spacer()
+            Button(role: .destructive) {
+                model.resetToDefaults()
+            } label: {
+                Label("Reset", systemImage: "arrow.counterclockwise")
+            }
+            .buttonStyle(.bordered)
+        }
+        .frame(maxWidth: .infinity, alignment: .trailing)
+    }
+
     private func binding<Value>(
         _ keyPath: WritableKeyPath<AIKitConfiguration, Value>
     ) -> Binding<Value> {
         Binding(
             get: { model.configuration[keyPath: keyPath] },
-            set: { model.configuration[keyPath: keyPath] = $0 }
+            set: { model.update(keyPath, to: $0) }
         )
     }
 
@@ -353,7 +350,7 @@ public struct AIKitView: View {
     ) -> Binding<String> {
         Binding(
             get: { model.configuration[keyPath: keyPath] ?? "" },
-            set: { model.configuration[keyPath: keyPath] = $0.emptyAsNil }
+            set: { model.update(keyPath, to: $0.emptyAsNil) }
         )
     }
 
@@ -365,7 +362,7 @@ public struct AIKitView: View {
                 guard let value = model.configuration[keyPath: keyPath] else { return "" }
                 return String(value)
             },
-            set: { model.configuration[keyPath: keyPath] = Double($0) }
+            set: { model.update(keyPath, to: Double($0)) }
         )
     }
 
@@ -377,7 +374,7 @@ public struct AIKitView: View {
                 guard let value = model.configuration[keyPath: keyPath] else { return "" }
                 return String(value)
             },
-            set: { model.configuration[keyPath: keyPath] = Int($0) }
+            set: { model.update(keyPath, to: Int($0)) }
         )
     }
 
@@ -386,7 +383,7 @@ public struct AIKitView: View {
     ) -> Binding<String> {
         Binding(
             get: { model.configuration[keyPath: keyPath].sorted().joined(separator: ", ") },
-            set: { model.configuration[keyPath: keyPath] = $0.configurationSet }
+            set: { model.update(keyPath, to: $0.configurationSet) }
         )
     }
 
@@ -394,10 +391,12 @@ public struct AIKitView: View {
         Binding(
             get: { model.configuration.capability.enabledToolNames.contains(name) },
             set: { isEnabled in
-                if isEnabled {
-                    model.configuration.capability.enabledToolNames.insert(name)
-                } else {
-                    model.configuration.capability.enabledToolNames.remove(name)
+                model.update { configuration in
+                    if isEnabled {
+                        configuration.capability.enabledToolNames.insert(name)
+                    } else {
+                        configuration.capability.enabledToolNames.remove(name)
+                    }
                 }
             }
         )
@@ -435,7 +434,7 @@ public struct AIKitChatbotOverlay: View {
     /// Which screen edge the pet is docked to, and where along it
     /// (0 = top, 1 = bottom). The pet snaps to an edge when a drag ends.
     @State private var petEdge: HorizontalEdge = .trailing
-    @State private var petVerticalFraction: CGFloat = 0.85
+    @State private var petVerticalFraction: CGFloat = 1
     @State private var dragTranslation: CGSize = .zero
     /// True while the pet is pressed or dragged; drives the touch-down
     /// scale-up. Auto-resets when the gesture ends.
@@ -1096,6 +1095,7 @@ private final class AIKitConfigurationViewModel {
 
     private let store: AIKitConfigurationStore
     private let toolRegistry: ToolRegistry?
+    @ObservationIgnored private var saveTask: Task<Void, Never>?
 
     init(store: AIKitConfigurationStore, toolRegistry: ToolRegistry?) {
         self.store = store
@@ -1112,10 +1112,43 @@ private final class AIKitConfigurationViewModel {
         status = nil
     }
 
-    func apply() async {
-        await store.replace(with: configuration, source: "AIKitView")
-        recentChanges = await store.recentChanges(limit: 6)
-        status = "Applied"
+    func update<Value>(
+        _ keyPath: WritableKeyPath<AIKitConfiguration, Value>,
+        to value: Value
+    ) {
+        configuration[keyPath: keyPath] = value
+        saveCurrentConfiguration(status: "Saved")
+    }
+
+    func update(_ change: (inout AIKitConfiguration) -> Void) {
+        change(&configuration)
+        saveCurrentConfiguration(status: "Saved")
+    }
+
+    func resetToDefaults() {
+        configuration = .standard
+        saveCurrentConfiguration(status: "Reset")
+    }
+
+    private func saveCurrentConfiguration(status: String) {
+        saveTask?.cancel()
+
+        let configuration = configuration
+        saveTask = Task { [store, configuration] in
+            guard !Task.isCancelled else { return }
+            await store.replace(with: configuration, source: "AIKitView")
+            guard !Task.isCancelled else { return }
+
+            let recentChanges = await store.recentChanges(limit: 6)
+            guard !Task.isCancelled else { return }
+
+            self.recentChanges = recentChanges
+            self.status = status
+        }
+    }
+
+    deinit {
+        saveTask?.cancel()
     }
 }
 
