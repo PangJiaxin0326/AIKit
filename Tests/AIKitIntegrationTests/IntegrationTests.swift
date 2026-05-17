@@ -91,6 +91,38 @@ private actor InvocationFlag {
         #expect(invoked == false)
     }
 
+    @Test func reportFailureEndsTurnWithReason() async throws {
+        let registry = ToolRegistry()
+        await registry.register(ReportFailureTool())
+
+        let provider = MockProvider(responses: [
+            LLMResponse(
+                content: [.toolUse(
+                    id: "f1", name: ReportFailureTool.name,
+                    input: .object(["reason": .string("Your request is too vague.")])
+                )],
+                stopReason: .toolUse
+            )
+        ])
+
+        let orchestrator = Orchestrator(
+            llm: LLMClient(provider: provider),
+            tools: registry,
+            memory: InMemoryMemoryStore(),
+            contextResolver: await resolver(toolNames: [ReportFailureTool.name]),
+            guardrails: PolicyEngine(rails: [AllowlistedTools(allowed: [ReportFailureTool.name])]),
+            options: .init(model: "test", stream: false)
+        )
+
+        var failure: String?
+        for try await event in await orchestrator.run("do the thing") {
+            if case .failure(let reason) = event { failure = reason }
+            if case .finalAnswer = event { Issue.record("should not finalize") }
+            if case .error(let error) = event { Issue.record("unexpected: \(error)") }
+        }
+        #expect(failure == "Your request is too vague.")
+    }
+
     @Test func fiftyConcurrentOrchestratorsAreIsolated() async throws {
         try await withThrowingTaskGroup(of: String?.self) { group in
             for i in 0..<50 {

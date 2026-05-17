@@ -19,6 +19,10 @@ public enum OrchestratorEvent: Sendable {
     /// do cost/telemetry accounting even on the streaming path.
     case usage(TokenUsage)
     case finalAnswer(String)
+    /// The turn ended without completing the request — either the model
+    /// called `reportFailure` (a vague / unexecutable ask) or a terminal
+    /// error was mapped to a user-facing reason.
+    case failure(reason: String)
     case error(any Error)
 }
 
@@ -67,10 +71,31 @@ public struct OrchestratorActivity: Sendable, Equatable {
     /// The most user-visible phase across in-flight turns: a tool call
     /// outranks thinking so it stays visible while another turn streams.
     public let phase: OrchestratorPhase
+    /// The reason the most recent turn failed, if any. Sticky: it persists
+    /// after the turn ends until a new `run` starts or `cancelActiveTurns()`
+    /// is called, so UI can surface it.
+    public let failureReason: String?
 
     public var isBusy: Bool { activeTurns > 0 }
+    public var hasFailed: Bool { failureReason != nil }
 
-    public static let idle = OrchestratorActivity(activeTurns: 0, phase: .idle)
+    /// A short, user-facing description of the current state.
+    public var statusText: String {
+        if isBusy {
+            switch phase {
+            case .idle, .preparing: return "Preparing…"
+            case .thinking: return "Thinking…"
+            case .callingTool(let name): return "Calling \(name)…"
+            case .verifying: return "Checking the result…"
+            }
+        }
+        if let failureReason { return failureReason }
+        return "Idle"
+    }
+
+    public static let idle = OrchestratorActivity(
+        activeTurns: 0, phase: .idle, failureReason: nil
+    )
 
     /// Higher rank wins when aggregating concurrent turns into one `phase`.
     static func rank(_ phase: OrchestratorPhase) -> Int {
@@ -159,11 +184,26 @@ public actor Orchestrator {
     /// Latest phase per in-flight turn id. Actor-isolated, so concurrent
     /// turns mutate it safely without any extra synchronization.
     private var turnPhases: [Int: OrchestratorPhase] = [:]
+    /// The in-flight `loop` task per turn id, so a turn can be cancelled.
+    private var turnTasks: [Int: Task<Void, Never>] = [:]
+    /// Sticky reason from the last failed turn; cleared when a new turn
+    /// starts or `cancelActiveTurns()` is called.
+    private var lastFailureReason: String?
     private var activityObservers: [UUID: AsyncStream<OrchestratorActivity>.Continuation] = [:]
 
     private func nextTurnID() -> Int {
         turnCounter += 1
         return turnCounter
+    }
+
+    /// Cancels every in-flight turn and clears any sticky failure, returning
+    /// the orchestrator to idle. Safe to call from UI (e.g. a Cancel button).
+    public func cancelActiveTurns() {
+        for task in turnTasks.values { task.cancel() }
+        turnTasks.removeAll()
+        turnPhases.removeAll()
+        lastFailureReason = nil
+        broadcast()
     }
 
     /// A live stream of this orchestrator's activity: the current state is
@@ -198,18 +238,73 @@ public actor Orchestrator {
             activeTurns: turnPhases.count,
             phase: turnPhases.values.max {
                 OrchestratorActivity.rank($0) < OrchestratorActivity.rank($1)
-            } ?? .idle
+            } ?? .idle,
+            failureReason: lastFailureReason
         )
     }
 
-    /// Sets (or, with `nil`, clears) a turn's phase and broadcasts the new
-    /// aggregate to every subscriber. Actor-isolated; no `await` hops.
-    private func setPhase(_ phase: OrchestratorPhase?, turn: Int) {
-        turnPhases[turn] = phase
+    /// Pushes the current aggregate to every subscriber. Actor-isolated.
+    private func broadcast() {
         let snapshot = currentActivity()
         for continuation in activityObservers.values {
             continuation.yield(snapshot)
         }
+    }
+
+    /// Sets (or, with `nil`, clears) a turn's phase and broadcasts.
+    private func setPhase(_ phase: OrchestratorPhase?, turn: Int) {
+        turnPhases[turn] = phase
+        broadcast()
+    }
+
+    /// Ends a turn: drops its phase and task handle, keeping any sticky
+    /// failure so UI can still show it.
+    private func finishTurn(_ turn: Int) {
+        turnPhases[turn] = nil
+        turnTasks[turn] = nil
+        broadcast()
+    }
+
+    /// Records a sticky failure reason for a turn and ends it.
+    private func recordFailure(_ reason: String, turn: Int) {
+        lastFailureReason = reason
+        turnPhases[turn] = nil
+        turnTasks[turn] = nil
+        broadcast()
+    }
+
+    private func registerTask(_ task: Task<Void, Never>, turn: Int) {
+        turnTasks[turn] = task
+    }
+
+    /// The `reportFailure` reason among `calls`, if the model invoked it.
+    private func failureReason(in calls: [ToolCall]) -> String? {
+        for call in calls where call.name == ReportFailureTool.name {
+            if case let .object(fields) = call.input,
+               case let .string(reason)? = fields["reason"],
+               !reason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return reason
+            }
+            return "The assistant could not confidently complete this request."
+        }
+        return nil
+    }
+
+    /// A concise, user-facing message for a terminal error.
+    private func errorMessage(_ error: any Error) -> String {
+        if let violation = error as? GuardrailViolation {
+            return "Blocked by \(violation.railID): \(violation.reason)"
+        }
+        if let iteration = error as? IterationLimitExceeded {
+            return "Stopped after reaching the \(iteration.limit)-step limit."
+        }
+        if let deadline = error as? TurnDeadlineExceeded {
+            return "Stopped after exceeding the \(Int(deadline.budget))s budget."
+        }
+        if let llmError = error as? LLMError {
+            return llmError.errorDescription ?? "\(llmError)"
+        }
+        return "\(error)"
     }
 
     public init(
@@ -230,15 +325,29 @@ public actor Orchestrator {
 
     public func run(_ instruction: String) -> AsyncThrowingStream<OrchestratorEvent, any Error> {
         let turnID = nextTurnID()
+        // A new turn supersedes any prior failure.
+        lastFailureReason = nil
         setPhase(.preparing, turn: turnID)
         return AsyncThrowingStream { continuation in
             let task = Task {
-                await self.loop(instruction, turnID: turnID, emit: { continuation.yield($0) })
-                await self.setPhase(nil, turn: turnID)
+                await self.runTurn(instruction, turnID: turnID, emit: { continuation.yield($0) })
                 continuation.finish()
             }
+            registerTask(task, turn: turnID)
             continuation.onTermination = { _ in task.cancel() }
         }
+    }
+
+    /// Runs one turn's loop and finishes it. Actor-isolated so the loop and
+    /// `finishTurn` are same-actor (no extra hops) and the `Task` in `run`
+    /// has a single clean `await`.
+    private func runTurn(
+        _ instruction: String,
+        turnID: Int,
+        emit: @escaping @Sendable (OrchestratorEvent) -> Void
+    ) async {
+        await loop(instruction, turnID: turnID, emit: emit)
+        finishTurn(turnID)
     }
 
     public func snapshot(recentActivityLimit: Int = 10) async -> OrchestratorSnapshot {
@@ -286,9 +395,9 @@ public actor Orchestrator {
         for iteration in 0..<options.maxIterations {
             if Task.isCancelled { return }
             if let deadline, ContinuousClock.now >= deadline {
-                emit(.error(TurnDeadlineExceeded(
-                    budget: options.maxTurnDuration ?? 0
-                )))
+                let error = TurnDeadlineExceeded(budget: options.maxTurnDuration ?? 0)
+                recordFailure(errorMessage(error), turn: turnID)
+                emit(.error(error))
                 return
             }
             do {
@@ -372,6 +481,11 @@ public actor Orchestrator {
                     return
 
                 case .toolCalls(let calls):
+                    if let reason = failureReason(in: calls) {
+                        recordFailure(reason, turn: turnID)
+                        emit(.failure(reason: reason))
+                        return
+                    }
                     let (entry, resolved) = Self.assistantTurn(text: nil, calls: calls)
                     transcript.append(entry)
                     for call in resolved {
@@ -382,6 +496,11 @@ public actor Orchestrator {
                     }
 
                 case .mixed(let text, let calls):
+                    if let reason = failureReason(in: calls) {
+                        recordFailure(reason, turn: turnID)
+                        emit(.failure(reason: reason))
+                        return
+                    }
                     // Non-stream mode never emitted deltas, so surface the
                     // narration that accompanies the tool call instead of
                     // dropping it. (Streaming already emitted it as deltas.)
@@ -408,6 +527,7 @@ public actor Orchestrator {
                 ))
                 switch decision {
                 case .abort(let cause):
+                    recordFailure(errorMessage(cause), turn: turnID)
                     emit(.error(cause))
                     return
                 case .retry:
@@ -418,7 +538,9 @@ public actor Orchestrator {
                 }
             }
         }
-        emit(.error(IterationLimitExceeded(limit: options.maxIterations)))
+        let limitError = IterationLimitExceeded(limit: options.maxIterations)
+        recordFailure(errorMessage(limitError), turn: turnID)
+        emit(.error(limitError))
     }
 
     /// Rebuilds the assistant transcript entry from the parsed output rather

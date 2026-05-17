@@ -92,6 +92,11 @@ public final class AIKitSession {
                     lines.append(Line(role: "assistant", text: text))
                     streamingText = ""
                     reasoningText = ""
+                case .failure(let reason):
+                    lastError = reason
+                    lines.append(Line(role: "failed", text: reason))
+                    streamingText = ""
+                    reasoningText = ""
                 case .error(let error):
                     let message = Self.describe(error)
                     lastError = message
@@ -400,13 +405,20 @@ public struct AIKitView: View {
 /// their existing view hierarchy.
 public struct AIKitChatbotOverlay: View {
     @State private var session: AIKitSession
+    /// Full assistant panel — opened by a long press on the pet.
     @State private var isDialogPresented = false
+    /// Compact status bubble — toggled by a tap; pet stays visible.
+    @State private var isBubblePresented = false
     @State private var selectedMenu = ChatbotMenu.context
     @State private var draft = ""
+    @State private var bubbleDraft = ""
+    @State private var bubbleSize: CGSize = .zero
     @State private var snapshot: OrchestratorSnapshot?
     /// Live orchestrator activity, so the pet reflects any turn on this
     /// orchestrator — not just the overlay's own session.
     @State private var activity: OrchestratorActivity = .idle
+    /// Touch-down state from the long-press recognizer; drives press scale.
+    @State private var isPressing = false
 
     /// Which screen edge the pet is docked to, and where along it
     /// (0 = top, 1 = bottom). The pet snaps to an edge when a drag ends.
@@ -431,18 +443,33 @@ public struct AIKitChatbotOverlay: View {
     public var body: some View {
         GeometryReader { proxy in
             let size = proxy.size
+            let petCenter = liveCenter(in: size)
             ZStack(alignment: .topLeading) {
                 if isDialogPresented {
                     dialog
                         .position(x: size.width / 2, y: size.height / 2)
                         .transition(.scale.combined(with: .opacity))
-                } else {
-                    pet
-                        .scaleEffect(isInteracting ? 1.18 : 1)
-                        .gesture(petGesture(in: size))
-                        .position(liveCenter(in: size))
-                        .animation(.spring(duration: 0.2), value: isInteracting)
                 }
+                if isBubblePresented && !isDialogPresented {
+                    statusBubble
+                        .onGeometryChange(for: CGSize.self) { $0.size } action: { bubbleSize = $0 }
+                        .position(bubbleCenter(petCenter: petCenter, in: size))
+                        .transition(.scale(scale: 0.85).combined(with: .opacity))
+                }
+                pet
+                    .scaleEffect((isPressing || isInteracting) ? 1.18 : 1)
+                    .gesture(moveGesture(in: size))
+                    .onTapGesture { toggleBubble() }
+                    .onLongPressGesture(
+                        minimumDuration: 0.5,
+                        maximumDistance: 24,
+                        perform: openFullPanel,
+                        onPressingChanged: { pressing in
+                            withAnimation(.spring(duration: 0.2)) { isPressing = pressing }
+                        }
+                    )
+                    .position(petCenter)
+                    .animation(.spring(duration: 0.2), value: isInteracting)
             }
         }
         .task { await refreshSnapshot() }
@@ -456,22 +483,44 @@ public struct AIKitChatbotOverlay: View {
     private var pet: some View {
         ZStack {
             Circle()
-                .fill(.tint)
+                .fill(petFill)
                 .frame(width: petDiameter, height: petDiameter)
                 .shadow(radius: 10, y: 4)
-            if activity.isBusy {
-                ProgressView()
-                    .progressViewStyle(.circular)
-                    .tint(.white)
-            } else {
-                Image(systemName: "pawprint.fill")
-                    .font(.title2.weight(.semibold))
-                    .foregroundStyle(.white)
-            }
+            Image(systemName: petSymbol)
+                .font(.title2.weight(.semibold))
+                .foregroundStyle(.white)
+                .contentTransition(.symbolEffect(.replace))
+                .symbolEffect(.pulse, options: .repeating, isActive: activity.isBusy)
         }
         .contentShape(Circle())
-        .accessibilityLabel(activity.isBusy ? "AIKit assistant, working" : "AIKit assistant")
+        .animation(.easeInOut(duration: 0.2), value: activity)
+        .accessibilityLabel(petAccessibilityLabel)
         .accessibilityAddTraits(.isButton)
+    }
+
+    /// Yellow while a turn runs, red after a failure, tint when idle.
+    private var petFill: AnyShapeStyle {
+        if activity.hasFailed { return AnyShapeStyle(.red) }
+        if activity.isBusy { return AnyShapeStyle(.yellow) }
+        return AnyShapeStyle(.tint)
+    }
+
+    /// A per-phase glyph so the pet says *what* it is doing, not just "busy".
+    private var petSymbol: String {
+        if activity.hasFailed { return "exclamationmark.triangle.fill" }
+        guard activity.isBusy else { return "pawprint.fill" }
+        switch activity.phase {
+        case .idle, .preparing: return "hourglass"
+        case .thinking: return "sparkles"
+        case .callingTool: return "wrench.and.screwdriver.fill"
+        case .verifying: return "checkmark.shield.fill"
+        }
+    }
+
+    private var petAccessibilityLabel: String {
+        if activity.hasFailed { return "AIKit assistant, failed" }
+        if activity.isBusy { return "AIKit assistant, \(activity.statusText)" }
+        return "AIKit assistant"
     }
 
     // MARK: - Pet placement
@@ -503,28 +552,19 @@ public struct AIKitChatbotOverlay: View {
         )
     }
 
-    /// One gesture for the whole pet: a touch-down (press) or drag scales
-    /// it up via `isInteracting`; a release that barely moved opens the
-    /// dialog, while a real drag snaps the pet to the nearest edge.
-    private func petGesture(in size: CGSize) -> some Gesture {
+    /// Drag to move: the pet follows the finger and snaps to the nearest
+    /// edge on release. Tap and long-press are separate recognizers, so this
+    /// only needs an 8pt activation distance to avoid stealing taps.
+    private func moveGesture(in size: CGSize) -> some Gesture {
         // Measure in the global space: the pet is repositioned every frame
         // from `dragTranslation`, so a local space would move with it and
         // feed back into the translation, making the pet jitter.
-        DragGesture(minimumDistance: 0, coordinateSpace: .global)
+        DragGesture(minimumDistance: 8, coordinateSpace: .global)
             .updating($isInteracting) { _, state, _ in state = true }
             .onChanged { value in
                 dragTranslation = value.translation
             }
             .onEnded { value in
-                let moved = hypot(value.translation.width, value.translation.height)
-                if moved < 4 {
-                    dragTranslation = .zero
-                    withAnimation(.spring(duration: 0.24)) {
-                        isDialogPresented = true
-                    }
-                    Task { await refreshSnapshot() }
-                    return
-                }
                 let base = restingCenter(in: size)
                 let minY = edgeInset + petDiameter / 2
                 let maxY = max(minY, size.height - edgeInset - petDiameter / 2)
@@ -536,6 +576,133 @@ public struct AIKitChatbotOverlay: View {
                     dragTranslation = .zero
                 }
             }
+    }
+
+    // MARK: - Tap / long-press actions
+
+    private func toggleBubble() {
+        withAnimation(.spring(duration: 0.22)) {
+            isBubblePresented.toggle()
+        }
+        if isBubblePresented {
+            isDialogPresented = false
+            Task { await refreshSnapshot() }
+        }
+    }
+
+    private func openFullPanel() {
+        withAnimation(.spring(duration: 0.24)) {
+            isBubblePresented = false
+            isDialogPresented = true
+        }
+        Task { await refreshSnapshot() }
+    }
+
+    private func sendFromBubble() {
+        let text = bubbleDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        bubbleDraft = ""
+        Task { await session.send(text) }
+    }
+
+    private func cancelCurrentWork() {
+        Task { await orchestrator.cancelActiveTurns() }
+    }
+
+    // MARK: - Status bubble
+
+    /// A compact, state-aware popover anchored to the pet (pet stays
+    /// visible): failure reason + cancel + follow-up, the live task while
+    /// busy, or a prompt field when idle.
+    private var statusBubble: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Text(bubbleTitle)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(activity.hasFailed ? .red : .primary)
+                Spacer(minLength: 8)
+                Button {
+                    withAnimation(.spring(duration: 0.22)) { isBubblePresented = false }
+                } label: {
+                    Image(systemName: "xmark")
+                }
+                .buttonStyle(.borderless)
+            }
+
+            if activity.hasFailed, let reason = activity.failureReason {
+                Text(reason)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack {
+                    Button("Cancel", role: .cancel, action: cancelCurrentWork)
+                        .buttonStyle(.bordered)
+                    Spacer()
+                }
+                followUpField(placeholder: "Try rephrasing…")
+            } else if activity.isBusy {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text(activity.statusText)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+                Button("Cancel", role: .cancel, action: cancelCurrentWork)
+                    .buttonStyle(.bordered)
+            } else {
+                followUpField(placeholder: "Ask the assistant…")
+            }
+        }
+        .padding(14)
+        .frame(width: 260, alignment: .leading)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
+        .overlay {
+            RoundedRectangle(cornerRadius: 14)
+                .stroke(activity.hasFailed ? AnyShapeStyle(.red.opacity(0.4)) : AnyShapeStyle(.quaternary))
+        }
+        .shadow(radius: 12, y: 4)
+    }
+
+    private var bubbleTitle: String {
+        if activity.hasFailed { return "Couldn't do that" }
+        if activity.isBusy { return "Working…" }
+        return "Assistant"
+    }
+
+    private func followUpField(placeholder: String) -> some View {
+        HStack(spacing: 8) {
+            TextField(placeholder, text: $bubbleDraft, axis: .vertical)
+                .textFieldStyle(.roundedBorder)
+                .lineLimit(1...3)
+                .onSubmit(sendFromBubble)
+            Button(action: sendFromBubble) {
+                Image(systemName: "paperplane.fill")
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(bubbleDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        }
+    }
+
+    /// Bubble center: docked to the pet's edge, opening above the pet when
+    /// there is room and below it otherwise, always kept fully on screen.
+    private func bubbleCenter(petCenter: CGPoint, in size: CGSize) -> CGPoint {
+        let width = bubbleSize.width
+        let height = bubbleSize.height
+        let minX = edgeInset + width / 2
+        let maxX = size.width - edgeInset - width / 2
+        let x = maxX >= minX
+            ? (petEdge == .leading ? minX : maxX)
+            : size.width / 2
+        let gap: CGFloat = 12
+        let minY = edgeInset + height / 2
+        let maxY = size.height - edgeInset - height / 2
+        var y = petCenter.y - petDiameter / 2 - gap - height / 2
+        if y < minY {
+            y = petCenter.y + petDiameter / 2 + gap + height / 2
+        }
+        y = maxY >= minY ? y.clamped(to: minY...maxY) : size.height / 2
+        return CGPoint(x: x, y: y)
     }
 
     private var dialog: some View {
