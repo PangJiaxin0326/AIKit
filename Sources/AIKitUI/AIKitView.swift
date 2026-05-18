@@ -151,14 +151,8 @@ public struct AIKitView: View {
 
     @ViewBuilder
     public var body: some View {
-        if let orchestrator {
-            dashboard
-                .task { await model.load() }
-                .aiChatbotOverlay(orchestrator: orchestrator)
-        } else {
-            dashboard
-                .task { await model.load() }
-        }
+        dashboard
+            .task { await model.load() }
     }
 
     private var dashboard: some View {
