@@ -38,6 +38,9 @@ public enum OutputParser {
             case .toolUse(let id, let name, let input):
                 // A tool_use block whose input failed to decode upstream is
                 // surfaced so the ErrorHandler can re-prompt.
+                if let raw = Self.malformedToolInputRaw(in: input) {
+                    throw ParserError.malformedToolInput(name: name, raw: raw)
+                }
                 if case .null = input {
                     throw ParserError.malformedToolInput(name: name, raw: "null")
                 }
@@ -67,6 +70,18 @@ public enum OutputParser {
         case (false, false):
             return .mixed(text: trimmed, toolCalls: calls)
         }
+    }
+
+    // MARK: - Malformed native tool-call sentinel
+
+    private static let malformedToolInputRawKey = "__aikit_malformed_tool_input_raw"
+
+    private static func malformedToolInputRaw(in input: JSONValue) -> String? {
+        guard case .object(let object) = input,
+              object.count == 1,
+              case .string(let raw)? = object[malformedToolInputRawKey]
+        else { return nil }
+        return raw
     }
 
     // MARK: - Near-miss diagnostic

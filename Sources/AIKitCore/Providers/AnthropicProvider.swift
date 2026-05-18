@@ -60,6 +60,7 @@ public struct AnthropicProvider: LLMProvider {
                     let urlRequest = try makeURLRequest(request, stream: true)
                     let (bytes, response) = try await configuration.session.bytes(for: urlRequest)
                     try Self.validate(response, data: Data())
+                    var activeToolIDs: [Int: String] = [:]
                     for try await line in bytes.lines {
                         try Task.checkCancellation()
                         guard line.hasPrefix("data:") else { continue }
@@ -68,7 +69,7 @@ public struct AnthropicProvider: LLMProvider {
                         guard let payload = json.data(using: .utf8),
                               let event = try? JSONDecoder().decode(StreamEvent.self, from: payload)
                         else { continue }
-                        for chunk in event.chunks() {
+                        for chunk in event.chunks(activeToolIDs: &activeToolIDs) {
                             continuation.yield(chunk)
                         }
                     }
@@ -318,7 +319,7 @@ private struct StreamEvent: Decodable {
     /// `message_start`, the final output count in `message_delta`. The
     /// Orchestrator merges these (it keeps the max of each field), so emitting
     /// a partial `TokenUsage` from each event is correct.
-    func chunks() -> [LLMResponseChunk] {
+    func chunks(activeToolIDs: inout [Int: String]) -> [LLMResponseChunk] {
         switch type {
         case "message_start":
             if let usage = message?.usage {
@@ -330,8 +331,12 @@ private struct StreamEvent: Decodable {
             return []
         case "content_block_start":
             if content_block?.type == "tool_use" {
+                let toolID = content_block?.id ?? String(index ?? 0)
+                if let index {
+                    activeToolIDs[index] = toolID
+                }
                 return [.toolUseStart(
-                    id: content_block?.id ?? "",
+                    id: toolID,
                     name: content_block?.name ?? ""
                 )]
             }
@@ -344,11 +349,15 @@ private struct StreamEvent: Decodable {
                 return [.reasoningDelta(thinking)]
             }
             if let json = delta?.partial_json {
-                return [.toolUseInputDelta(id: String(index ?? 0), json: json)]
+                let toolID = index.flatMap { activeToolIDs[$0] } ?? String(index ?? 0)
+                return [.toolUseInputDelta(id: toolID, json: json)]
             }
             return []
         case "content_block_stop":
-            return [.toolUseStop(id: String(index ?? 0))]
+            guard let index, let toolID = activeToolIDs.removeValue(forKey: index) else {
+                return []
+            }
+            return [.toolUseStop(id: toolID)]
         case "message_delta":
             var result: [LLMResponseChunk] = []
             if let reason = delta?.stop_reason {

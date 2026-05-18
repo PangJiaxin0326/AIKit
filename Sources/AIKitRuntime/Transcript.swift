@@ -9,6 +9,9 @@ public enum TranscriptEntry: Sendable, Hashable {
     case assistant([ContentBlock])
     /// The result of executing a tool the model requested.
     case toolResult(id: String, name: String, content: String, isError: Bool)
+    /// Corrective guidance after a malformed model/tool turn. Sent as a user
+    /// message so providers never see an orphan tool result.
+    case correctiveGuidance(String)
 
     /// Converts this entry to the wire `Message` the next prompt will include.
     public var message: Message {
@@ -20,6 +23,8 @@ public enum TranscriptEntry: Sendable, Hashable {
                 role: .tool,
                 content: [.toolResult(toolUseID: id, content: content, isError: isError)]
             )
+        case .correctiveGuidance(let content):
+            return Message(role: .user, text: content)
         }
     }
 }

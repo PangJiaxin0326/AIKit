@@ -4,7 +4,7 @@ A Swift package providing the foundation for AI-native apps. AIKit composes UI,
 business logic, and profile/settings mutations through a unified agent pipeline
 driven by an LLM.
 
-Swift 6 · strict concurrency · iOS 26.5 / macOS 26.5 / visionOS 26.5 · no
+Swift 6 · strict concurrency · iOS 17 / macOS 14 / visionOS 1 · no
 third-party dependencies.
 
 ## Modules

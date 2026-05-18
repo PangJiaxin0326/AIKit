@@ -221,7 +221,7 @@ private struct WireToolCall: Encodable, Decodable {
         let arguments: String?
     }
     var id: String?
-    let type: String
+    let type: String?
     let function: Function
     var index: Int?
 
@@ -230,6 +230,12 @@ private struct WireToolCall: Encodable, Decodable {
         self.type = "function"
         self.function = function
     }
+}
+
+private let malformedToolInputRawKey = "__aikit_malformed_tool_input_raw"
+
+private func malformedToolInput(raw: String) -> JSONValue {
+    .object([malformedToolInputRawKey: .string(raw)])
 }
 
 private struct WireTool: Encodable {
@@ -282,10 +288,15 @@ private struct WireResponse: Decodable {
         }
         for call in choice.message.tool_calls ?? [] {
             let input: JSONValue
-            if let args = call.function.arguments,
-               let data = args.data(using: .utf8),
-               let value = try? JSONValue(data: data) {
-                input = value
+            if let args = call.function.arguments {
+                if args.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    input = .object([:])
+                } else if let data = args.data(using: .utf8),
+                          let value = try? JSONValue(data: data) {
+                    input = value
+                } else {
+                    input = malformedToolInput(raw: args)
+                }
             } else {
                 input = .object([:])
             }

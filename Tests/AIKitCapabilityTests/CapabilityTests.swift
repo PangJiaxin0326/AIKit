@@ -48,10 +48,23 @@ private struct EchoTool: Tool {
         let registry = ToolRegistry()
         await registry.register(EchoTool())
         await registry.register(SearchMemoryTool())
-        let all = await registry.manifest(for: [])
-        #expect(all.count == 2)
         let subset = await registry.manifest(for: ["echo"])
         #expect(subset.map(\.name) == ["echo"])
+    }
+
+    @Test func emptyManifestHasNoTools() async {
+        let registry = ToolRegistry()
+        await registry.register(EchoTool())
+        let manifest = await registry.manifest(for: [])
+        #expect(manifest.isEmpty)
+    }
+
+    @Test func registeredDescriptorsReturnsAllTools() async {
+        let registry = ToolRegistry()
+        await registry.register(EchoTool())
+        await registry.register(SearchMemoryTool())
+        let all = await registry.registeredDescriptors()
+        #expect(all.map(\.name) == ["echo", "searchMemory"])
     }
 
     @Test func unknownToolThrows() async {

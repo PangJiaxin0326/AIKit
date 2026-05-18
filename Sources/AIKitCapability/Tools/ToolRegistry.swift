@@ -49,13 +49,15 @@ public actor ToolRegistry {
         Set(entries.keys)
     }
 
+    /// Returns the schema bundle for every registered tool.
+    public func registeredDescriptors() -> [ToolDescriptor] {
+        entries.values.map(\.descriptor).sorted { $0.name < $1.name }
+    }
+
     /// Returns the schema bundle for the given subset (used by PromptBuilder).
-    /// An empty `names` set returns all registered tools.
+    /// An empty `names` set returns no tools.
     public func manifest(for names: Set<String>) -> [ToolDescriptor] {
-        let selected = names.isEmpty
-            ? Array(entries.values)
-            : names.compactMap { entries[$0] }
-        return selected.map(\.descriptor).sorted { $0.name < $1.name }
+        names.compactMap { entries[$0]?.descriptor }.sorted { $0.name < $1.name }
     }
 
     /// Dispatches an invocation by name; decodes input, encodes output.

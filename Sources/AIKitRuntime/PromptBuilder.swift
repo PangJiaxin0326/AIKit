@@ -48,9 +48,7 @@ public enum PromptBuilder {
 
         // Tools restricted to the view's subset (the manifest is already
         // filtered by the registry, but be defensive about empty subsets).
-        let tools = context.toolNames.isEmpty
-            ? toolManifest
-            : toolManifest.filter { context.toolNames.contains($0.name) }
+        let tools = toolManifest.filter { context.toolNames.contains($0.name) }
 
         if toolCallFallbackHint, !tools.isEmpty {
             systemParts.append(toolFallbackInstruction)

@@ -149,9 +149,16 @@ public struct AIKitView: View {
         ))
     }
 
+    @ViewBuilder
     public var body: some View {
-        dashboard
-            .task { await model.load() }
+        if let orchestrator {
+            dashboard
+                .task { await model.load() }
+                .aiChatbotOverlay(orchestrator: orchestrator)
+        } else {
+            dashboard
+                .task { await model.load() }
+        }
     }
 
     private var dashboard: some View {
@@ -474,7 +481,7 @@ public struct AIKitChatbotOverlay: View {
                     } action: { newSize in
                         capsuleSize = newSize
                     }
-                    .glassEffect(.regular.interactive().tint(petFill), in: .capsule)
+                    .chatbotCapsuleStyle(tint: petFill)
                     .position(floatingCenter(
                         in: size,
                         keyboardOverlap: keyboardOverlap,
@@ -1107,7 +1114,7 @@ private final class AIKitConfigurationViewModel {
         configuration = await store.snapshot()
         recentChanges = await store.recentChanges(limit: 6)
         if let toolRegistry {
-            availableTools = await toolRegistry.manifest(for: [])
+            availableTools = await toolRegistry.registeredDescriptors()
         }
         status = nil
     }
@@ -1204,6 +1211,20 @@ private extension AIKitConfigurationChange {
 private extension Comparable {
     func clamped(to range: ClosedRange<Self>) -> Self {
         min(max(self, range.lowerBound), range.upperBound)
+    }
+}
+
+private extension View {
+    @ViewBuilder
+    func chatbotCapsuleStyle(tint: Color) -> some View {
+        if #available(iOS 26.0, macOS 26.0, visionOS 26.0, *) {
+            glassEffect(.regular.interactive().tint(tint), in: .capsule)
+        } else {
+            background(.regularMaterial, in: Capsule())
+                .overlay {
+                    Capsule().stroke(tint.opacity(0.35))
+                }
+        }
     }
 }
 

@@ -20,6 +20,17 @@ import AIKitCapability
         #expect(allowed == .pass)
     }
 
+    @Test func emptyAllowlistBlocksEveryTool() async {
+        let rail = AllowlistedTools(allowed: [])
+        let outcome = await rail.evaluate(.preToolUse(
+            ToolCall(name: "navigate", input: .object([:]))
+        ))
+        guard case .block = outcome else {
+            Issue.record("expected block")
+            return
+        }
+    }
+
     @Test func piiRedactorBlocksEmail() async {
         let rail = PIIRedactor()
         let outcome = await rail.evaluate(.preToolUse(ToolCall(

@@ -190,6 +190,9 @@ public actor Orchestrator {
     /// starts or `cancelActiveTurns()` is called.
     private var lastFailureReason: String?
     private var activityObservers: [UUID: AsyncStream<OrchestratorActivity>.Continuation] = [:]
+    /// Observer ids whose stream terminated before the actor processed their
+    /// registration task.
+    private var terminatedActivityObservers: Set<UUID> = []
 
     private func nextTurnID() -> Int {
         turnCounter += 1
@@ -225,12 +228,15 @@ public actor Orchestrator {
         _ id: UUID,
         _ continuation: AsyncStream<OrchestratorActivity>.Continuation
     ) {
+        guard terminatedActivityObservers.remove(id) == nil else { return }
         activityObservers[id] = continuation
         continuation.yield(currentActivity())
     }
 
     private func unregisterActivityObserver(_ id: UUID) {
-        activityObservers[id] = nil
+        if activityObservers.removeValue(forKey: id) == nil {
+            terminatedActivityObservers.insert(id)
+        }
     }
 
     private func currentActivity() -> OrchestratorActivity {
@@ -392,7 +398,7 @@ public actor Orchestrator {
         var pendingCorrection: String?
         var attempt = 0
 
-        for iteration in 0..<options.maxIterations {
+        for _ in 0..<options.maxIterations {
             if Task.isCancelled { return }
             if let deadline, ContinuousClock.now >= deadline {
                 let error = TurnDeadlineExceeded(budget: options.maxTurnDuration ?? 0)
@@ -403,12 +409,7 @@ public actor Orchestrator {
             do {
                 setPhase(.preparing, turn: turnID)
                 if let correction = pendingCorrection {
-                    transcript.append(.toolResult(
-                        id: "correction-\(iteration)",
-                        name: "system",
-                        content: correction,
-                        isError: true
-                    ))
+                    transcript.append(.correctiveGuidance(correction))
                     pendingCorrection = nil
                 }
 
@@ -488,12 +489,10 @@ public actor Orchestrator {
                     }
                     let (entry, resolved) = Self.assistantTurn(text: nil, calls: calls)
                     transcript.append(entry)
-                    for call in resolved {
-                        try await execute(
-                            call, viewID: viewID, turnID: turnID, deadline: deadline,
-                            transcript: &transcript, emit: emit
-                        )
-                    }
+                    try await executeBatch(
+                        resolved, viewID: viewID, turnID: turnID, deadline: deadline,
+                        transcript: &transcript, emit: emit
+                    )
 
                 case .mixed(let text, let calls):
                     if let reason = failureReason(in: calls) {
@@ -509,12 +508,10 @@ public actor Orchestrator {
                     }
                     let (entry, resolved) = Self.assistantTurn(text: text, calls: calls)
                     transcript.append(entry)
-                    for call in resolved {
-                        try await execute(
-                            call, viewID: viewID, turnID: turnID, deadline: deadline,
-                            transcript: &transcript, emit: emit
-                        )
-                    }
+                    try await executeBatch(
+                        resolved, viewID: viewID, turnID: turnID, deadline: deadline,
+                        transcript: &transcript, emit: emit
+                    )
                 }
                 attempt = 0
             } catch {
@@ -571,7 +568,60 @@ public actor Orchestrator {
         return (.assistant(blocks), resolved)
     }
 
+    private static func toolErrorOutput(_ error: any Error) -> Data {
+        let payload = ["error": String(describing: error)]
+        return (try? JSONEncoder().encode(payload))
+            ?? Data(String(describing: error).utf8)
+    }
+
+    private static let skippedToolOutput = Data(
+        #"{"error":"Skipped because an earlier tool call in this assistant batch failed."}"#.utf8
+    )
+
     // MARK: - Tool execution
+
+    private func executeBatch(
+        _ calls: [ToolCall],
+        viewID: ViewContext.ID,
+        turnID: Int,
+        deadline: ContinuousClock.Instant?,
+        transcript: inout [TranscriptEntry],
+        emit: @Sendable (OrchestratorEvent) -> Void
+    ) async throws {
+        for index in calls.indices {
+            do {
+                try await execute(
+                    calls[index],
+                    viewID: viewID,
+                    turnID: turnID,
+                    deadline: deadline,
+                    transcript: &transcript,
+                    emit: emit
+                )
+            } catch {
+                appendSkippedToolResults(
+                    for: calls[(index + 1)...],
+                    transcript: &transcript
+                )
+                throw error
+            }
+        }
+    }
+
+    private func appendSkippedToolResults(
+        for calls: ArraySlice<ToolCall>,
+        transcript: inout [TranscriptEntry]
+    ) {
+        let content = String(decoding: Self.skippedToolOutput, as: UTF8.self)
+        for call in calls {
+            transcript.append(.toolResult(
+                id: call.id ?? call.name,
+                name: call.name,
+                content: content,
+                isError: true
+            ))
+        }
+    }
 
     private func execute(
         _ call: ToolCall,
@@ -617,6 +667,31 @@ public actor Orchestrator {
                 )
             }
         } catch {
+            let isError = true
+            let output = Self.toolErrorOutput(error)
+            _ = try await withTurnDeadline(deadline) {
+                try await self.guardrails.verify(
+                    .postToolUse,
+                    .postToolUse(
+                        name: effectiveCall.name,
+                        output: output,
+                        isError: isError
+                    )
+                )
+            }
+            emit(.verification(stage: .postToolUse, outcome: .pass))
+            emit(.toolResult(name: effectiveCall.name, output: output))
+            let outputText = String(decoding: output, as: UTF8.self)
+            try? await memory.append(UsageEvent(
+                viewID: viewID, kind: .toolResult,
+                text: "\(effectiveCall.name) -> \(outputText)"
+            ))
+            transcript.append(.toolResult(
+                id: effectiveCall.id ?? effectiveCall.name,
+                name: effectiveCall.name,
+                content: outputText,
+                isError: isError
+            ))
             // Surface to the catch-site classifier (tool-retriable, fatal, …).
             throw error
         }
@@ -674,6 +749,12 @@ public actor Orchestrator {
 
     // MARK: - LLM
 
+    private static let malformedToolInputRawKey = "__aikit_malformed_tool_input_raw"
+
+    private static func malformedToolInput(raw: String) -> JSONValue {
+        .object([malformedToolInputRawKey: .string(raw)])
+    }
+
     private func callLLM(
         _ request: LLMRequest,
         emit: @Sendable (OrchestratorEvent) -> Void
@@ -727,11 +808,13 @@ public actor Orchestrator {
         if !text.isEmpty { blocks.append(.text(text)) }
         for tool in toolBlocks {
             let input: JSONValue
-            if let data = tool.json.data(using: .utf8),
-               let value = try? JSONValue(data: data) {
+            if tool.json.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                input = .object([:])
+            } else if let data = tool.json.data(using: .utf8),
+                      let value = try? JSONValue(data: data) {
                 input = value
             } else {
-                input = .object([:])
+                input = Self.malformedToolInput(raw: tool.json)
             }
             blocks.append(.toolUse(id: tool.id, name: tool.name, input: input))
         }

@@ -60,6 +60,11 @@ public enum ErrorClassifier {
         switch error {
         case is GuardrailViolation:
             return .guardrailViolation
+        case let registryError as ToolRegistryError:
+            if case .decodingFailed = registryError {
+                return .malformedOutput
+            }
+            return .fatal
         case let toolError as any ToolError:
             return toolError.isRetriable ? .toolRetriable : .fatal
         case is OutputParser.ParserError:

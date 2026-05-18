@@ -32,6 +32,22 @@ import AIKitTestSupport
         #expect(request.tools.map(\.name) == ["navigate"])
         #expect(request.messages.first?.role == .user)
     }
+
+    @Test func emptyContextDoesNotExposeTools() {
+        let request = PromptBuilder.build(
+            instruction: "Take me home",
+            context: .empty,
+            memory: [],
+            transcript: [],
+            toolManifest: [
+                ToolDescriptor(name: "navigate", description: "nav", inputSchema: .object([:])),
+            ],
+            model: "test-model",
+            toolCallFallbackHint: true
+        )
+        #expect(request.tools.isEmpty)
+        #expect(request.system?.contains(PromptBuilder.toolFallbackInstruction) == false)
+    }
 }
 
 @Suite struct OutputParserTests {
@@ -90,6 +106,28 @@ import AIKitTestSupport
         }
     }
 
+    @Test func malformedNativeToolInputSentinelThrowsWithRaw() {
+        let raw = "{\"destination\":"
+        let response = LLMResponse(
+            content: [.toolUse(
+                id: "t1",
+                name: "navigate",
+                input: .object(["__aikit_malformed_tool_input_raw": .string(raw)])
+            )],
+            stopReason: .toolUse
+        )
+
+        do {
+            _ = try OutputParser.parse(response)
+            Issue.record("expected malformed tool input")
+        } catch OutputParser.ParserError.malformedToolInput(let name, let rawValue) {
+            #expect(name == "navigate")
+            #expect(rawValue == raw)
+        } catch {
+            Issue.record("unexpected error: \(error)")
+        }
+    }
+
     @Test func roundTripRandomToolCalls() throws {
         for _ in 0..<50 {
             let name = "tool_\(Int.random(in: 0...999))"
@@ -124,6 +162,7 @@ import AIKitTestSupport
         #expect(ErrorClassifier.category(of: LLMError.httpStatus(code: 400, body: "")) == .fatal)
         #expect(ErrorClassifier.category(of: GuardrailViolation(railID: "r", stage: .preToolUse, reason: "x")) == .guardrailViolation)
         #expect(ErrorClassifier.category(of: OutputParser.ParserError.empty) == .malformedOutput)
+        #expect(ErrorClassifier.category(of: ToolRegistryError.decodingFailed(name: "navigate", detail: "bad type")) == .malformedOutput)
         #expect(ErrorClassifier.category(of: GenericToolError(message: "x", isRetriable: true)) == .toolRetriable)
     }
 
@@ -208,6 +247,307 @@ import AIKitTestSupport
         #expect(finalAnswer == "You're on settings now.")
     }
 
+    @Test func malformedToolInputCorrectedOnSecondAttemptWithoutOrphanToolMessage() async throws {
+        let registry = ToolRegistry()
+        await registry.register(NavigateTool { input, _ in
+            .init(navigated: input.destination == "settings")
+        })
+        let resolver = ContextResolver()
+        await resolver.push(ViewContext(
+            id: .init("home"), displayName: "Home", toolNames: ["navigate"]
+        ))
+        let provider = MockProvider(responses: [
+            LLMResponse(content: [.toolUse(
+                id: "bad", name: "navigate",
+                input: .object(["destination": .number(42)])
+            )], stopReason: .toolUse),
+            LLMResponse(content: [.toolUse(
+                id: "good", name: "navigate",
+                input: .object(["destination": .string("settings")])
+            )], stopReason: .toolUse),
+            LLMResponse(content: [.text("Recovered.")], stopReason: .endTurn),
+        ])
+        let orchestrator = Orchestrator(
+            llm: LLMClient(provider: provider),
+            tools: registry,
+            memory: InMemoryMemoryStore(),
+            contextResolver: resolver,
+            guardrails: PolicyEngine(),
+            options: .init(
+                model: "test", stream: false,
+                retry: .init(maxAttempts: 2, backoff: .none)
+            )
+        )
+
+        var final: String?
+        for try await event in await orchestrator.run("go to settings") {
+            if case .finalAnswer(let text) = event { final = text }
+            if case .error(let error) = event { Issue.record("unexpected: \(error)") }
+        }
+        #expect(final == "Recovered.")
+
+        let retryRequest = try #require(provider.receivedRequests.dropFirst().first)
+        #expect(hasOnlyMatchedToolResults(in: retryRequest.messages))
+        let toolMessage = try #require(retryRequest.messages.first { $0.role == .tool })
+        let errorResult = try #require(toolResultBlocks(in: toolMessage).first)
+        #expect(errorResult.id == "bad")
+        #expect(errorResult.isError)
+        let correction = try #require(retryRequest.messages.last)
+        #expect(correction.role == .user)
+        #expect(correction.plainText.contains("Re-issue"))
+        #expect(!retryRequest.messages.dropFirst().contains { message in
+            message.role == .tool && toolResultBlocks(in: message).contains {
+                $0.id.hasPrefix("correction-")
+            }
+        })
+    }
+
+    @Test func malformedNativeToolInputCorrectedWithoutInvokingTool() async throws {
+        let invocations = ToolInvocationRecorder()
+        let registry = ToolRegistry()
+        await registry.register(NavigateTool { input, _ in
+            await invocations.record(input.destination)
+            return .init(navigated: input.destination == "settings")
+        })
+        let resolver = ContextResolver()
+        await resolver.push(ViewContext(
+            id: .init("home"), displayName: "Home", toolNames: ["navigate"]
+        ))
+        let raw = "{\"destination\":"
+        let provider = MockProvider(responses: [
+            LLMResponse(content: [.toolUse(
+                id: "bad", name: "navigate",
+                input: .object(["__aikit_malformed_tool_input_raw": .string(raw)])
+            )], stopReason: .toolUse),
+            LLMResponse(content: [.toolUse(
+                id: "good", name: "navigate",
+                input: .object(["destination": .string("settings")])
+            )], stopReason: .toolUse),
+            LLMResponse(content: [.text("Recovered.")], stopReason: .endTurn),
+        ])
+        let orchestrator = Orchestrator(
+            llm: LLMClient(provider: provider),
+            tools: registry,
+            memory: InMemoryMemoryStore(),
+            contextResolver: resolver,
+            guardrails: PolicyEngine(),
+            options: .init(
+                model: "test", stream: false,
+                retry: .init(maxAttempts: 2, backoff: .none)
+            )
+        )
+
+        var final: String?
+        for try await event in await orchestrator.run("go to settings") {
+            if case .finalAnswer(let text) = event { final = text }
+            if case .error(let error) = event { Issue.record("unexpected: \(error)") }
+        }
+
+        #expect(final == "Recovered.")
+        #expect(await invocations.destinations == ["settings"])
+
+        let retryRequest = try #require(provider.receivedRequests.dropFirst().first)
+        #expect(retryRequest.messages.allSatisfy { $0.role != .tool })
+        let correction = try #require(retryRequest.messages.last)
+        #expect(correction.role == .user)
+        #expect(correction.plainText.contains(raw))
+    }
+
+    @Test func retriableToolFailureCreatesErrorToolResultAndRecovers() async throws {
+        let attempts = ToolAttemptCounter()
+        let registry = ToolRegistry()
+        await registry.register(NavigateTool { _, _ in
+            if await attempts.shouldFailOnce() {
+                throw GenericToolError(message: "temporary navigation failure", isRetriable: true)
+            }
+            return .init(navigated: true)
+        })
+        let resolver = ContextResolver()
+        await resolver.push(ViewContext(
+            id: .init("home"), displayName: "Home", toolNames: ["navigate"]
+        ))
+        let provider = MockProvider(responses: [
+            LLMResponse(content: [.toolUse(
+                id: "first", name: "navigate",
+                input: .object(["destination": .string("settings")])
+            )], stopReason: .toolUse),
+            LLMResponse(content: [.toolUse(
+                id: "retry", name: "navigate",
+                input: .object(["destination": .string("settings")])
+            )], stopReason: .toolUse),
+            LLMResponse(content: [.text("Recovered.")], stopReason: .endTurn),
+        ])
+        let orchestrator = Orchestrator(
+            llm: LLMClient(provider: provider),
+            tools: registry,
+            memory: InMemoryMemoryStore(),
+            contextResolver: resolver,
+            guardrails: PolicyEngine(),
+            options: .init(
+                model: "test", stream: false,
+                retry: .init(maxAttempts: 2, backoff: .none)
+            )
+        )
+
+        var final: String?
+        var toolResults: [String] = []
+        for try await event in await orchestrator.run("go to settings") {
+            if case .toolResult(_, let output) = event {
+                toolResults.append(String(decoding: output, as: UTF8.self))
+            }
+            if case .finalAnswer(let text) = event { final = text }
+            if case .error(let error) = event { Issue.record("unexpected: \(error)") }
+        }
+        #expect(final == "Recovered.")
+        #expect(toolResults.contains { $0.contains("temporary navigation failure") })
+
+        let retryRequest = try #require(provider.receivedRequests.dropFirst().first)
+        #expect(hasOnlyMatchedToolResults(in: retryRequest.messages))
+        let toolMessage = try #require(retryRequest.messages.first { $0.role == .tool })
+        let errorResult = try #require(toolResultBlocks(in: toolMessage).first)
+        #expect(errorResult.id == "first")
+        #expect(errorResult.isError)
+        #expect(errorResult.content.contains("temporary navigation failure"))
+    }
+
+    @Test func failedMultiToolBatchMarksUnexecutedCallsSkippedBeforeRetry() async throws {
+        let attempts = ToolAttemptCounter()
+        let skippedFlag = InvocationFlag()
+        let registry = ToolRegistry()
+        await registry.register(NavigateTool { _, _ in
+            if await attempts.shouldFailOnce() {
+                throw GenericToolError(message: "temporary navigation failure", isRetriable: true)
+            }
+            return .init(navigated: true)
+        })
+        await registry.register(EmptyInputTool {
+            await skippedFlag.mark()
+        })
+        let resolver = ContextResolver()
+        await resolver.push(ViewContext(
+            id: .init("home"),
+            displayName: "Home",
+            toolNames: ["navigate", EmptyInputTool.name]
+        ))
+        let provider = MockProvider(responses: [
+            LLMResponse(content: [
+                .toolUse(
+                    id: "first", name: "navigate",
+                    input: .object(["destination": .string("settings")])
+                ),
+                .toolUse(id: "second", name: EmptyInputTool.name, input: .object([:])),
+            ], stopReason: .toolUse),
+            LLMResponse(content: [.toolUse(
+                id: "retry", name: "navigate",
+                input: .object(["destination": .string("settings")])
+            )], stopReason: .toolUse),
+            LLMResponse(content: [.text("Recovered.")], stopReason: .endTurn),
+        ])
+        let orchestrator = Orchestrator(
+            llm: LLMClient(provider: provider),
+            tools: registry,
+            memory: InMemoryMemoryStore(),
+            contextResolver: resolver,
+            guardrails: PolicyEngine(),
+            options: .init(
+                model: "test", stream: false,
+                retry: .init(maxAttempts: 2, backoff: .none)
+            )
+        )
+
+        var final: String?
+        for try await event in await orchestrator.run("run both tools") {
+            if case .finalAnswer(let text) = event { final = text }
+            if case .error(let error) = event { Issue.record("unexpected: \(error)") }
+        }
+
+        #expect(final == "Recovered.")
+        #expect(await skippedFlag.didInvoke == false)
+
+        let retryRequest = try #require(provider.receivedRequests.dropFirst().first)
+        #expect(hasOnlyMatchedToolResults(in: retryRequest.messages))
+        let results = retryRequest.messages
+            .filter { $0.role == .tool }
+            .flatMap(toolResultBlocks)
+        #expect(results.map(\.id) == ["first", "second"])
+        #expect(results.allSatisfy { $0.isError })
+        #expect(results.first { $0.id == "first" }?.content.contains("temporary navigation failure") == true)
+        #expect(results.first { $0.id == "second" }?.content.contains("Skipped") == true)
+    }
+
+    @Test func postToolUseReceivesIsErrorTrueForToolFailure() async throws {
+        let recorder = PostToolUseRecorder()
+        let registry = ToolRegistry()
+        await registry.register(NavigateTool { _, _ in
+            throw GenericToolError(message: "permanent navigation failure")
+        })
+        let resolver = ContextResolver()
+        await resolver.push(ViewContext(
+            id: .init("home"), displayName: "Home", toolNames: ["navigate"]
+        ))
+        let provider = MockProvider(responses: [
+            LLMResponse(content: [.toolUse(
+                id: "failed", name: "navigate",
+                input: .object(["destination": .string("settings")])
+            )], stopReason: .toolUse),
+        ])
+        let orchestrator = Orchestrator(
+            llm: LLMClient(provider: provider),
+            tools: registry,
+            memory: InMemoryMemoryStore(),
+            contextResolver: resolver,
+            guardrails: PolicyEngine(rails: [RecordingPostToolUseRail(recorder: recorder)]),
+            options: .init(
+                model: "test", stream: false,
+                retry: .init(maxAttempts: 1, backoff: .none)
+            )
+        )
+
+        var caught: (any Error)?
+        for try await event in await orchestrator.run("go to settings") {
+            if case .error(let error) = event { caught = error }
+        }
+        #expect(caught is GenericToolError)
+        #expect(await recorder.values == [true])
+    }
+
+    @Test func postToolUseBlockSuppressesFailedToolResultEvent() async throws {
+        let registry = ToolRegistry()
+        await registry.register(NavigateTool { _, _ in
+            throw GenericToolError(message: "contains blocked output")
+        })
+        let resolver = ContextResolver()
+        await resolver.push(ViewContext(
+            id: .init("home"), displayName: "Home", toolNames: ["navigate"]
+        ))
+        let provider = MockProvider(responses: [
+            LLMResponse(content: [.toolUse(
+                id: "failed", name: "navigate",
+                input: .object(["destination": .string("settings")])
+            )], stopReason: .toolUse),
+        ])
+        let orchestrator = Orchestrator(
+            llm: LLMClient(provider: provider),
+            tools: registry,
+            memory: InMemoryMemoryStore(),
+            contextResolver: resolver,
+            guardrails: PolicyEngine(rails: [BlockingPostToolUseRail()]),
+            options: .init(
+                model: "test", stream: false,
+                retry: .init(maxAttempts: 1, backoff: .none)
+            )
+        )
+
+        var caught: (any Error)?
+        var emittedToolResult = false
+        for try await event in await orchestrator.run("go to settings") {
+            if case .toolResult = event { emittedToolResult = true }
+            if case .error(let error) = event { caught = error }
+        }
+        #expect(caught is GuardrailViolation)
+        #expect(emittedToolResult == false)
+    }
+
     @Test func streamingEmitsDeltas() async throws {
         let registry = ToolRegistry()
         let resolver = ContextResolver()
@@ -228,6 +568,35 @@ import AIKitTestSupport
         }
         #expect(deltas.joined() == "hello stream")
         #expect(final == "hello stream")
+    }
+
+    @Test func malformedStreamedToolJSONDoesNotInvokeTool() async throws {
+        let flag = InvocationFlag()
+        let registry = ToolRegistry()
+        await registry.register(EmptyInputTool {
+            await flag.mark()
+        })
+        let resolver = ContextResolver()
+        await resolver.push(ViewContext(
+            id: .init("v"), displayName: "V", toolNames: [EmptyInputTool.name]
+        ))
+        let orchestrator = Orchestrator(
+            llm: LLMClient(provider: MalformedStreamingToolProvider()),
+            tools: registry,
+            memory: InMemoryMemoryStore(),
+            contextResolver: resolver,
+            guardrails: PolicyEngine(),
+            options: .init(model: "test", maxIterations: 1, stream: true)
+        )
+
+        var emittedToolCall = false
+        for try await event in await orchestrator.run("invoke ping") {
+            if case .toolCall = event { emittedToolCall = true }
+        }
+
+        let invoked = await flag.didInvoke
+        #expect(emittedToolCall == false)
+        #expect(invoked == false)
     }
 
     @Test func mixedNarrationSurfacedNonStreaming() async throws {
@@ -315,6 +684,129 @@ private actor SeenInput {
 private actor InvocationFlag {
     private(set) var didInvoke = false
     func mark() { didInvoke = true }
+}
+
+private actor ToolAttemptCounter {
+    private var attempts = 0
+
+    func shouldFailOnce() -> Bool {
+        attempts += 1
+        return attempts == 1
+    }
+}
+
+private actor ToolInvocationRecorder {
+    private(set) var destinations: [String] = []
+
+    func record(_ destination: String) {
+        destinations.append(destination)
+    }
+}
+
+private actor PostToolUseRecorder {
+    private(set) var values: [Bool] = []
+
+    func record(_ isError: Bool) {
+        values.append(isError)
+    }
+}
+
+private struct RecordingPostToolUseRail: Guardrail {
+    let id = "record-post-tool-use"
+    let stages: Set<Verifier.Stage> = [.postToolUse]
+    let recorder: PostToolUseRecorder
+
+    func evaluate(_ payload: GuardrailPayload) async -> Verifier.Outcome {
+        if case .postToolUse(_, _, let isError) = payload {
+            await recorder.record(isError)
+        }
+        return .pass
+    }
+}
+
+private struct BlockingPostToolUseRail: Guardrail {
+    let id = "block-post-tool-use"
+    let stages: Set<Verifier.Stage> = [.postToolUse]
+
+    func evaluate(_ payload: GuardrailPayload) async -> Verifier.Outcome {
+        if case .postToolUse(_, _, true) = payload {
+            return .block(reason: "blocked failed tool output")
+        }
+        return .pass
+    }
+}
+
+private func toolResultBlocks(
+    in message: Message
+) -> [(id: String, content: String, isError: Bool)] {
+    message.content.compactMap { block in
+        if case .toolResult(let id, let content, let isError) = block {
+            return (id, content, isError)
+        }
+        return nil
+    }
+}
+
+private func hasOnlyMatchedToolResults(in messages: [Message]) -> Bool {
+    var seenToolUseIDs: Set<String> = []
+    for message in messages {
+        if message.role == .assistant {
+            for block in message.content {
+                if case .toolUse(let id, _, _) = block {
+                    seenToolUseIDs.insert(id)
+                }
+            }
+        }
+        if message.role == .tool {
+            for result in toolResultBlocks(in: message)
+            where !seenToolUseIDs.contains(result.id) {
+                return false
+            }
+        }
+    }
+    return true
+}
+
+private struct EmptyInputTool: Tool {
+    struct Input: Codable, Sendable {}
+    struct Output: Codable, Sendable {
+        let ok: Bool
+    }
+
+    static let name = "emptyInput"
+    static let description = "A no-input test tool."
+    static let schema = ToolSchema.object(properties: [:])
+
+    let handler: @Sendable () async -> Void
+
+    init(handler: @escaping @Sendable () async -> Void) {
+        self.handler = handler
+    }
+
+    func invoke(_ input: Input, in context: ToolContext) async throws -> Output {
+        await handler()
+        return Output(ok: true)
+    }
+}
+
+private struct MalformedStreamingToolProvider: LLMProvider {
+    let defaultModel = "malformed-stream"
+
+    func complete(_ request: LLMRequest) async throws -> LLMResponse {
+        LLMResponse(content: [.text("unused")], stopReason: .endTurn)
+    }
+
+    func stream(
+        _ request: LLMRequest
+    ) -> AsyncThrowingStream<LLMResponseChunk, any Error> {
+        AsyncThrowingStream { continuation in
+            continuation.yield(.toolUseStart(id: "bad_1", name: EmptyInputTool.name))
+            continuation.yield(.toolUseInputDelta(id: "bad_1", json: "{\"unterminated\":"))
+            continuation.yield(.toolUseStop(id: "bad_1"))
+            continuation.yield(.stop(.toolUse))
+            continuation.finish()
+        }
+    }
 }
 
 /// Always sleeps before answering, so a turn deadline must interrupt it.

@@ -14,7 +14,7 @@ public struct AllowlistedTools: Guardrail {
 
     public func evaluate(_ payload: GuardrailPayload) async -> Verifier.Outcome {
         guard case .preToolUse(let call) = payload else { return .pass }
-        if allowed.isEmpty || allowed.contains(call.name) {
+        if allowed.contains(call.name) {
             return .pass
         }
         return .block(reason: "Tool '\(call.name)' is not allowed in this context.")

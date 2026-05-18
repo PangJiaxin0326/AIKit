@@ -3,6 +3,23 @@ import Testing
 @testable import AIKitCore
 import AIKitTestSupport
 
+@Suite struct PackageManifestTests {
+    @Test func platformMinimumsMatchGuide() throws {
+        let testFile = URL(fileURLWithPath: #filePath)
+        let packageRoot = testFile
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let manifest = try String(
+            contentsOf: packageRoot.appendingPathComponent("Package.swift"),
+            encoding: .utf8
+        )
+        #expect(manifest.contains(".iOS(.v17)"))
+        #expect(manifest.contains(".macOS(.v14)"))
+        #expect(manifest.contains(".visionOS(.v1)"))
+    }
+}
+
 @Suite struct JSONValueTests {
     @Test func roundTrip() throws {
         let value: JSONValue = .object([
@@ -294,6 +311,115 @@ import AIKitTestSupport
         #expect(text == "hello")
         #expect(usage?.inputTokens == 11)
         #expect(usage?.outputTokens == 4)
+    }
+
+    @Test func openAIStreamingToolCallArgumentOnlyDeltas() async throws {
+        let sse = """
+        data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"navigate","arguments":"{"}}]},"finish_reason":null}]}
+
+        data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\\"destination\\""}}]},"finish_reason":null}]}
+
+        data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":":\\"settings\\"}"}}]},"finish_reason":"tool_calls"}]}
+
+        data: [DONE]
+        """.data(using: .utf8)!
+        URLProtocolStub.setStub(.init(body: sse))
+        let provider = OpenAIProvider(
+            apiKey: "k", session: URLProtocolStub.makeSession()
+        )
+
+        var starts: [(id: String, name: String)] = []
+        var inputIDs: [String] = []
+        var input = ""
+        var stop: StopReason?
+        for try await chunk in provider.stream(LLMRequest(model: "gpt-4o")) {
+            switch chunk {
+            case .toolUseStart(let id, let name):
+                starts.append((id, name))
+            case .toolUseInputDelta(let id, let json):
+                inputIDs.append(id)
+                input += json
+            case .stop(let reason):
+                stop = reason
+            default:
+                break
+            }
+        }
+
+        #expect(starts.map(\.id) == ["call_1"])
+        #expect(starts.map(\.name) == ["navigate"])
+        #expect(inputIDs == ["call_1", "call_1", "call_1"])
+        #expect(input == "{\"destination\":\"settings\"}")
+        #expect(stop == .toolUse)
+    }
+
+    @Test func anthropicStreamingToolUseDeltasUseStartIDs() async throws {
+        let sse = """
+        data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_a","name":"navigate"}}
+
+        data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\\"destination\\":\\"settings\\"}"}}
+
+        data: {"type":"content_block_stop","index":0}
+
+        data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_b","name":"setSetting"}}
+
+        data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\\"key\\":\\"theme\\"}"}}
+
+        data: {"type":"content_block_stop","index":1}
+
+        data: {"type":"message_delta","delta":{"stop_reason":"tool_use"}}
+        """.data(using: .utf8)!
+        URLProtocolStub.setStub(.init(body: sse))
+        let provider = AnthropicProvider(
+            apiKey: "k", session: URLProtocolStub.makeSession()
+        )
+
+        var starts: [(id: String, name: String)] = []
+        var inputIDs: [String] = []
+        var stopIDs: [String] = []
+        for try await chunk in provider.stream(LLMRequest(model: "claude-opus-4-7")) {
+            switch chunk {
+            case .toolUseStart(let id, let name):
+                starts.append((id, name))
+            case .toolUseInputDelta(let id, _):
+                inputIDs.append(id)
+            case .toolUseStop(let id):
+                stopIDs.append(id)
+            default:
+                break
+            }
+        }
+
+        #expect(starts.map(\.id) == ["toolu_a", "toolu_b"])
+        #expect(starts.map(\.name) == ["navigate", "setSetting"])
+        #expect(inputIDs == ["toolu_a", "toolu_b"])
+        #expect(stopIDs == ["toolu_a", "toolu_b"])
+    }
+
+    @Test func openAIMalformedFunctionArgumentsArePreserved() async throws {
+        let body = """
+        {
+          "choices": [{
+            "message": {
+              "tool_calls": [{
+                "id": "call_bad",
+                "type": "function",
+                "function": {"name": "navigate", "arguments": "{\\"destination\\":"}
+              }]
+            },
+            "finish_reason": "tool_calls"
+          }]
+        }
+        """.data(using: .utf8)!
+        URLProtocolStub.setStub(.init(body: body))
+        let provider = OpenAIProvider(
+            apiKey: "test-key",
+            session: URLProtocolStub.makeSession()
+        )
+        let response = try await provider.complete(LLMRequest(model: "gpt-4o"))
+        let input = try #require(response.toolUses.first?.input.objectValue)
+        #expect(input["__aikit_malformed_tool_input_raw"]?.stringValue == "{\"destination\":")
+        #expect(input != [:])
     }
 
     @Test func ollamaDecodesChatAndToolCalls() async throws {
