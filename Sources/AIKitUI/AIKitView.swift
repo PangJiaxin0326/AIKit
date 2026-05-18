@@ -477,19 +477,13 @@ public struct AIKitChatbotOverlay: View {
                         .position(x: size.width / 2, y: size.height / 2)
                         .transition(.scale.combined(with: .opacity))
                 } else {
-                    VStack {
-                        if isExpanded, activity.hasFailed, let reason = activity.failureReason {
-                            Spacer()
-                            reasonPanel(reason)
+                    HStack {
+                        petButton(in: size)
+                        if isExpanded {
+                            capsuleRow(in: size)
                         }
-                        HStack {
-                            petButton(in: size)
-                            if isExpanded {
-                                capsuleRow(in: size)
-                            }
-                        }
-                        .chatbotCapsuleStyle(tint: petFill)
                     }
+                    .chatbotCapsuleStyle(tint: petFill)
                     .onGeometryChange(for: CGSize.self) { proxy in
                         proxy.size
                     } action: { newSize in
@@ -500,6 +494,17 @@ public struct AIKitChatbotOverlay: View {
                         keyboardOverlap: keyboardOverlap,
                         keyboardVisible: keyboardVisible
                     ))
+                    .overlay {
+                        if isExpanded, activity.hasFailed, let reason = activity.failureReason {
+                            reasonPanel(reason)
+                                .position(floatingCenter(
+                                    in: size,
+                                    keyboardOverlap: keyboardOverlap,
+                                    keyboardVisible: keyboardVisible
+                                ))
+                                .offset(y: -50)
+                        }
+                    }
                 }
             }
             .animation(.spring(duration: 0.24), value: isExpanded)
