@@ -748,13 +748,11 @@ public struct AIKitChatbotOverlay: View {
     }
 
     private var voiceButtonAccessibilityLabel: String {
-        if isVoiceTranscribing {
-            return "Transcribing voice"
-        }
-        if voiceRecorder.isRecording {
-            return "Stop voice input"
-        }
         return "Start voice input"
+    }
+
+    private var showsVoiceInputButton: Bool {
+        !activity.isBusy && !voiceRecorder.isRecording && !isVoiceTranscribing
     }
 
     private func toggleVoiceInput() {
@@ -888,12 +886,16 @@ public struct AIKitChatbotOverlay: View {
 
     private func capsuleRow(in size: CGSize) -> some View {
         HStack(spacing: 8) {
-            voiceInputButton
-                .padding(.leading, 4)
+            if showsVoiceInputButton {
+                voiceInputButton
+                    .padding(.leading, 4)
+            }
             statusField
+                .padding(.leading, showsVoiceInputButton ? 0 : 12)
             interactButton
                 .padding(.trailing)
         }
+        .frame(width: capsuleWidth)
     }
 
     @ViewBuilder
@@ -964,7 +966,15 @@ public struct AIKitChatbotOverlay: View {
     private var interactButton: some View {
         let trimmedEmpty = capsuleDraft
             .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        if voiceRecorder.isRecording || isVoiceTranscribing {
+        if voiceRecorder.isRecording {
+            Button(action: finishVoiceRecording) {
+                Image(systemName: "stop.fill")
+            }
+            .tint(.red)
+            .buttonStyle(.borderedProminent)
+            .buttonBorderShape(.circle)
+            .accessibilityLabel("Stop recording")
+        } else if isVoiceTranscribing {
             EmptyView()
         } else if activity.isBusy {
             Button(action: cancelCurrentWork) {
