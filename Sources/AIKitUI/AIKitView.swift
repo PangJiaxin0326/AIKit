@@ -1364,7 +1364,7 @@ private struct VoiceWaveformView: View {
             HStack(spacing: 3) {
                 ForEach(0..<barCount, id: \.self) { index in
                     Capsule()
-                        .fill(.tint.opacity(0.8))
+                        .fill(.white.opacity(0.9))
                         .frame(width: 3, height: barHeight(index: index, date: timeline.date))
                 }
             }
