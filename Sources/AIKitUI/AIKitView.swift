@@ -477,23 +477,28 @@ public struct AIKitChatbotOverlay: View {
                         .position(x: size.width / 2, y: size.height / 2)
                         .transition(.scale.combined(with: .opacity))
                 } else {
-                    HStack {
-                        petButton(in: size)
-                        if isExpanded {
-                            capsuleGroup(in: size)
+                    VStack {
+                        if activity.hasFailed, let reason = activity.failureReason {
+                            reasonPanel(reason)
                         }
+                        HStack {
+                            petButton(in: size)
+                            if isExpanded {
+                                capsuleRow(in: size)
+                            }
+                        }
+                        .onGeometryChange(for: CGSize.self) { proxy in
+                            proxy.size
+                        } action: { newSize in
+                            capsuleSize = newSize
+                        }
+                        .chatbotCapsuleStyle(tint: petFill)
+                        .position(floatingCenter(
+                            in: size,
+                            keyboardOverlap: keyboardOverlap,
+                            keyboardVisible: keyboardVisible
+                        ))
                     }
-                    .onGeometryChange(for: CGSize.self) { proxy in
-                        proxy.size
-                    } action: { newSize in
-                        capsuleSize = newSize
-                    }
-                    .chatbotCapsuleStyle(tint: petFill)
-                    .position(floatingCenter(
-                        in: size,
-                        keyboardOverlap: keyboardOverlap,
-                        keyboardVisible: keyboardVisible
-                    ))
                 }
             }
             .animation(.spring(duration: 0.24), value: isExpanded)
@@ -768,9 +773,6 @@ public struct AIKitChatbotOverlay: View {
             alignment: petEdge == .leading ? .leading : .trailing,
             spacing: 8
         ) {
-            if activity.hasFailed, let reason = activity.failureReason {
-                reasonPanel(reason)
-            }
             capsuleRow(in: size)
         }
     }
@@ -840,15 +842,11 @@ public struct AIKitChatbotOverlay: View {
     }
 
     private func reasonPanel(_ reason: String) -> some View {
-        HStack(alignment: .top, spacing: 8) {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .foregroundStyle(.red)
-            ScrollView(.horizontal, showsIndicators: false) {
-                Text(reason)
-                    .font(.callout)
-                    .foregroundStyle(.primary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
+        ScrollView(.horizontal, showsIndicators: false) {
+            Text(reason)
+                .font(.callout)
+                .foregroundStyle(.primary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
