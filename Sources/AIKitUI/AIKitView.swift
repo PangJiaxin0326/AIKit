@@ -488,13 +488,13 @@ public struct AIKitChatbotOverlay: View {
                                 capsuleRow(in: size)
                             }
                         }
+                        .chatbotCapsuleStyle(tint: petFill)
                     }
                     .onGeometryChange(for: CGSize.self) { proxy in
                         proxy.size
                     } action: { newSize in
                         capsuleSize = newSize
                     }
-                    .chatbotCapsuleStyle(tint: petFill)
                     .position(floatingCenter(
                         in: size,
                         keyboardOverlap: keyboardOverlap,
