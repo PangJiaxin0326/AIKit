@@ -465,6 +465,13 @@ public struct AIKitChatbotOverlay: View {
             let keyboardOverlap = keyboardOverlap(in: frame)
             let keyboardVisible = keyboardVisible(in: frame)
             ZStack(alignment: .topLeading) {
+                if isExpanded || isDialogPresented {
+                    Color.black.opacity(0.15)
+                        .background(.ultraThinMaterial)
+                        .ignoresSafeArea()
+                        .onTapGesture { dismissToButton() }
+                        .transition(.opacity)
+                }
                 if isDialogPresented {
                     dialog
                         .position(x: size.width / 2, y: size.height / 2)
@@ -489,6 +496,8 @@ public struct AIKitChatbotOverlay: View {
                     ))
                 }
             }
+            .animation(.spring(duration: 0.24), value: isExpanded)
+            .animation(.spring(duration: 0.24), value: isDialogPresented)
             .animation(.spring(duration: 0.25), value: keyboardFrame?.minY)
         }
         .task { await refreshSnapshot() }
@@ -730,6 +739,14 @@ public struct AIKitChatbotOverlay: View {
 
     private func cancelCurrentWork() {
         Task { await orchestrator.cancelActiveTurns() }
+    }
+
+    private func dismissToButton() {
+        fieldFocused = false
+        withAnimation(.spring(duration: 0.24)) {
+            isExpanded = false
+            isDialogPresented = false
+        }
     }
 
     /// Clears a sticky failure (returns the orchestrator to idle) and
