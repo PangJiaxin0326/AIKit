@@ -488,18 +488,18 @@ public struct AIKitChatbotOverlay: View {
                                 capsuleRow(in: size)
                             }
                         }
-                        .onGeometryChange(for: CGSize.self) { proxy in
-                            proxy.size
-                        } action: { newSize in
-                            capsuleSize = newSize
-                        }
-                        .chatbotCapsuleStyle(tint: petFill)
-                        .position(floatingCenter(
-                            in: size,
-                            keyboardOverlap: keyboardOverlap,
-                            keyboardVisible: keyboardVisible
-                        ))
                     }
+                    .onGeometryChange(for: CGSize.self) { proxy in
+                        proxy.size
+                    } action: { newSize in
+                        capsuleSize = newSize
+                    }
+                    .chatbotCapsuleStyle(tint: petFill)
+                    .position(floatingCenter(
+                        in: size,
+                        keyboardOverlap: keyboardOverlap,
+                        keyboardVisible: keyboardVisible
+                    ))
                 }
             }
             .animation(.spring(duration: 0.24), value: isExpanded)
@@ -849,7 +849,6 @@ public struct AIKitChatbotOverlay: View {
                 .foregroundStyle(.primary)
                 .fixedSize(horizontal: false, vertical: true)
         }
-        .padding()
     }
 
     /// Centers the capsule group: docked to the pet's edge at the pet's
