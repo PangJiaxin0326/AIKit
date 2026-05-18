@@ -441,7 +441,7 @@ public struct AIKitChatbotOverlay: View {
     /// Which screen edge the pet is docked to, and where along it
     /// (0 = top, 1 = bottom). The pet snaps to an edge when a drag ends.
     @State private var petEdge: HorizontalEdge = .trailing
-    @State private var petVerticalFraction: CGFloat = 1
+    @State private var petVerticalFraction: CGFloat = 0.9
     @State private var dragTranslation: CGSize = .zero
     /// True while the pet is pressed or dragged; drives the touch-down
     /// scale-up. Auto-resets when the gesture ends.
@@ -478,7 +478,8 @@ public struct AIKitChatbotOverlay: View {
                         .transition(.scale.combined(with: .opacity))
                 } else {
                     VStack {
-                        if activity.hasFailed, let reason = activity.failureReason {
+                        if isExpanded, activity.hasFailed, let reason = activity.failureReason {
+                            Spacer()
                             reasonPanel(reason)
                         }
                         HStack {
@@ -848,6 +849,7 @@ public struct AIKitChatbotOverlay: View {
                 .foregroundStyle(.primary)
                 .fixedSize(horizontal: false, vertical: true)
         }
+        .padding()
     }
 
     /// Centers the capsule group: docked to the pet's edge at the pet's
