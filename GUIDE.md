@@ -150,12 +150,12 @@ AIKit/
 
 - `swift-tools-version: 6.0`
 - `swiftLanguageModes: [.v6]` and `SwiftSetting.enableUpcomingFeature("StrictConcurrency")`
-- Platforms: `.iOS(.v17)`, `.macOS(.v14)`, `.visionOS(.v1)`
+- Platforms: `.iOS("26.5")`, `.macOS("26.5")`, `.visionOS("26.5")`
 - Targets follow the layout above; each Sources/ target maps to a SwiftPM target,
   with `AIKit` depending on all sub‑targets and re‑exporting them.
 - Tests use **Swift Testing** (`import Testing`), not XCTest.
-- No third‑party dependencies in v1. Networking uses `URLSession`; JSON uses
-  `Codable` + `JSONEncoder/Decoder`.
+- `AIKitUI` depends on MultiModalKit for SpeechAnalyzer-backed voice input.
+  Networking uses `URLSession`; JSON uses `Codable` + `JSONEncoder/Decoder`.
 
 ---
 
@@ -612,7 +612,7 @@ executes → mock LLM emits final answer → orchestrator yields `.finalAnswer`.
    when initialized with an `Orchestrator`.
 2. `AIKitUI.AIKitChatbotOverlay` / `ChatbotOverlay` — a pet-style floating
    assistant entry point that shows current context, available tools, recent
-   activity, and a prompt field.
+   activity, a prompt field, and voice input with a live waveform.
 3. `.aiContext(_:)` view modifier.
 4. README quickstart.
 
@@ -643,7 +643,8 @@ Safety 90%.
   documented reason it isn't. Mutable shared state lives in actors.
 - **No `@unchecked Sendable`** in public API. Internal escape hatches must
   carry a `// swiftlint:disable:next` style justification comment.
-- **No third‑party dependencies in v1.** Vector stores, telemetry, and richer
+- **Keep dependencies narrow.** `AIKitUI` depends on MultiModalKit for
+  SpeechAnalyzer-backed voice input; vector stores, telemetry, and richer
   parsing belong in companion packages.
 - **Logging** goes through `import OSLog`. Each module owns a `Logger` with
   subsystem `com.aikit.<module>`.

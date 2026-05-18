@@ -9,9 +9,9 @@ let swiftSettings: [SwiftSetting] = [
 let package = Package(
     name: "AIKit",
     platforms: [
-        .iOS(.v17),
-        .macOS(.v14),
-        .visionOS(.v1),
+        .iOS("26.5"),
+        .macOS("26.5"),
+        .visionOS("26.5"),
     ],
     products: [
         .library(name: "AIKit", targets: ["AIKit"]),
@@ -20,6 +20,9 @@ let package = Package(
         .library(name: "AIKitRuntime", targets: ["AIKitRuntime"]),
         .library(name: "AIKitSafety", targets: ["AIKitSafety"]),
         .library(name: "AIKitUI", targets: ["AIKitUI"]),
+    ],
+    dependencies: [
+        .package(url: "https://github.com/PangJiaxin0326/MultiModalKit.git", branch: "main"),
     ],
     targets: [
         .target(
@@ -43,7 +46,13 @@ let package = Package(
         ),
         .target(
             name: "AIKitUI",
-            dependencies: ["AIKitCore", "AIKitCapability", "AIKitRuntime", "AIKitSafety"],
+            dependencies: [
+                "AIKitCore",
+                "AIKitCapability",
+                "AIKitRuntime",
+                "AIKitSafety",
+                .product(name: "MultiModalKit", package: "MultiModalKit"),
+            ],
             swiftSettings: swiftSettings
         ),
         .target(

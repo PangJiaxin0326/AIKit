@@ -8,6 +8,7 @@ import AIKitCore
 import AIKitCapability
 import AIKitRuntime
 import AIKitSafety
+import MultiModalKit
 
 /// Drives one `Orchestrator` turn and exposes its events for SwiftUI.
 @MainActor
@@ -408,6 +409,7 @@ public struct AIKitView: View {
 /// their existing view hierarchy.
 public struct AIKitChatbotOverlay: View {
     @State private var session: AIKitSession
+    @StateObject private var voiceRecorder = AudioRecorder()
     /// Full assistant panel — opened by a long press on the pet.
     @State private var isDialogPresented = false
     /// Whether the glass capsule (status field + action) is expanded next
@@ -416,6 +418,9 @@ public struct AIKitChatbotOverlay: View {
     @State private var selectedMenu = ChatbotMenu.context
     @State private var draft = ""
     @State private var capsuleDraft = ""
+    @State private var isVoiceTranscribing = false
+    @State private var voiceError: String?
+    @State private var voiceTask: Task<Void, Never>?
     @State private var capsuleSize: CGSize = .zero
     /// The last instruction sent from the capsule, carried as context into
     /// a follow-up after a failure.
@@ -520,6 +525,7 @@ public struct AIKitChatbotOverlay: View {
             // Surface a failure immediately so the reason panel is visible.
             if failed { withAnimation(.spring(duration: 0.28)) { isExpanded = true } }
         }
+        .onDisappear { cancelVoiceInput() }
         #if os(iOS)
         .onReceive(NotificationCenter.default.publisher(
             for: UIResponder.keyboardWillChangeFrameNotification
@@ -709,7 +715,11 @@ public struct AIKitChatbotOverlay: View {
     /// the failure reason are folded in so the model treats the follow-up
     /// as a clarification of the same request, not a brand-new one.
     private func sendCapsule() {
-        let text = capsuleDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        sendCapsuleText(capsuleDraft)
+    }
+
+    private func sendCapsuleText(_ rawText: String) {
+        let text = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, !activity.isBusy else { return }
         capsuleDraft = ""
         let instruction = activity.hasFailed
@@ -721,6 +731,105 @@ public struct AIKitChatbotOverlay: View {
             : text
         lastInstruction = text
         Task { await session.send(instruction) }
+    }
+
+    private var voiceLevel: Double {
+        max(voiceRecorder.averagePowerLevel, voiceRecorder.peakPowerLevel * 0.85)
+    }
+
+    private var voiceButtonSystemImage: String {
+        if isVoiceTranscribing {
+            return "waveform.badge.magnifyingglass"
+        }
+        if voiceRecorder.isRecording {
+            return "stop.fill"
+        }
+        return "mic.fill"
+    }
+
+    private var voiceButtonAccessibilityLabel: String {
+        if isVoiceTranscribing {
+            return "Transcribing voice"
+        }
+        if voiceRecorder.isRecording {
+            return "Stop voice input"
+        }
+        return "Start voice input"
+    }
+
+    private func toggleVoiceInput() {
+        if voiceRecorder.isRecording {
+            finishVoiceRecording()
+        } else {
+            startVoiceRecording()
+        }
+    }
+
+    private func startVoiceRecording() {
+        guard !activity.isBusy, !isVoiceTranscribing else { return }
+        fieldFocused = false
+        capsuleDraft = ""
+        voiceError = nil
+        voiceTask?.cancel()
+        voiceTask = Task { @MainActor in
+            do {
+                try await PermissionCenter.require(.speechRecognition)
+                try Task.checkCancellation()
+                _ = try await voiceRecorder.startRecordingWithPermission(
+                    configuration: AudioRecordingConfiguration(format: .wav)
+                )
+            } catch is CancellationError {
+                voiceRecorder.cancelRecording()
+            } catch {
+                voiceError = error.localizedDescription
+                voiceRecorder.cancelRecording()
+            }
+        }
+    }
+
+    private func finishVoiceRecording() {
+        guard let url = voiceRecorder.stopRecording() else { return }
+        transcribeVoiceRecording(at: url)
+    }
+
+    private func transcribeVoiceRecording(at url: URL) {
+        isVoiceTranscribing = true
+        voiceError = nil
+        voiceTask?.cancel()
+        voiceTask = Task { @MainActor [url] in
+            defer {
+                isVoiceTranscribing = false
+                voiceTask = nil
+                try? FileManager.default.removeItem(at: url)
+            }
+
+            do {
+                let result = try await SpeechTranscriptionService()
+                    .transcribeAudioFile(at: url)
+                try Task.checkCancellation()
+
+                let text = result.plainText
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !text.isEmpty else {
+                    voiceError = "No speech detected."
+                    return
+                }
+                sendCapsuleText(text)
+            } catch is CancellationError {
+                voiceRecorder.cancelRecording()
+            } catch {
+                voiceError = error.localizedDescription
+            }
+        }
+    }
+
+    private func cancelVoiceInput() {
+        voiceTask?.cancel()
+        voiceTask = nil
+        if voiceRecorder.isRecording {
+            voiceRecorder.cancelRecording()
+        }
+        isVoiceTranscribing = false
     }
 
     private func contextualFollowUp(
@@ -778,16 +887,30 @@ public struct AIKitChatbotOverlay: View {
     }
 
     private func capsuleRow(in size: CGSize) -> some View {
-        HStack {
+        HStack(spacing: 8) {
+            voiceInputButton
+                .padding(.leading, 4)
             statusField
             interactButton
-                .padding(.horizontal)
+                .padding(.trailing)
         }
     }
 
     @ViewBuilder
     private var statusField: some View {
-        if activity.isBusy {
+        if voiceRecorder.isRecording {
+            VoiceWaveformView(level: voiceLevel)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        } else if isVoiceTranscribing {
+            HStack(spacing: 6) {
+                ProgressView().controlSize(.small)
+                Text("Transcribing")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        } else if activity.isBusy {
             HStack(spacing: 6) {
                 ProgressView().controlSize(.small)
                 Text(activity.statusText)
@@ -796,6 +919,20 @@ public struct AIKitChatbotOverlay: View {
                     .lineLimit(1)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+        } else if let voiceError {
+            HStack(spacing: 6) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.red)
+                Text(voiceError)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .onTapGesture {
+                self.voiceError = nil
+                fieldFocused = true
+            }
         } else {
             TextField(
                 activity.hasFailed ? "Add a clarification…" : "Ask the assistant…",
@@ -807,15 +944,29 @@ public struct AIKitChatbotOverlay: View {
             .focused($fieldFocused)
             .submitLabel(.send)
             .onSubmit(sendCapsule)
+            .onChange(of: capsuleDraft) { _, _ in voiceError = nil }
             .frame(maxWidth: .infinity)
         }
+    }
+
+    private var voiceInputButton: some View {
+        Button(action: toggleVoiceInput) {
+            Image(systemName: voiceButtonSystemImage)
+        }
+        .buttonStyle(.bordered)
+        .buttonBorderShape(.circle)
+        .tint(voiceRecorder.isRecording ? .red : .accentColor)
+        .disabled((activity.isBusy && !voiceRecorder.isRecording) || isVoiceTranscribing)
+        .accessibilityLabel(voiceButtonAccessibilityLabel)
     }
 
     @ViewBuilder
     private var interactButton: some View {
         let trimmedEmpty = capsuleDraft
             .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        if activity.isBusy {
+        if voiceRecorder.isRecording || isVoiceTranscribing {
+            EmptyView()
+        } else if activity.isBusy {
             Button(action: cancelCurrentWork) {
                 Image(systemName: "stop.fill")
             }
@@ -1190,6 +1341,37 @@ private struct AIKitConfigurationSection<Content: View>: View {
                 .font(.headline)
         }
         .groupBoxStyle(.automatic)
+    }
+}
+
+private struct VoiceWaveformView: View {
+    let level: Double
+
+    private let barCount = 24
+
+    var body: some View {
+        TimelineView(.animation) { timeline in
+            HStack(spacing: 3) {
+                ForEach(0..<barCount, id: \.self) { index in
+                    Capsule()
+                        .fill(.tint.opacity(0.8))
+                        .frame(width: 3, height: barHeight(index: index, date: timeline.date))
+                }
+            }
+            .frame(maxWidth: .infinity, minHeight: 34, maxHeight: 34, alignment: .center)
+            .accessibilityLabel("Recording voice")
+        }
+    }
+
+    private func barHeight(index: Int, date: Date) -> CGFloat {
+        let clampedLevel = min(1, max(0.04, level))
+        let midpoint = Double(barCount - 1) / 2
+        let distance = abs(Double(index) - midpoint) / midpoint
+        let envelope = 1 - distance * 0.48
+        let phase = date.timeIntervalSinceReferenceDate * 8
+        let ripple = 0.58 + 0.42 * sin(phase + Double(index) * 0.68)
+        let height = 5 + 28 * clampedLevel * envelope * ripple
+        return CGFloat(height)
     }
 }
 

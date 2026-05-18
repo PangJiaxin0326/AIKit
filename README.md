@@ -4,8 +4,8 @@ A Swift package providing the foundation for AI-native apps. AIKit composes UI,
 business logic, and profile/settings mutations through a unified agent pipeline
 driven by an LLM.
 
-Swift 6 · strict concurrency · iOS 17 / macOS 14 / visionOS 1 · no
-third-party dependencies.
+Swift 6 · strict concurrency · iOS 26.5 / macOS 26.5 / visionOS 26.5 ·
+MultiModalKit voice input.
 
 ## Modules
 
@@ -147,7 +147,9 @@ struct RootView: View {
 `AIKitView` renders the Core, Capability, Runtime, and Safety configuration
 dashboard. `AIKitChatbotOverlay` (also available as `ChatbotOverlay`) can be
 applied to any view with `.aiChatbotOverlay(orchestrator:)` when you want the
-assistant pet/dialog entry point without the dashboard.
+assistant pet/dialog entry point without the dashboard. The compact capsule
+supports voice input through MultiModalKit's SpeechAnalyzer-backed
+transcription service.
 
 ## Architecture
 

@@ -9,7 +9,8 @@ swift build
 swift test
 ```
 
-Swift 6, strict concurrency, language mode v6. No third-party dependencies.
+Swift 6, strict concurrency, language mode v6. Keep dependencies narrow;
+`AIKitUI` depends on MultiModalKit for SpeechAnalyzer-backed voice input.
 
 ## Module dependency order
 
