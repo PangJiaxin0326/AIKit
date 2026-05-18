@@ -112,6 +112,11 @@ public struct OllamaProvider: LLMProvider {
     ]
 
     private func makeURLRequest(_ request: LLMRequest, stream: Bool) throws -> URLRequest {
+        if request.audioOutput != nil {
+            throw LLMError.unsupported(
+                "OllamaProvider does not support generated audio output."
+            )
+        }
         let url = try configuration.baseURL.resolvingEndpoint(
             apiPrefix: "api", endpoint: "chat"
         )
@@ -131,7 +136,7 @@ public struct OllamaProvider: LLMProvider {
         var body: [String: JSONValue] = [
             "model": .string(request.model),
             "stream": .bool(stream),
-            "messages": .array(Self.wireMessages(request)),
+            "messages": .array(try Self.wireMessages(request)),
         ]
         if !request.tools.isEmpty {
             body["tools"] = .array(request.tools.map(Self.wireTool))
@@ -166,7 +171,7 @@ public struct OllamaProvider: LLMProvider {
         return urlRequest
     }
 
-    private static func wireMessages(_ request: LLMRequest) -> [JSONValue] {
+    private static func wireMessages(_ request: LLMRequest) throws -> [JSONValue] {
         var messages: [JSONValue] = []
         if let system = request.system, !system.isEmpty {
             messages.append(.object(["role": .string("system"), "content": .string(system)]))
@@ -179,10 +184,15 @@ public struct OllamaProvider: LLMProvider {
                     "content": .string(message.plainText),
                 ]))
             case .user:
-                messages.append(.object([
+                var object: [String: JSONValue] = [
                     "role": .string("user"),
                     "content": .string(message.plainText),
-                ]))
+                ]
+                let images = try Self.ollamaImages(in: message)
+                if !images.isEmpty {
+                    object["images"] = .array(images.map(JSONValue.string))
+                }
+                messages.append(.object(object))
             case .assistant:
                 var object: [String: JSONValue] = [
                     "role": .string("assistant"),
@@ -213,6 +223,22 @@ public struct OllamaProvider: LLMProvider {
             }
         }
         return messages
+    }
+
+    private static func ollamaImages(in message: Message) throws -> [String] {
+        if !message.audio.isEmpty {
+            throw LLMError.unsupported("OllamaProvider does not support audio content blocks.")
+        }
+        return try message.images.map { image in
+            switch image.source {
+            case .data(_, let data):
+                return data.base64EncodedString()
+            case .url:
+                throw LLMError.unsupported(
+                    "OllamaProvider image content requires base64 image data, not a remote URL."
+                )
+            }
+        }
     }
 
     private static func wireTool(_ descriptor: ToolDescriptor) -> JSONValue {

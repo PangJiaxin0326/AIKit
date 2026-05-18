@@ -71,6 +71,10 @@ public final class MockProvider: LLMProvider, @unchecked Sendable {
                         continuation.yield(.textDelta(text))
                     case .reasoning(let text):
                         continuation.yield(.reasoningDelta(text))
+                    case .image:
+                        break
+                    case .audio(let audio):
+                        continuation.yield(.audio(audio))
                     case .toolUse(let id, let name, let input):
                         continuation.yield(.toolUseStart(id: id, name: name))
                         if let data = try? input.data(),

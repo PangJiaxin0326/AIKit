@@ -98,6 +98,26 @@ requires Apple Intelligence to be available on the device, and does not need an
 API key. It reports `supportsNativeTools == false`, so AIKit enables the fenced
 tool-call fallback and keeps dispatching tools through `ToolRegistry`.
 
+Messages can include multimodal blocks:
+
+```swift
+let request = LLMRequest(
+    model: "gpt-4o",
+    messages: [
+        Message(role: .user, content: [
+            .text("Describe this and answer in voice."),
+            .image(ImageContent(data: imageData, mimeType: "image/jpeg")),
+            .audio(AudioContent(data: audioData, mimeType: "audio/wav", format: .wav)),
+        ]),
+    ],
+    audioOutput: AudioOutputOptions(voice: "alloy", format: .mp3)
+)
+```
+
+OpenAI supports image input, wav/mp3 audio input, and generated audio output.
+Anthropic supports image input. Ollama supports base64 image input for
+multimodal local models. Unsupported media modes throw `LLMError.unsupported`.
+
 ## SwiftUI
 
 ```swift

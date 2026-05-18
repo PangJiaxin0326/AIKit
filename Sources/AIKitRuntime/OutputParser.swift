@@ -35,6 +35,13 @@ public enum OutputParser {
                 // Not part of the parsed intent; the Orchestrator surfaces it
                 // separately as a reasoning event.
                 continue
+            case .image:
+                continue
+            case .audio(let audio):
+                if let transcript = audio.transcript {
+                    if !text.isEmpty { text += "\n" }
+                    text += transcript
+                }
             case .toolUse(let id, let name, let input):
                 // A tool_use block whose input failed to decode upstream is
                 // surfaced so the ErrorHandler can re-prompt.

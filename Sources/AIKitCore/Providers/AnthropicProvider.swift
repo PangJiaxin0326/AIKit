@@ -109,13 +109,15 @@ public struct AnthropicProvider: LLMProvider {
             urlRequest.timeoutInterval = timeout
         }
 
-        let body = WireRequest(request: request, model: request.model, stream: stream)
         do {
+            let body = try WireRequest(request: request, model: request.model, stream: stream)
             urlRequest.httpBody = try mergedRequestBody(
                 encoded: JSONEncoder().encode(body),
                 extraBody: request.extraBody,
                 reservedKeys: Self.reservedBodyKeys
             )
+        } catch let error as LLMError {
+            throw error
         } catch {
             throw LLMError.encodingFailed(String(describing: error))
         }
@@ -142,7 +144,12 @@ private struct WireRequest: Encodable {
     let max_tokens: Int
     let stream: Bool
 
-    init(request: LLMRequest, model: String, stream: Bool) {
+    init(request: LLMRequest, model: String, stream: Bool) throws {
+        if request.audioOutput != nil {
+            throw LLMError.unsupported(
+                "AnthropicProvider does not support generated audio output."
+            )
+        }
         self.model = model
         self.stream = stream
         self.temperature = request.temperature
@@ -194,6 +201,14 @@ private struct WireContent: Encodable {
         case toolUseID = "tool_use_id"
         case content
         case isError = "is_error"
+        case source
+    }
+
+    enum SourceKeys: String, CodingKey {
+        case type
+        case mediaType = "media_type"
+        case data
+        case url
     }
 
     func encode(to encoder: any Encoder) throws {
@@ -208,6 +223,20 @@ private struct WireContent: Encodable {
             // can't silently drop content.
             try container.encode("text", forKey: .type)
             try container.encode(text, forKey: .text)
+        case .image(let image):
+            try container.encode("image", forKey: .type)
+            var source = container.nestedContainer(keyedBy: SourceKeys.self, forKey: .source)
+            switch image.source {
+            case .url(let url):
+                try source.encode("url", forKey: .type)
+                try source.encode(url.absoluteString, forKey: .url)
+            case .data(let mimeType, let data):
+                try source.encode("base64", forKey: .type)
+                try source.encode(mimeType, forKey: .mediaType)
+                try source.encode(data.base64EncodedString(), forKey: .data)
+            }
+        case .audio:
+            throw LLMError.unsupported("AnthropicProvider does not support audio content blocks.")
         case .toolUse(let id, let name, let input):
             try container.encode("tool_use", forKey: .type)
             try container.encode(id, forKey: .id)

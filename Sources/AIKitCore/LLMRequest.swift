@@ -8,6 +8,9 @@ public struct LLMRequest: Sendable, Hashable {
     public var tools: [ToolDescriptor]
     public var temperature: Double?
     public var maxTokens: Int?
+    /// Requests generated voice/audio output from providers that support it.
+    /// Providers that do not support audio output throw `LLMError.unsupported`.
+    public var audioOutput: AudioOutputOptions?
     /// Provider-specific knobs merged into the request body. Local models need
     /// these (`num_ctx`, `keep_alive`, `stop`, `top_p`, `seed`, …). Reserved
     /// keys owned by the wire encoder (`model`, `messages`, `stream`, …) are
@@ -21,6 +24,7 @@ public struct LLMRequest: Sendable, Hashable {
         tools: [ToolDescriptor] = [],
         temperature: Double? = nil,
         maxTokens: Int? = nil,
+        audioOutput: AudioOutputOptions? = nil,
         extraBody: [String: JSONValue] = [:]
     ) {
         self.model = model
@@ -29,6 +33,7 @@ public struct LLMRequest: Sendable, Hashable {
         self.tools = tools
         self.temperature = temperature
         self.maxTokens = maxTokens
+        self.audioOutput = audioOutput
         self.extraBody = extraBody
     }
 }

@@ -36,6 +36,18 @@ public struct LLMResponse: Sendable, Codable, Hashable {
             return nil
         }
     }
+
+    public var images: [ImageContent] {
+        content.compactMap(\.image)
+    }
+
+    public var audio: [AudioContent] {
+        content.compactMap(\.audio)
+    }
+
+    public var audioTranscripts: [String] {
+        audio.compactMap(\.transcript)
+    }
 }
 
 /// An incremental chunk emitted by a streaming completion.
@@ -43,6 +55,9 @@ public enum LLMResponseChunk: Sendable, Hashable {
     case textDelta(String)
     /// An incremental chunk of model reasoning / chain-of-thought.
     case reasoningDelta(String)
+    /// A complete generated audio block. Providers that stream base64 audio
+    /// incrementally may coalesce it before emitting this chunk.
+    case audio(AudioContent)
     case toolUseStart(id: String, name: String)
     case toolUseInputDelta(id: String, json: String)
     case toolUseStop(id: String)

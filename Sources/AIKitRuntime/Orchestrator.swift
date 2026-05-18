@@ -764,6 +764,7 @@ public actor Orchestrator {
         }
         var text = ""
         var reasoning = ""
+        var audioBlocks: [AudioContent] = []
         var toolBlocks: [(id: String, name: String, json: String)] = []
         var stopReason: StopReason = .endTurn
         var usage = TokenUsage.zero
@@ -780,6 +781,11 @@ public actor Orchestrator {
             case .reasoningDelta(let delta):
                 reasoning += delta
                 emit(.reasoningDelta(delta))
+            case .audio(let audio):
+                audioBlocks.append(audio)
+                if let transcript = audio.transcript {
+                    emit(.llmDelta(transcript))
+                }
             case .toolUseStart(let id, let name):
                 toolBlocks.append((id, name, ""))
             case .toolUseInputDelta(let id, let json):
@@ -806,6 +812,7 @@ public actor Orchestrator {
         var blocks: [ContentBlock] = []
         if !reasoning.isEmpty { blocks.append(.reasoning(reasoning)) }
         if !text.isEmpty { blocks.append(.text(text)) }
+        blocks.append(contentsOf: audioBlocks.map(ContentBlock.audio))
         for tool in toolBlocks {
             let input: JSONValue
             if tool.json.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {

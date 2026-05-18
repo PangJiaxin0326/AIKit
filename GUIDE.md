@@ -294,10 +294,11 @@ public struct LLMRequest: Sendable {
     public var tools: [ToolDescriptor]
     public var temperature: Double?
     public var maxTokens: Int?
+    public var audioOutput: AudioOutputOptions?
 }
 
 public struct LLMResponse: Sendable {
-    public var content: [ContentBlock]   // text + tool_use blocks
+    public var content: [ContentBlock]   // text + media + tool_use blocks
     public var stopReason: StopReason
     public var usage: TokenUsage
 }
@@ -320,13 +321,21 @@ public struct LLMClient: Sendable {
 package ships four:
 
 - **AnthropicProvider** — Messages API, default model
-  `claude-opus-4-7`. Supports tool use blocks natively.
+  `claude-opus-4-7`. Supports tool use blocks natively and image inputs.
 - **OpenAIProvider** — Chat Completions API, default model
-  `gpt-4o`. Maps tool use to function calling.
+  `gpt-4o`. Maps tool use to function calling. Supports image input, wav/mp3
+  audio input, and generated audio output through `AudioOutputOptions`.
 - **OllamaProvider** — native Ollama chat API, default model `llama3.1`.
-  Reports non-guaranteed native tools so AIKit enables the fenced fallback.
+  Supports base64 image inputs for multimodal local models. Reports
+  non-guaranteed native tools so AIKit enables the fenced fallback.
 - **AppleIntelligenceProvider** — on-device Foundation Models framework.
   Requires Apple Intelligence availability and uses the fenced tool fallback.
+
+`Message.content` can carry `.image(ImageContent)` and `.audio(AudioContent)`
+blocks alongside text. `ImageContent` accepts a remote URL or in-memory data
+with a MIME type; `AudioContent` accepts URL or data plus an optional
+`AudioFormat` and transcript. Providers must fail with `LLMError.unsupported`
+for media modes they cannot encode rather than silently dropping content.
 
 Credentials come from `LLMProvider.Configuration` (passed in init); the package
 never reads environment variables itself. The host app decides where keys live.

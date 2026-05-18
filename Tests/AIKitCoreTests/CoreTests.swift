@@ -157,6 +157,35 @@ import AIKitTestSupport
     }
 }
 
+@Suite struct MultimodalContentTests {
+    @Test func mediaBlocksRoundTripAndLeavePlainTextStable() throws {
+        let image = ImageContent(
+            data: Data([0x01, 0x02, 0x03]),
+            mimeType: "image/png",
+            detail: .low
+        )
+        let audio = AudioContent(
+            data: Data([0x04, 0x05]),
+            mimeType: "audio/wav",
+            format: .wav,
+            transcript: "spoken words"
+        )
+        let message = Message(role: .user, content: [
+            .text("Describe this"),
+            .image(image),
+            .audio(audio),
+        ])
+
+        #expect(message.plainText == "Describe this")
+        #expect(message.images == [image])
+        #expect(message.audio == [audio])
+
+        let encoded = try JSONEncoder().encode(message)
+        let decoded = try JSONDecoder().decode(Message.self, from: encoded)
+        #expect(decoded == message)
+    }
+}
+
 @Suite struct EndpointResolutionTests {
     @Test func toleratesV1SuffixAndTrailingSlash() throws {
         let cases: [(String, String)] = [
@@ -561,4 +590,181 @@ import AIKitTestSupport
         #expect(response.toolUses.first?.name == "setSetting")
         #expect(response.toolUses.first?.input.objectValue?["key"]?.stringValue == "theme")
     }
+
+    @Test func openAIEncodesImageAudioAndDecodesVoiceOutput() async throws {
+        let audioBytes = Data([0x09, 0x08, 0x07])
+        let body = """
+        {
+          "choices": [{
+            "message": {
+              "audio": {
+                "id": "audio_1",
+                "expires_at": 1900000000,
+                "data": "\(audioBytes.base64EncodedString())",
+                "transcript": "spoken answer"
+              }
+            },
+            "finish_reason": "stop"
+          }]
+        }
+        """.data(using: .utf8)!
+        URLProtocolStub.setStub(.init(body: body))
+        let provider = OpenAIProvider(
+            apiKey: "test-key",
+            session: URLProtocolStub.makeSession()
+        )
+        let request = LLMRequest(
+            model: "gpt-4o-audio-preview",
+            messages: [
+                Message(role: .user, content: [
+                    .text("Describe this clip"),
+                    .image(ImageContent(
+                        data: Data([0x01, 0x02]),
+                        mimeType: "image/jpeg",
+                        detail: .high
+                    )),
+                    .audio(AudioContent(
+                        data: Data([0x03, 0x04]),
+                        mimeType: "audio/wav",
+                        format: .wav
+                    )),
+                ]),
+            ],
+            audioOutput: AudioOutputOptions(voice: "alloy", format: .mp3)
+        )
+
+        let response = try await provider.complete(request)
+        let outputAudio = try #require(response.audio.first)
+        #expect(outputAudio.id == "audio_1")
+        #expect(outputAudio.transcript == "spoken answer")
+        #expect(outputAudio.format == .mp3)
+        #expect(outputAudio.source.data?.mimeType == "audio/mpeg")
+        #expect(outputAudio.source.data?.data == audioBytes)
+
+        let sent = try recordedRequestJSON()
+        let modalities = try #require(sent["modalities"]?.arrayValue)
+        #expect(modalities.compactMap(\.stringValue) == ["text", "audio"])
+        let audioOptions = try #require(sent["audio"]?.objectValue)
+        #expect(audioOptions["voice"]?.stringValue == "alloy")
+        #expect(audioOptions["format"]?.stringValue == "mp3")
+
+        let messages = try #require(sent["messages"]?.arrayValue)
+        let message = try #require(messages.first?.objectValue)
+        let parts = try #require(message["content"]?.arrayValue)
+        #expect(parts.count == 3)
+        #expect(parts[0].objectValue?["type"]?.stringValue == "text")
+        let imageURL = try #require(parts[1].objectValue?["image_url"]?.objectValue)
+        #expect(parts[1].objectValue?["type"]?.stringValue == "image_url")
+        #expect(imageURL["url"]?.stringValue == "data:image/jpeg;base64,AQI=")
+        #expect(imageURL["detail"]?.stringValue == "high")
+        let inputAudio = try #require(parts[2].objectValue?["input_audio"]?.objectValue)
+        #expect(parts[2].objectValue?["type"]?.stringValue == "input_audio")
+        #expect(inputAudio["data"]?.stringValue == "AwQ=")
+        #expect(inputAudio["format"]?.stringValue == "wav")
+    }
+
+    @Test func anthropicEncodesImageContentBlocks() async throws {
+        let body = """
+        {"content": [{"type": "text", "text": "ok"}], "stop_reason": "end_turn"}
+        """.data(using: .utf8)!
+        URLProtocolStub.setStub(.init(body: body))
+        let provider = AnthropicProvider(
+            apiKey: "test-key",
+            session: URLProtocolStub.makeSession()
+        )
+
+        _ = try await provider.complete(LLMRequest(
+            model: "claude-opus-4-7",
+            messages: [
+                Message(role: .user, content: [
+                    .text("What is shown?"),
+                    .image(ImageContent(
+                        data: Data([0xaa, 0xbb]),
+                        mimeType: "image/png"
+                    )),
+                ]),
+            ]
+        ))
+
+        let sent = try recordedRequestJSON()
+        let messages = try #require(sent["messages"]?.arrayValue)
+        let message = try #require(messages.first?.objectValue)
+        let parts = try #require(message["content"]?.arrayValue)
+        let source = try #require(parts[1].objectValue?["source"]?.objectValue)
+        #expect(parts[1].objectValue?["type"]?.stringValue == "image")
+        #expect(source["type"]?.stringValue == "base64")
+        #expect(source["media_type"]?.stringValue == "image/png")
+        #expect(source["data"]?.stringValue == "qrs=")
+    }
+
+    @Test func ollamaEncodesImageArrays() async throws {
+        let body = """
+        {"model":"llava","message":{"role":"assistant","content":"ok"},\
+        "done":true,"done_reason":"stop"}
+        """.data(using: .utf8)!
+        URLProtocolStub.setStub(.init(body: body))
+        let provider = OllamaProvider(model: "llava", session: URLProtocolStub.makeSession())
+
+        _ = try await provider.complete(LLMRequest(
+            model: "llava",
+            messages: [
+                Message(role: .user, content: [
+                    .text("Describe this"),
+                    .image(ImageContent(data: Data([0x0a, 0x0b]), mimeType: "image/png")),
+                ]),
+            ]
+        ))
+
+        let sent = try recordedRequestJSON()
+        let messages = try #require(sent["messages"]?.arrayValue)
+        let message = try #require(messages.first?.objectValue)
+        #expect(message["content"]?.stringValue == "Describe this")
+        let images = try #require(message["images"]?.arrayValue)
+        #expect(images.compactMap(\.stringValue) == ["Cgs="])
+    }
+
+    @Test func providersRejectUnsupportedAudioInput() async {
+        URLProtocolStub.setStub(.init(body: Data("{}".utf8)))
+        let request = LLMRequest(
+            model: "claude-opus-4-7",
+            messages: [
+                Message(role: .user, content: [
+                    .audio(AudioContent(data: Data([0x01]), mimeType: "audio/wav", format: .wav)),
+                ]),
+            ]
+        )
+        let provider = AnthropicProvider(
+            apiKey: "test-key",
+            session: URLProtocolStub.makeSession()
+        )
+        await #expect(throws: LLMError.self) {
+            try await provider.complete(request)
+        }
+    }
+}
+
+private func recordedRequestJSON() throws -> [String: JSONValue] {
+    let request = try #require(URLProtocolStub.recordedRequests.last)
+    let body = try recordedBodyData(from: request)
+    return try #require(JSONValue(data: body).objectValue)
+}
+
+private func recordedBodyData(from request: URLRequest) throws -> Data {
+    if let body = request.httpBody {
+        return body
+    }
+    let stream = try #require(request.httpBodyStream)
+    stream.open()
+    defer { stream.close() }
+    var data = Data()
+    let bufferSize = 4_096
+    let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: bufferSize)
+    defer { buffer.deallocate() }
+    while stream.hasBytesAvailable {
+        let count = stream.read(buffer, maxLength: bufferSize)
+        if count < 0 { break }
+        if count == 0 { break }
+        data.append(buffer, count: count)
+    }
+    return data
 }

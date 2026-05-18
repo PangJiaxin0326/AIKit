@@ -21,12 +21,21 @@ public final class URLProtocolStub: URLProtocol, @unchecked Sendable {
 
     // swiftlint:disable:next - process-wide test fixture guarded by `lock`
     nonisolated(unsafe) private static var stub: Stub?
+    // swiftlint:disable:next - process-wide test fixture guarded by `lock`
+    nonisolated(unsafe) private static var requests: [URLRequest] = []
     private static let lock = NSLock()
 
     public static func setStub(_ stub: Stub?) {
         lock.lock()
         defer { lock.unlock() }
         Self.stub = stub
+        Self.requests.removeAll()
+    }
+
+    public static var recordedRequests: [URLRequest] {
+        lock.lock()
+        defer { lock.unlock() }
+        return requests
     }
 
     /// Builds a `URLSession` whose only protocol is this stub.
@@ -45,6 +54,7 @@ public final class URLProtocolStub: URLProtocol, @unchecked Sendable {
     public override func startLoading() {
         Self.lock.lock()
         let stub = Self.stub
+        Self.requests.append(request)
         Self.lock.unlock()
 
         guard let stub, let url = request.url else {

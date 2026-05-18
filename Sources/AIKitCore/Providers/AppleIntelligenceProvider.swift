@@ -23,6 +23,11 @@ public struct AppleIntelligenceProvider: LLMProvider {
     }
 
     public func complete(_ request: LLMRequest) async throws -> LLMResponse {
+        if request.audioOutput != nil {
+            throw LLMError.unsupported(
+                "AppleIntelligenceProvider does not support generated audio output."
+            )
+        }
         #if canImport(FoundationModels)
         if #available(iOS 26.0, macOS 26.0, visionOS 26.0, *) {
             return try await AppleFoundationModels.complete(request)
@@ -44,8 +49,30 @@ public struct AppleIntelligenceProvider: LLMProvider {
             let task = Task {
                 do {
                     let response = try await complete(request)
-                    if !response.text.isEmpty {
-                        continuation.yield(.textDelta(response.text))
+                    for block in response.content {
+                        switch block {
+                        case .text(let text):
+                            if !text.isEmpty {
+                                continuation.yield(.textDelta(text))
+                            }
+                        case .reasoning(let text):
+                            if !text.isEmpty {
+                                continuation.yield(.reasoningDelta(text))
+                            }
+                        case .image:
+                            break
+                        case .audio(let audio):
+                            continuation.yield(.audio(audio))
+                        case .toolUse(let id, let name, let input):
+                            continuation.yield(.toolUseStart(id: id, name: name))
+                            if let data = try? input.data(),
+                               let json = String(data: data, encoding: .utf8) {
+                                continuation.yield(.toolUseInputDelta(id: id, json: json))
+                            }
+                            continuation.yield(.toolUseStop(id: id))
+                        case .toolResult:
+                            break
+                        }
                     }
                     continuation.yield(.usage(response.usage))
                     continuation.yield(.stop(response.stopReason))
@@ -117,6 +144,14 @@ public struct AppleIntelligenceProvider: LLMProvider {
                 return text
             case .reasoning:
                 return nil
+            case .image(let image):
+                return "Image attachment: \(image.source.description)."
+            case .audio(let audio):
+                var parts = ["Audio attachment: \(audio.source.description)."]
+                if let transcript = audio.transcript, !transcript.isEmpty {
+                    parts.append("Transcript: \(transcript)")
+                }
+                return parts.joined(separator: " ")
             case .toolUse(_, let name, let input):
                 return "Requested tool \(name) with input \(jsonString(input))."
             case .toolResult(_, let content, let isError):
