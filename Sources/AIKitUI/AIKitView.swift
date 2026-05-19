@@ -559,7 +559,7 @@ public struct AIKitChatbotOverlay: View {
                     }
                     .onEnded { _ in openFullPanel() },
             )
-            .simultaneousGesture(moveGesture(in: size))
+            .simultaneousGesture(isExpanded ? nil : moveGesture(in: size))
             .animation(.spring(duration: 0.2), value: longPressing)
             .animation(.spring(duration: 0.2), value: isInteracting)
             .accessibilityLabel(petAccessibilityLabel)
@@ -656,8 +656,7 @@ public struct AIKitChatbotOverlay: View {
     }
 
     /// Drag to move: the pet follows the finger and snaps to the nearest
-    /// edge on release. When expanded, the whole capsule follows drags started
-    /// from the pet icon. Tap and long-press are separate recognizers, so this
+    /// edge on release. Tap and long-press are separate recognizers, so this
     /// only needs an 8pt activation distance to avoid stealing taps.
     private func moveGesture(in size: CGSize) -> some Gesture {
         // Measure in the global space: the pet is repositioned every frame
@@ -668,24 +667,19 @@ public struct AIKitChatbotOverlay: View {
             .onChanged { value in
                 if isExpanded {
                     fieldFocused = false
+                    withAnimation(.spring(duration: 0.2)) { isExpanded = false }
                 }
                 dragTranslation = value.translation
             }
             .onEnded { value in
                 let base = restingCenter(in: size)
-                let controlHeight = isExpanded ? floatingControlHeight : petDiameter
-                let minY = edgeInset + controlHeight / 2
-                let maxY = max(minY, size.height - edgeInset - controlHeight / 2)
-                let restingMinY = edgeInset + petDiameter / 2
-                let restingMaxY = max(restingMinY, size.height - edgeInset - petDiameter / 2)
+                let minY = edgeInset + petDiameter / 2
+                let maxY = max(minY, size.height - edgeInset - petDiameter / 2)
                 let droppedX = base.x + value.translation.width
                 let droppedY = (base.y + value.translation.height).clamped(to: minY...maxY)
                 withAnimation(.spring(duration: 0.3)) {
                     petEdge = droppedX < size.width / 2 ? .leading : .trailing
-                    petVerticalFraction = restingMaxY > restingMinY
-                        ? (droppedY.clamped(to: restingMinY...restingMaxY) - restingMinY)
-                            / (restingMaxY - restingMinY)
-                        : 0.5
+                    petVerticalFraction = maxY > minY ? (droppedY - minY) / (maxY - minY) : 0.5
                     dragTranslation = .zero
                 }
             }
@@ -852,20 +846,12 @@ public struct AIKitChatbotOverlay: View {
     @ViewBuilder
     private func floatingControl(in size: CGSize) -> some View {
         HStack(spacing: capsuleSpacing) {
-            if petEdge == .leading {
-                petButton(in: size)
-            }
+            petButton(in: size)
             if isExpanded {
                 capsuleContent(in: size)
             }
-            if petEdge == .trailing {
-                petButton(in: size)
-            }
         }
-        .frame(
-            width: floatingControlWidth(in: size),
-            alignment: petEdge == .leading ? .leading : .trailing
-        )
+        .frame(width: floatingControlWidth(in: size), alignment: .leading)
         .environment(\.layoutDirection, .leftToRight)
     }
 
@@ -1013,12 +999,9 @@ public struct AIKitChatbotOverlay: View {
         let height = floatingControlHeight
         let minX = edgeInset + width / 2
         let maxX = size.width - edgeInset - width / 2
-        let restingX = maxX >= minX
+        let x = maxX >= minX
             ? (petEdge == .leading ? minX : maxX)
             : size.width / 2
-        let x = maxX >= minX && dragTranslation != .zero
-            ? (restingX + dragTranslation.width).clamped(to: minX...maxX)
-            : restingX
         let minY = edgeInset + height / 2
         let maxY = max(
             minY,
@@ -1028,9 +1011,9 @@ public struct AIKitChatbotOverlay: View {
                 keyboardOverlap: keyboardOverlap
             )
         )
-        let targetY = keyboardVisible && dragTranslation == .zero
+        let targetY = keyboardVisible
             ? maxY
-            : restingCenter(in: size).y + dragTranslation.height
+            : restingCenter(in: size).y
         return CGPoint(x: x, y: targetY.clamped(to: minY...maxY))
     }
 
