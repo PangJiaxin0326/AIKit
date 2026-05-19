@@ -477,28 +477,28 @@ public struct AIKitChatbotOverlay: View {
                         .transition(.scale.combined(with: .opacity))
                 } else {
                     floatingControl(in: size)
-                    .chatbotCapsuleStyle(tint: petFill)
-                    .onGeometryChange(for: CGSize.self) { proxy in
-                        proxy.size
-                    } action: { newSize in
-                        capsuleSize = newSize
-                    }
-                    .position(floatingCenter(
-                        in: size,
-                        keyboardOverlap: keyboardOverlap,
-                        keyboardVisible: keyboardVisible
-                    ))
-                    .overlay {
-                        if isExpanded, activity.hasFailed, let reason = activity.failureReason {
-                            reasonPanel(reason)
-                                .position(floatingCenter(
-                                    in: size,
-                                    keyboardOverlap: keyboardOverlap,
-                                    keyboardVisible: keyboardVisible
-                                ))
-                                .offset(y: -50)
+                        .chatbotCapsuleStyle(tint: petFill)
+                        .onGeometryChange(for: CGSize.self) { proxy in
+                            proxy.size
+                        } action: { newSize in
+                            capsuleSize = newSize
                         }
-                    }
+                        .position(floatingCenter(
+                            in: size,
+                            keyboardOverlap: keyboardOverlap,
+                            keyboardVisible: keyboardVisible
+                        ))
+                        .overlay {
+                            if isExpanded, activity.hasFailed, let reason = activity.failureReason {
+                                reasonPanel(reason)
+                                    .position(floatingCenter(
+                                        in: size,
+                                        keyboardOverlap: keyboardOverlap,
+                                        keyboardVisible: keyboardVisible
+                                    ))
+                                    .offset(y: -50)
+                            }
+                        }
                 }
             }
             .animation(.spring(duration: 0.24), value: isExpanded)
@@ -732,32 +732,6 @@ public struct AIKitChatbotOverlay: View {
         max(voiceRecorder.averagePowerLevel, voiceRecorder.peakPowerLevel * 0.85)
     }
 
-    private var voiceButtonSystemImage: String {
-        if isVoiceTranscribing {
-            return "waveform.badge.magnifyingglass"
-        }
-        if voiceRecorder.isRecording {
-            return "stop.fill"
-        }
-        return "mic.fill"
-    }
-
-    private var voiceButtonAccessibilityLabel: String {
-        return "Start voice input"
-    }
-
-    private var showsVoiceInputButton: Bool {
-        !activity.isBusy && !voiceRecorder.isRecording && !isVoiceTranscribing
-    }
-
-    private func toggleVoiceInput() {
-        if voiceRecorder.isRecording {
-            finishVoiceRecording()
-        } else {
-            startVoiceRecording()
-        }
-    }
-
     private func startVoiceRecording() {
         guard !activity.isBusy, !isVoiceTranscribing else { return }
         fieldFocused = false
@@ -873,11 +847,11 @@ public struct AIKitChatbotOverlay: View {
     private func floatingControl(in size: CGSize) -> some View {
         HStack(spacing: capsuleSpacing) {
             if isExpanded, petEdge == .trailing {
-                capsuleRow(in: size)
+                capsuleContent(in: size)
             }
             petButton(in: size)
             if isExpanded, petEdge == .leading {
-                capsuleRow(in: size)
+                capsuleContent(in: size)
             }
         }
     }
@@ -889,39 +863,32 @@ public struct AIKitChatbotOverlay: View {
             alignment: petEdge == .leading ? .leading : .trailing,
             spacing: 8
         ) {
-            capsuleRow(in: size)
+            capsuleContent(in: size)
         }
     }
 
-    private func capsuleRow(in size: CGSize) -> some View {
+    private func capsuleContent(in size: CGSize) -> some View {
         HStack(spacing: 8) {
             if petEdge == .trailing {
-                interactButton
+                capsuleActionButton
                     .padding(.leading)
                 statusField
-                if showsVoiceInputButton {
-                    voiceInputButton
-                        .padding(.trailing, 4)
-                }
+                    .padding(.trailing, 12)
             } else {
-                if showsVoiceInputButton {
-                    voiceInputButton
-                        .padding(.leading, 4)
-                }
                 statusField
-                    .padding(.leading, showsVoiceInputButton ? 0 : 12)
-                interactButton
+                    .padding(.leading, 12)
+                capsuleActionButton
                     .padding(.trailing)
             }
         }
-        .frame(width: capsuleWidth)
+        .frame(width: capsuleContentWidth(in: size))
     }
 
     @ViewBuilder
     private var statusField: some View {
         if voiceRecorder.isRecording {
             VoiceWaveformView(level: voiceLevel)
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .frame(maxWidth: .infinity, alignment: statusAlignment)
         } else if isVoiceTranscribing {
             HStack(spacing: 6) {
                 ProgressView().controlSize(.small)
@@ -930,7 +897,7 @@ public struct AIKitChatbotOverlay: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(maxWidth: .infinity, alignment: statusAlignment)
         } else if activity.isBusy {
             HStack(spacing: 6) {
                 ProgressView().controlSize(.small)
@@ -939,7 +906,7 @@ public struct AIKitChatbotOverlay: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(maxWidth: .infinity, alignment: statusAlignment)
         } else if let voiceError {
             HStack(spacing: 6) {
                 Image(systemName: "exclamationmark.triangle.fill")
@@ -949,7 +916,7 @@ public struct AIKitChatbotOverlay: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(maxWidth: .infinity, alignment: statusAlignment)
             .onTapGesture {
                 self.voiceError = nil
                 fieldFocused = true
@@ -963,26 +930,16 @@ public struct AIKitChatbotOverlay: View {
             .textFieldStyle(.plain)
             .lineLimit(1...3)
             .focused($fieldFocused)
+            .multilineTextAlignment(statusTextAlignment)
             .submitLabel(.send)
             .onSubmit(sendCapsule)
             .onChange(of: capsuleDraft) { _, _ in voiceError = nil }
-            .frame(maxWidth: .infinity)
+            .frame(maxWidth: .infinity, alignment: statusAlignment)
         }
-    }
-
-    private var voiceInputButton: some View {
-        Button(action: toggleVoiceInput) {
-            Image(systemName: voiceButtonSystemImage)
-        }
-        .buttonStyle(.bordered)
-        .buttonBorderShape(.circle)
-        .tint(voiceRecorder.isRecording ? .red : .accentColor)
-        .disabled((activity.isBusy && !voiceRecorder.isRecording) || isVoiceTranscribing)
-        .accessibilityLabel(voiceButtonAccessibilityLabel)
     }
 
     @ViewBuilder
-    private var interactButton: some View {
+    private var capsuleActionButton: some View {
         let trimmedEmpty = capsuleDraft
             .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         if voiceRecorder.isRecording {
@@ -1010,13 +967,22 @@ public struct AIKitChatbotOverlay: View {
             .buttonStyle(.bordered)
             .buttonBorderShape(.circle)
             .accessibilityLabel("Dismiss")
+        } else if trimmedEmpty {
+            Button(action: startVoiceRecording) {
+                Image(systemName: "mic.fill")
+                    .symbolRenderingMode(.monochrome)
+            }
+            .buttonStyle(.borderedProminent)
+            .buttonBorderShape(.circle)
+            .tint(.accentColor)
+            .disabled(activity.isBusy || isVoiceTranscribing)
+            .accessibilityLabel("Start recording")
         } else {
             Button(action: sendCapsule) {
                 Image(systemName: "paperplane.fill")
             }
             .buttonStyle(.borderedProminent)
             .buttonBorderShape(.circle)
-            .disabled(trimmedEmpty)
             .accessibilityLabel("Send")
         }
     }
@@ -1037,7 +1003,7 @@ public struct AIKitChatbotOverlay: View {
         keyboardOverlap: CGFloat,
         keyboardVisible: Bool
     ) -> CGPoint {
-        let width = floatingControlWidth
+        let width = floatingControlWidth(in: size)
         let height = floatingControlHeight
         let minX = edgeInset + width / 2
         let maxX = size.width - edgeInset - width / 2
@@ -1063,8 +1029,20 @@ public struct AIKitChatbotOverlay: View {
         max(capsuleSize.height, petDiameter)
     }
 
-    private var floatingControlWidth: CGFloat {
-        petDiameter + (isExpanded ? capsuleSpacing + capsuleWidth : 0)
+    private func floatingControlWidth(in size: CGSize) -> CGFloat {
+        petDiameter + (isExpanded ? capsuleSpacing + capsuleContentWidth(in: size) : 0)
+    }
+
+    private func capsuleContentWidth(in size: CGSize) -> CGFloat {
+        max(0, min(capsuleWidth, size.width - edgeInset * 2 - petDiameter - capsuleSpacing))
+    }
+
+    private var statusAlignment: Alignment {
+        petEdge == .trailing ? .trailing : .leading
+    }
+
+    private var statusTextAlignment: TextAlignment {
+        petEdge == .trailing ? .trailing : .leading
     }
 
     private func maxFloatingCenterY(
