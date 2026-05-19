@@ -476,12 +476,7 @@ public struct AIKitChatbotOverlay: View {
                         .position(x: size.width / 2, y: size.height / 2)
                         .transition(.scale.combined(with: .opacity))
                 } else {
-                    HStack {
-                        petButton(in: size)
-                        if isExpanded {
-                            capsuleRow(in: size)
-                        }
-                    }
+                    floatingControl(in: size)
                     .chatbotCapsuleStyle(tint: petFill)
                     .onGeometryChange(for: CGSize.self) { proxy in
                         proxy.size
@@ -547,10 +542,10 @@ public struct AIKitChatbotOverlay: View {
     /// standalone when collapsed and inside the capsule when expanded.
     private func petButton(in size: CGSize) -> some View {
         Image(systemName: petSymbol)
-            .padding()
-            .contentShape(Circle())
             .font(.title2.weight(.semibold))
             .foregroundStyle(.white)
+            .frame(width: petDiameter, height: petDiameter)
+            .contentShape(Circle())
             .contentTransition(.symbolEffect(.replace))
             .symbolEffect(.pulse, options: .repeating, isActive: activity.isBusy)
             .scaleEffect((longPressing || isInteracting) ? 1.2 : 1)
@@ -872,6 +867,20 @@ public struct AIKitChatbotOverlay: View {
     // MARK: - Glass capsule
 
     private let capsuleWidth: CGFloat = 300
+    private let capsuleSpacing: CGFloat = 0
+
+    @ViewBuilder
+    private func floatingControl(in size: CGSize) -> some View {
+        HStack(spacing: capsuleSpacing) {
+            if isExpanded, petEdge == .trailing {
+                capsuleRow(in: size)
+            }
+            petButton(in: size)
+            if isExpanded, petEdge == .leading {
+                capsuleRow(in: size)
+            }
+        }
+    }
 
     /// The fail-reason panel (when failed) stacked above the capsule row,
     /// aligned to the pet's docked edge so it grows toward screen interior.
@@ -1018,7 +1027,7 @@ public struct AIKitChatbotOverlay: View {
         keyboardOverlap: CGFloat,
         keyboardVisible: Bool
     ) -> CGPoint {
-        let width = max(capsuleSize.width, petDiameter)
+        let width = floatingControlWidth
         let height = floatingControlHeight
         let minX = edgeInset + width / 2
         let maxX = size.width - edgeInset - width / 2
@@ -1042,6 +1051,10 @@ public struct AIKitChatbotOverlay: View {
 
     private var floatingControlHeight: CGFloat {
         max(capsuleSize.height, petDiameter)
+    }
+
+    private var floatingControlWidth: CGFloat {
+        petDiameter + (isExpanded ? capsuleSpacing + capsuleWidth : 0)
     }
 
     private func maxFloatingCenterY(
