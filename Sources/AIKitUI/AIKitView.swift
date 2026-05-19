@@ -840,20 +840,19 @@ public struct AIKitChatbotOverlay: View {
 
     // MARK: - Glass capsule
 
-    private let capsuleWidth: CGFloat = 300
     private let capsuleSpacing: CGFloat = 0
+    private let capsuleContentPadding: CGFloat = 12
 
     @ViewBuilder
     private func floatingControl(in size: CGSize) -> some View {
         HStack(spacing: capsuleSpacing) {
-            if isExpanded, petEdge == .trailing {
-                capsuleContent(in: size)
-            }
             petButton(in: size)
-            if isExpanded, petEdge == .leading {
+            if isExpanded {
                 capsuleContent(in: size)
             }
         }
+        .frame(width: floatingControlWidth(in: size), alignment: .leading)
+        .environment(\.layoutDirection, .leftToRight)
     }
 
     /// The fail-reason panel (when failed) stacked above the capsule row,
@@ -869,17 +868,10 @@ public struct AIKitChatbotOverlay: View {
 
     private func capsuleContent(in size: CGSize) -> some View {
         HStack(spacing: 8) {
-            if petEdge == .trailing {
-                capsuleActionButton
-                    .padding(.leading)
-                statusField
-                    .padding(.trailing, 12)
-            } else {
-                statusField
-                    .padding(.leading, 12)
-                capsuleActionButton
-                    .padding(.trailing)
-            }
+            statusField
+                .padding(.leading, capsuleContentPadding)
+            capsuleActionButton
+                .padding(.trailing, capsuleContentPadding)
         }
         .frame(width: capsuleContentWidth(in: size))
     }
@@ -888,7 +880,7 @@ public struct AIKitChatbotOverlay: View {
     private var statusField: some View {
         if voiceRecorder.isRecording {
             VoiceWaveformView(level: voiceLevel)
-                .frame(maxWidth: .infinity, alignment: statusAlignment)
+                .frame(maxWidth: .infinity, alignment: .trailing)
         } else if isVoiceTranscribing {
             HStack(spacing: 6) {
                 ProgressView().controlSize(.small)
@@ -897,7 +889,7 @@ public struct AIKitChatbotOverlay: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
-            .frame(maxWidth: .infinity, alignment: statusAlignment)
+            .frame(maxWidth: .infinity, alignment: .trailing)
         } else if activity.isBusy {
             HStack(spacing: 6) {
                 ProgressView().controlSize(.small)
@@ -906,7 +898,7 @@ public struct AIKitChatbotOverlay: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
-            .frame(maxWidth: .infinity, alignment: statusAlignment)
+            .frame(maxWidth: .infinity, alignment: .trailing)
         } else if let voiceError {
             HStack(spacing: 6) {
                 Image(systemName: "exclamationmark.triangle.fill")
@@ -916,7 +908,7 @@ public struct AIKitChatbotOverlay: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
-            .frame(maxWidth: .infinity, alignment: statusAlignment)
+            .frame(maxWidth: .infinity, alignment: .trailing)
             .onTapGesture {
                 self.voiceError = nil
                 fieldFocused = true
@@ -930,11 +922,11 @@ public struct AIKitChatbotOverlay: View {
             .textFieldStyle(.plain)
             .lineLimit(1...3)
             .focused($fieldFocused)
-            .multilineTextAlignment(statusTextAlignment)
+            .multilineTextAlignment(.trailing)
             .submitLabel(.send)
             .onSubmit(sendCapsule)
             .onChange(of: capsuleDraft) { _, _ in voiceError = nil }
-            .frame(maxWidth: .infinity, alignment: statusAlignment)
+            .frame(maxWidth: .infinity, alignment: .trailing)
         }
     }
 
@@ -1034,15 +1026,7 @@ public struct AIKitChatbotOverlay: View {
     }
 
     private func capsuleContentWidth(in size: CGSize) -> CGFloat {
-        max(0, min(capsuleWidth, size.width - edgeInset * 2 - petDiameter - capsuleSpacing))
-    }
-
-    private var statusAlignment: Alignment {
-        petEdge == .trailing ? .trailing : .leading
-    }
-
-    private var statusTextAlignment: TextAlignment {
-        petEdge == .trailing ? .trailing : .leading
+        max(0, size.width - edgeInset * 2 - petDiameter - capsuleSpacing)
     }
 
     private func maxFloatingCenterY(
@@ -1358,16 +1342,27 @@ private struct AIKitConfigurationSection<Content: View>: View {
 private struct VoiceWaveformView: View {
     let level: Double
 
-    private let barCount = 24
+    private let barCount = 36
+    private let barSpacing: CGFloat = 3
 
     var body: some View {
         TimelineView(.animation) { timeline in
-            HStack(spacing: 3) {
-                ForEach(0..<barCount, id: \.self) { index in
-                    Capsule()
-                        .fill(.white.opacity(0.9))
-                        .frame(width: 3, height: barHeight(index: index, date: timeline.date))
+            GeometryReader { proxy in
+                let barWidth = max(
+                    2,
+                    (proxy.size.width - barSpacing * CGFloat(barCount - 1)) / CGFloat(barCount)
+                )
+                HStack(spacing: barSpacing) {
+                    ForEach(0..<barCount, id: \.self) { index in
+                        Capsule()
+                            .fill(.white.opacity(0.9))
+                            .frame(
+                                width: barWidth,
+                                height: barHeight(index: index, date: timeline.date)
+                            )
+                    }
                 }
+                .frame(maxWidth: .infinity, minHeight: 34, maxHeight: 34, alignment: .center)
             }
             .frame(maxWidth: .infinity, minHeight: 34, maxHeight: 34, alignment: .center)
             .accessibilityLabel("Recording voice")
