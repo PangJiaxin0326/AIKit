@@ -895,14 +895,24 @@ public struct AIKitChatbotOverlay: View {
 
     private func capsuleRow(in size: CGSize) -> some View {
         HStack(spacing: 8) {
-            if showsVoiceInputButton {
-                voiceInputButton
-                    .padding(.leading, 4)
+            if petEdge == .trailing {
+                interactButton
+                    .padding(.leading)
+                statusField
+                if showsVoiceInputButton {
+                    voiceInputButton
+                        .padding(.trailing, 4)
+                }
+            } else {
+                if showsVoiceInputButton {
+                    voiceInputButton
+                        .padding(.leading, 4)
+                }
+                statusField
+                    .padding(.leading, showsVoiceInputButton ? 0 : 12)
+                interactButton
+                    .padding(.trailing)
             }
-            statusField
-                .padding(.leading, showsVoiceInputButton ? 0 : 12)
-            interactButton
-                .padding(.trailing)
         }
         .frame(width: capsuleWidth)
     }
