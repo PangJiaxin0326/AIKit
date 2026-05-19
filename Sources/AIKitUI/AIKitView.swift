@@ -440,7 +440,7 @@ public struct AIKitChatbotOverlay: View {
     /// Which screen edge the pet is docked to, and where along it
     /// (0 = top, 1 = bottom). The pet snaps to an edge when a drag ends.
     @State private var petEdge: HorizontalEdge = .trailing
-    @State private var petVerticalFraction: CGFloat = 0.9
+    @State private var petVerticalFraction: CGFloat = 1
     @State private var dragTranslation: CGSize = .zero
     /// True while the pet is pressed or dragged; drives the touch-down
     /// scale-up. Auto-resets when the gesture ends.
