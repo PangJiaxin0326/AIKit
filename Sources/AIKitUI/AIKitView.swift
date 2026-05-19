@@ -922,11 +922,11 @@ public struct AIKitChatbotOverlay: View {
             .textFieldStyle(.plain)
             .lineLimit(1...3)
             .focused($fieldFocused)
-            .multilineTextAlignment(.trailing)
+            .multilineTextAlignment(.leading)
             .submitLabel(.send)
             .onSubmit(sendCapsule)
             .onChange(of: capsuleDraft) { _, _ in voiceError = nil }
-            .frame(maxWidth: .infinity, alignment: .trailing)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
