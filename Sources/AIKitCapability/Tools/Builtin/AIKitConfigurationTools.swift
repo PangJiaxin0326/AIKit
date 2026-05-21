@@ -126,7 +126,7 @@ public struct SetAIKitConfigurationTool: Tool {
             section: input.section,
             key: input.key,
             value: input.value,
-            source: "llm:\(context.viewID.rawValue)"
+            source: "llm:\(context.viewID)"
         )
         return Output(
             applied: true,

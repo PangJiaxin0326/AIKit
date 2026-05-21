@@ -1,7 +1,8 @@
 import Foundation
-import AIKitCore
 
-/// Process-wide tool registry. Allows per-view subsetting via `ViewContext`.
+/// Process-wide tool registry. Allows per-view subsetting via the tool-name
+/// set the host caller supplies (AIKitCapability's `ViewContext.toolNames`
+/// drives this in the journal app).
 public actor ToolRegistry {
     public static let shared = ToolRegistry()
 

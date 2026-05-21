@@ -656,7 +656,11 @@ public actor Orchestrator {
             text: "\(effectiveCall.name) \(String(decoding: inputData, as: UTF8.self))"
         ))
 
-        let context = ToolContext(viewID: viewID, memory: memory, logger: logger)
+        let context = ToolContext(
+            viewID: viewID.rawValue,
+            metadata: ["leafViewID": viewID.rawValue],
+            logger: logger
+        )
         let output: Data
         do {
             // A hung or slow tool must not be able to overrun the turn budget,

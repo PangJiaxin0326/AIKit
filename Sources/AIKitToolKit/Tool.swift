@@ -1,8 +1,11 @@
 import Foundation
 import OSLog
-import AIKitCore
 
 /// A typed, declarative unit of work the LLM can invoke.
+///
+/// AIKitToolKit defines the standard so any Swift package can ship `Tool`s
+/// without depending on the rest of AIKit. The hosting app wires them into an
+/// `AIKitCapability.ToolRegistry` and runs them through `AIKitRuntime`.
 public protocol Tool: Sendable {
     associatedtype Input: Codable & Sendable
     associatedtype Output: Codable & Sendable
@@ -26,20 +29,33 @@ extension Tool {
 }
 
 /// Ambient state handed to a tool during invocation.
+///
+/// Kept deliberately small so AIKitToolKit can stand alone: the view id is a
+/// bare `String` (the host runtime supplies the leaf view's id) and richer
+/// dependencies — memory stores, persistence handles, network clients — are
+/// held on the conforming tool itself, injected at construction.
 public struct ToolContext: Sendable {
-    public let viewID: ViewContext.ID
-    public let memory: any MemoryStore
+    /// The leaf view's id (`ViewContext.ID.rawValue` when AIKitCapability is
+    /// driving). Empty when no view is in scope.
+    public let viewID: String
+    /// Free-form context the host wants the tool to see (e.g. the foreground
+    /// entry id). Sub-string lookup only — keep keys stable.
+    public let metadata: [String: String]
     public let logger: Logger
 
     public init(
-        viewID: ViewContext.ID,
-        memory: any MemoryStore,
-        logger: Logger = AIKitLog.capability
+        viewID: String = "",
+        metadata: [String: String] = [:],
+        logger: Logger = Self.defaultLogger
     ) {
         self.viewID = viewID
-        self.memory = memory
+        self.metadata = metadata
         self.logger = logger
     }
+
+    public static let defaultLogger = Logger(
+        subsystem: "com.aikit.toolkit", category: "tool"
+    )
 }
 
 /// Errors thrown by tools carry retriability so the ErrorHandler can decide

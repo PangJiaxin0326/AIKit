@@ -1,8 +1,10 @@
 import Foundation
-import AIKitCore
+import AIKitToolKit
 
-/// Built-in tool: searches the durable memory log. Reads from the
-/// `ToolContext.memory` store, so it needs no host handler.
+/// Built-in tool: searches the durable memory log. The memory store is
+/// injected at init time — the tool standard's `ToolContext` deliberately does
+/// not carry a memory handle so AIKitToolKit can stand alone for non-Capability
+/// packages.
 public struct SearchMemoryTool: Tool {
     public struct Input: Codable, Sendable {
         public var query: String
@@ -34,10 +36,14 @@ public struct SearchMemoryTool: Tool {
         required: ["query"]
     )
 
-    public init() {}
+    private let memory: any MemoryStore
+
+    public init(memory: any MemoryStore) {
+        self.memory = memory
+    }
 
     public func invoke(_ input: Input, in context: ToolContext) async throws -> Output {
-        let events = try await context.memory.search(
+        let events = try await memory.search(
             query: input.query,
             limit: input.limit ?? 10
         )

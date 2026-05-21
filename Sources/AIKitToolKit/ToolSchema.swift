@@ -1,5 +1,4 @@
 import Foundation
-import AIKitCore
 
 /// A small JSON Schema builder for describing tool inputs.
 public struct ToolSchema: Sendable, Hashable {

@@ -15,6 +15,7 @@ let package = Package(
     ],
     products: [
         .library(name: "AIKit", targets: ["AIKit"]),
+        .library(name: "AIKitToolKit", targets: ["AIKitToolKit"]),
         .library(name: "AIKitCore", targets: ["AIKitCore"]),
         .library(name: "AIKitCapability", targets: ["AIKitCapability"]),
         .library(name: "AIKitRuntime", targets: ["AIKitRuntime"]),
@@ -26,12 +27,17 @@ let package = Package(
     ],
     targets: [
         .target(
+            name: "AIKitToolKit",
+            swiftSettings: swiftSettings
+        ),
+        .target(
             name: "AIKitCore",
+            dependencies: ["AIKitToolKit"],
             swiftSettings: swiftSettings
         ),
         .target(
             name: "AIKitCapability",
-            dependencies: ["AIKitCore"],
+            dependencies: ["AIKitToolKit", "AIKitCore"],
             swiftSettings: swiftSettings
         ),
         .target(
@@ -58,6 +64,7 @@ let package = Package(
         .target(
             name: "AIKit",
             dependencies: [
+                "AIKitToolKit",
                 "AIKitCore",
                 "AIKitCapability",
                 "AIKitRuntime",
@@ -70,6 +77,11 @@ let package = Package(
             name: "AIKitTestSupport",
             dependencies: ["AIKitCore", "AIKitCapability"],
             path: "Sources/AIKitTestSupport",
+            swiftSettings: swiftSettings
+        ),
+        .testTarget(
+            name: "AIKitToolKitTests",
+            dependencies: ["AIKitToolKit"],
             swiftSettings: swiftSettings
         ),
         .testTarget(

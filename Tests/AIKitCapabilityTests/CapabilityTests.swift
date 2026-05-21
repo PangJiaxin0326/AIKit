@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import AIKitCapability
 import AIKitCore
+import AIKitToolKit
 
 private struct EchoTool: Tool {
     struct Input: Codable, Sendable { var text: String }
@@ -14,9 +15,11 @@ private struct EchoTool: Tool {
         required: ["text"]
     )
 
+    let memory: any MemoryStore
+
     func invoke(_ input: Input, in context: ToolContext) async throws -> Output {
-        try await context.memory.append(UsageEvent(
-            viewID: context.viewID,
+        try await memory.append(UsageEvent(
+            viewID: ViewContext.ID(context.viewID),
             kind: .toolInvoked,
             text: "echo:\(input.text)"
         ))
@@ -27,9 +30,9 @@ private struct EchoTool: Tool {
 @Suite struct ToolRegistryTests {
     @Test func registerInvokeAndMemory() async throws {
         let registry = ToolRegistry()
-        await registry.register(EchoTool())
         let memory = InMemoryMemoryStore()
-        let context = ToolContext(viewID: .init("home"), memory: memory)
+        await registry.register(EchoTool(memory: memory))
+        let context = ToolContext(viewID: "home")
 
         let input = try JSONEncoder().encode(EchoTool.Input(text: "hi"))
         let outData = try await registry.invoke(
@@ -46,23 +49,23 @@ private struct EchoTool: Tool {
 
     @Test func manifestSubsetting() async {
         let registry = ToolRegistry()
-        await registry.register(EchoTool())
-        await registry.register(SearchMemoryTool())
+        await registry.register(EchoTool(memory: InMemoryMemoryStore()))
+        await registry.register(SearchMemoryTool(memory: InMemoryMemoryStore()))
         let subset = await registry.manifest(for: ["echo"])
         #expect(subset.map(\.name) == ["echo"])
     }
 
     @Test func emptyManifestHasNoTools() async {
         let registry = ToolRegistry()
-        await registry.register(EchoTool())
+        await registry.register(EchoTool(memory: InMemoryMemoryStore()))
         let manifest = await registry.manifest(for: [])
         #expect(manifest.isEmpty)
     }
 
     @Test func registeredDescriptorsReturnsAllTools() async {
         let registry = ToolRegistry()
-        await registry.register(EchoTool())
-        await registry.register(SearchMemoryTool())
+        await registry.register(EchoTool(memory: InMemoryMemoryStore()))
+        await registry.register(SearchMemoryTool(memory: InMemoryMemoryStore()))
         let all = await registry.registeredDescriptors()
         #expect(all.map(\.name) == ["echo", "searchMemory"])
     }
@@ -73,7 +76,7 @@ private struct EchoTool: Tool {
             try await registry.invoke(
                 name: "nope",
                 jsonInput: Data("{}".utf8),
-                context: ToolContext(viewID: .init("v"), memory: InMemoryMemoryStore())
+                context: ToolContext(viewID: "v")
             )
         }
     }
@@ -225,7 +228,7 @@ private struct EchoTool: Tool {
         #expect(names.contains(GetAIKitConfigurationTool.name))
         #expect(names.contains(SetAIKitConfigurationTool.name))
 
-        let context = ToolContext(viewID: .init("settings"), memory: InMemoryMemoryStore())
+        let context = ToolContext(viewID: "settings")
         let setInput = SetAIKitConfigurationTool.Input(
             section: .runtime,
             key: "maxIterations",
