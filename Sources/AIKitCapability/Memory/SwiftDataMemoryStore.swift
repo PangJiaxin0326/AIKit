@@ -7,11 +7,11 @@ import AIKitCore
 /// flat, migration-friendly record.
 @Model
 final class StoredUsageEvent {
-    var id: UUID
-    var timestamp: Date
-    var viewRawValue: String
-    var kindRawValue: String
-    var payload: Data
+    var id: UUID = UUID()
+    var timestamp: Date = Date(timeIntervalSince1970: 0)
+    var viewRawValue: String = ""
+    var kindRawValue: String = UsageEvent.Kind.error.rawValue
+    var payload: Data = Data()
 
     init(
         id: UUID,
@@ -52,8 +52,14 @@ public actor SwiftDataMemoryStore: MemoryStore {
     /// - Parameter path: file path, or `nil` for an in-memory store.
     public init(path: String? = nil) throws {
         let configuration = path.map {
-            ModelConfiguration(url: URL(fileURLWithPath: $0))
-        } ?? ModelConfiguration(isStoredInMemoryOnly: true)
+            ModelConfiguration(
+                url: URL(fileURLWithPath: $0),
+                cloudKitDatabase: .none
+            )
+        } ?? ModelConfiguration(
+            isStoredInMemoryOnly: true,
+            cloudKitDatabase: .none
+        )
         do {
             container = try ModelContainer(
                 for: StoredUsageEvent.self,

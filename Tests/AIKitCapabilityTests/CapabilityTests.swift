@@ -168,6 +168,23 @@ private struct EchoTool: Tool {
         #expect(none.isEmpty)
     }
 
+    @Test func swiftDataFileBackedStoreOpensWithoutCloudKit() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("AIKitSwiftDataMemoryStore-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let store = try SwiftDataMemoryStore(
+            path: root.appendingPathComponent("memory.store").path
+        )
+        let event = UsageEvent(viewID: .init("home"), kind: .error, text: "recoverable")
+
+        try await store.append(event)
+
+        let recent = try await store.recent(limit: 10, view: .init("home"))
+        #expect(recent.map(\.id) == [event.id])
+    }
+
     @Test func swiftDataSearchTreatsQueryLiterally() async throws {
         let store = try SwiftDataMemoryStore(path: nil)
         try await store.append(UsageEvent(
