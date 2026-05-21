@@ -41,13 +41,11 @@ final class StoredUsageEvent {
 /// SwiftData-backed `MemoryStore` with no third-party dependencies. The log is
 /// append-only: `append` only ever inserts, never replaces, and the sole
 /// destructive operation is `delete(id:)`.
+@ModelActor
 public actor SwiftDataMemoryStore: MemoryStore {
     public enum StoreError: Error, Sendable {
         case open(String)
     }
-
-    private let container: ModelContainer
-    private let context: ModelContext
 
     /// - Parameter path: file path, or `nil` for an in-memory store.
     public init(path: String? = nil) throws {
@@ -60,6 +58,7 @@ public actor SwiftDataMemoryStore: MemoryStore {
             isStoredInMemoryOnly: true,
             cloudKitDatabase: .none
         )
+        let container: ModelContainer
         do {
             container = try ModelContainer(
                 for: StoredUsageEvent.self,
@@ -68,18 +67,20 @@ public actor SwiftDataMemoryStore: MemoryStore {
         } catch {
             throw StoreError.open(String(describing: error))
         }
-        context = ModelContext(container)
+        let context = ModelContext(container)
+        modelExecutor = DefaultSerialModelExecutor(modelContext: context)
+        modelContainer = container
     }
 
     public func append(_ event: UsageEvent) async throws {
-        context.insert(StoredUsageEvent(
+        modelContext.insert(StoredUsageEvent(
             id: event.id,
             timestamp: event.timestamp,
             viewRawValue: event.viewID.rawValue,
             kindRawValue: event.kind.rawValue,
             payload: event.payload
         ))
-        try context.save()
+        try modelContext.save()
     }
 
     public func recent(limit: Int, view: ViewContext.ID?) async throws -> [UsageEvent] {
@@ -91,7 +92,7 @@ public actor SwiftDataMemoryStore: MemoryStore {
             sortBy: [SortDescriptor(\.timestamp, order: .reverse)]
         )
         descriptor.fetchLimit = max(0, limit)
-        return try context.fetch(descriptor).map(\.asUsageEvent)
+        return try modelContext.fetch(descriptor).map(\.asUsageEvent)
     }
 
     public func search(query: String, limit: Int) async throws -> [UsageEvent] {
@@ -103,7 +104,7 @@ public actor SwiftDataMemoryStore: MemoryStore {
         // Keyword search runs in Swift so the payload blob can be decoded as
         // text; it mirrors `InMemoryMemoryStore` and treats the query
         // literally (no LIKE-style wildcards).
-        let matches = try context.fetch(descriptor).filter { row in
+        let matches = try modelContext.fetch(descriptor).filter { row in
             let text = String(decoding: row.payload, as: UTF8.self).lowercased()
             return text.contains(lowered)
                 || row.kindRawValue.lowercased().contains(lowered)
@@ -112,10 +113,10 @@ public actor SwiftDataMemoryStore: MemoryStore {
     }
 
     public func delete(id: UUID) async throws {
-        try context.delete(
+        try modelContext.delete(
             model: StoredUsageEvent.self,
             where: #Predicate<StoredUsageEvent> { $0.id == id }
         )
-        try context.save()
+        try modelContext.save()
     }
 }
