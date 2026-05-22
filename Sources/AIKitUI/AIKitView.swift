@@ -36,7 +36,9 @@ public final class AIKitSession {
         self.orchestrator = orchestrator
     }
 
-    private static func describe(_ error: any Error) -> String {
+    /// Maps a turn error to a user-facing string. `nonisolated` so the
+    /// voice mode can reuse it off the main actor.
+    nonisolated static func describe(_ error: any Error) -> String {
         if let violation = error as? GuardrailViolation {
             return "Blocked by \(violation.railID) at \(violation.stage.rawValue): \(violation.reason)"
         }
@@ -405,9 +407,10 @@ public struct AIKitView: View {
     }
 }
 
-/// Floating assistant entry point for apps that want AIKit available above
-/// their existing view hierarchy.
-public struct AIKitChatbotOverlay: View {
+/// The text-first ("assistant") pet button: a tap-to-expand glass capsule
+/// with a prompt field, voice input, and a long-press detail panel. Reached
+/// through `AIKitChatbotOverlay` with `mode: .assistant`.
+struct AssistantChatbotOverlay: View {
     @State private var session: AIKitSession
     @StateObject private var voiceRecorder = AudioRecorder()
     /// Full assistant panel — opened by a long press on the pet.
@@ -452,12 +455,12 @@ public struct AIKitChatbotOverlay: View {
     private let edgeInset: CGFloat = 16
 
     @MainActor
-    public init(orchestrator: Orchestrator) {
+    init(orchestrator: Orchestrator) {
         self.orchestrator = orchestrator
         _session = State(initialValue: AIKitSession(orchestrator: orchestrator))
     }
 
-    public var body: some View {
+    var body: some View {
         GeometryReader { proxy in
             let size = proxy.size
             let frame = proxy.frame(in: .global)
@@ -1246,9 +1249,12 @@ public struct AIKitChatbotOverlay: View {
 public typealias ChatbotOverlay = AIKitChatbotOverlay
 
 public extension View {
-    func aiChatbotOverlay(orchestrator: Orchestrator) -> some View {
+    func aiChatbotOverlay(
+        orchestrator: Orchestrator,
+        mode: AIKitChatbotOverlay.Mode = .assistant
+    ) -> some View {
         overlay {
-            AIKitChatbotOverlay(orchestrator: orchestrator)
+            AIKitChatbotOverlay(orchestrator: orchestrator, mode: mode)
         }
     }
 }
