@@ -1,9 +1,9 @@
 import Foundation
-import AIKitToolKit
+import AIToolKit
 
 /// Built-in tool: searches the durable memory log. The memory store is
 /// injected at init time — the tool standard's `ToolContext` deliberately does
-/// not carry a memory handle so AIKitToolKit can stand alone for non-Capability
+/// not carry a memory handle so AIToolKit can stand alone for non-Capability
 /// packages.
 public struct SearchMemoryTool: Tool {
     public struct Input: Codable, Sendable {

@@ -2,7 +2,7 @@ import Foundation
 import Testing
 @testable import AIKitCapability
 import AIKitCore
-import AIKitToolKit
+import AIToolKit
 
 private struct EchoTool: Tool {
     struct Input: Codable, Sendable { var text: String }

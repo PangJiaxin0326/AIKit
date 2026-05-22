@@ -15,7 +15,6 @@ let package = Package(
     ],
     products: [
         .library(name: "AIKit", targets: ["AIKit"]),
-        .library(name: "AIKitToolKit", targets: ["AIKitToolKit"]),
         .library(name: "AIKitCore", targets: ["AIKitCore"]),
         .library(name: "AIKitCapability", targets: ["AIKitCapability"]),
         .library(name: "AIKitRuntime", targets: ["AIKitRuntime"]),
@@ -23,21 +22,21 @@ let package = Package(
         .library(name: "AIKitUI", targets: ["AIKitUI"]),
     ],
     dependencies: [
+        .package(url: "https://github.com/PangJiaxin0326/AIToolKit.git", branch: "main"),
         .package(url: "https://github.com/PangJiaxin0326/MultiModalKit.git", branch: "main"),
     ],
     targets: [
         .target(
-            name: "AIKitToolKit",
-            swiftSettings: swiftSettings
-        ),
-        .target(
             name: "AIKitCore",
-            dependencies: ["AIKitToolKit"],
+            dependencies: [.product(name: "AIToolKit", package: "AIToolKit")],
             swiftSettings: swiftSettings
         ),
         .target(
             name: "AIKitCapability",
-            dependencies: ["AIKitToolKit", "AIKitCore"],
+            dependencies: [
+                .product(name: "AIToolKit", package: "AIToolKit"),
+                "AIKitCore",
+            ],
             swiftSettings: swiftSettings
         ),
         .target(
@@ -64,7 +63,7 @@ let package = Package(
         .target(
             name: "AIKit",
             dependencies: [
-                "AIKitToolKit",
+                .product(name: "AIToolKit", package: "AIToolKit"),
                 "AIKitCore",
                 "AIKitCapability",
                 "AIKitRuntime",
@@ -77,11 +76,6 @@ let package = Package(
             name: "AIKitTestSupport",
             dependencies: ["AIKitCore", "AIKitCapability"],
             path: "Sources/AIKitTestSupport",
-            swiftSettings: swiftSettings
-        ),
-        .testTarget(
-            name: "AIKitToolKitTests",
-            dependencies: ["AIKitToolKit"],
             swiftSettings: swiftSettings
         ),
         .testTarget(
