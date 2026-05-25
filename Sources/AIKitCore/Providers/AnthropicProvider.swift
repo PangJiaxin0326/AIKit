@@ -3,12 +3,9 @@ import Foundation
 /// `LLMProvider` backed by the Anthropic Messages API.
 public struct AnthropicProvider: LLMProvider {
     public static let defaultBaseURL = URL(string: "https://api.anthropic.com")!
-    public static let defaultModel = "claude-opus-4-7"
     public static let apiVersion = "2023-06-01"
 
-    let configuration: LLMProviderConfiguration
-
-    public var defaultModel: String { configuration.defaultModel }
+    public let configuration: LLMProviderConfiguration
 
     public init(configuration: LLMProviderConfiguration) {
         self.configuration = configuration
@@ -16,7 +13,8 @@ public struct AnthropicProvider: LLMProvider {
 
     public init(
         apiKey: String,
-        model: String = AnthropicProvider.defaultModel,
+        model: String? = nil,
+        availableModels: [String] = [],
         baseURL: URL = AnthropicProvider.defaultBaseURL,
         timeout: TimeInterval? = nil,
         session: URLSession = .shared
@@ -25,6 +23,7 @@ public struct AnthropicProvider: LLMProvider {
             apiKey: apiKey,
             baseURL: baseURL,
             defaultModel: model,
+            availableModels: availableModels,
             timeout: timeout,
             session: session
         ))

@@ -9,9 +9,12 @@ public struct LLMClient: Sendable {
         self.provider = provider
     }
 
-    /// The provider's default model, used by the Runtime when the orchestrator
-    /// options don't pin a model explicitly.
-    public var defaultModel: String { provider.defaultModel }
+    /// The host-selected model from the provider configuration, used by the
+    /// Runtime when the orchestrator options don't pin a model explicitly.
+    public var defaultModel: String? { provider.configuration.defaultModel }
+
+    /// The latest model list stored in the provider configuration.
+    public var availableModels: [String] { provider.configuration.availableModels }
 
     /// Whether the underlying provider speaks a native function-calling
     /// protocol. The Runtime uses this to decide whether to inject the fenced

@@ -22,27 +22,234 @@ public struct AIKitConfiguration: Codable, Sendable, Hashable {
     }
 
     public struct Core: Codable, Sendable, Hashable {
-        public var providerName: String
-        public var model: String
-        public var baseURL: String?
+        public struct ProviderConfiguration: Codable, Sendable, Hashable {
+            public var defaultModel: String?
+            public var availableModels: [String]
+            public var baseURL: String?
+
+            public init(
+                defaultModel: String? = nil,
+                availableModels: [String] = [],
+                baseURL: String? = nil
+            ) {
+                self.defaultModel = defaultModel?.emptyAsNil
+                self.availableModels = Self.normalizedModels(availableModels)
+                self.baseURL = baseURL?.emptyAsNil
+            }
+
+            private enum CodingKeys: String, CodingKey {
+                case defaultModel
+                case availableModels
+                case baseURL
+            }
+
+            public init(from decoder: any Decoder) throws {
+                let container = try decoder.container(keyedBy: CodingKeys.self)
+                self.defaultModel = try container.decodeIfPresent(
+                    String.self,
+                    forKey: .defaultModel
+                )?.emptyAsNil
+                self.availableModels = Self.normalizedModels(try container.decodeIfPresent(
+                    [String].self,
+                    forKey: .availableModels
+                ) ?? [])
+                self.baseURL = try container.decodeIfPresent(
+                    String.self,
+                    forKey: .baseURL
+                )?.emptyAsNil
+            }
+
+            public func encode(to encoder: any Encoder) throws {
+                var container = encoder.container(keyedBy: CodingKeys.self)
+                try container.encodeIfPresent(defaultModel, forKey: .defaultModel)
+                try container.encode(availableModels, forKey: .availableModels)
+                try container.encodeIfPresent(baseURL, forKey: .baseURL)
+            }
+
+            public mutating func replaceAvailableModels(_ models: [String]) {
+                let normalized = Self.normalizedModels(models)
+                availableModels = normalized
+                guard let defaultModel, normalized.contains(defaultModel) else {
+                    self.defaultModel = nil
+                    return
+                }
+            }
+
+            private static func normalizedModels(_ models: [String]) -> [String] {
+                var seen: Set<String> = []
+                var normalized: [String] = []
+                for model in models {
+                    let trimmed = model.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !trimmed.isEmpty, seen.insert(trimmed).inserted else { continue }
+                    normalized.append(trimmed)
+                }
+                return normalized
+            }
+        }
+
+        public var activeProvider: AIKitProviderKind
+        public var openAI: ProviderConfiguration
+        public var anthropic: ProviderConfiguration
+        public var ollama: ProviderConfiguration
+        public var other: ProviderConfiguration
         public var timeout: TimeInterval?
         public var temperature: Double?
         public var maxTokens: Int?
 
         public init(
-            providerName: String = AIKitProviderKind.ollama.rawValue,
-            model: String = "",
-            baseURL: String? = nil,
+            activeProvider: AIKitProviderKind = .ollama,
+            openAI: ProviderConfiguration = ProviderConfiguration(),
+            anthropic: ProviderConfiguration = ProviderConfiguration(),
+            ollama: ProviderConfiguration = ProviderConfiguration(),
+            other: ProviderConfiguration = ProviderConfiguration(),
             timeout: TimeInterval? = nil,
             temperature: Double? = nil,
             maxTokens: Int? = nil
         ) {
-            self.providerName = providerName
-            self.model = model
-            self.baseURL = baseURL
+            self.activeProvider = activeProvider
+            self.openAI = openAI
+            self.anthropic = anthropic
+            self.ollama = ollama
+            self.other = other
             self.timeout = timeout
             self.temperature = temperature
             self.maxTokens = maxTokens
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case activeProvider
+            case openAI
+            case anthropic
+            case ollama
+            case other
+            case timeout
+            case temperature
+            case maxTokens
+            case providerName
+            case model
+            case baseURL
+        }
+
+        public init(from decoder: any Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            let legacyProviderName = try container.decodeIfPresent(
+                String.self,
+                forKey: .providerName
+            )
+            let decodedActiveProvider = try container.decodeIfPresent(
+                AIKitProviderKind.self,
+                forKey: .activeProvider
+            )
+            let activeProvider = decodedActiveProvider
+                ?? legacyProviderName.flatMap(AIKitProviderKind.init(providerName:))
+                ?? .ollama
+
+            self.activeProvider = activeProvider
+            self.openAI = try container.decodeIfPresent(
+                ProviderConfiguration.self,
+                forKey: .openAI
+            ) ?? ProviderConfiguration()
+            self.anthropic = try container.decodeIfPresent(
+                ProviderConfiguration.self,
+                forKey: .anthropic
+            ) ?? ProviderConfiguration()
+            self.ollama = try container.decodeIfPresent(
+                ProviderConfiguration.self,
+                forKey: .ollama
+            ) ?? ProviderConfiguration()
+            self.other = try container.decodeIfPresent(
+                ProviderConfiguration.self,
+                forKey: .other
+            ) ?? ProviderConfiguration()
+            self.timeout = try container.decodeIfPresent(TimeInterval.self, forKey: .timeout)
+            self.temperature = try container.decodeIfPresent(Double.self, forKey: .temperature)
+            self.maxTokens = try container.decodeIfPresent(Int.self, forKey: .maxTokens)
+
+            if container.contains(.model) || container.contains(.baseURL) {
+                var legacyConfiguration = providerConfiguration(for: activeProvider)
+                legacyConfiguration.defaultModel = try container.decodeIfPresent(
+                    String.self,
+                    forKey: .model
+                )?.emptyAsNil
+                legacyConfiguration.baseURL = try container.decodeIfPresent(
+                    String.self,
+                    forKey: .baseURL
+                )?.emptyAsNil
+                setProviderConfiguration(legacyConfiguration, for: activeProvider)
+            }
+        }
+
+        public func encode(to encoder: any Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(activeProvider, forKey: .activeProvider)
+            try container.encode(openAI, forKey: .openAI)
+            try container.encode(anthropic, forKey: .anthropic)
+            try container.encode(ollama, forKey: .ollama)
+            try container.encode(other, forKey: .other)
+            try container.encodeIfPresent(timeout, forKey: .timeout)
+            try container.encodeIfPresent(temperature, forKey: .temperature)
+            try container.encodeIfPresent(maxTokens, forKey: .maxTokens)
+        }
+
+        public var providerName: String {
+            get { activeProvider.rawValue }
+            set {
+                activeProvider = AIKitProviderKind(providerName: newValue) ?? .other
+            }
+        }
+
+        public var model: String? {
+            get { activeProviderConfiguration.defaultModel }
+            set {
+                var providerConfiguration = activeProviderConfiguration
+                providerConfiguration.defaultModel = newValue?.emptyAsNil
+                setProviderConfiguration(providerConfiguration, for: activeProvider)
+            }
+        }
+
+        public var baseURL: String? {
+            get { activeProviderConfiguration.baseURL }
+            set {
+                var providerConfiguration = activeProviderConfiguration
+                providerConfiguration.baseURL = newValue?.emptyAsNil
+                setProviderConfiguration(providerConfiguration, for: activeProvider)
+            }
+        }
+
+        public var activeProviderConfiguration: ProviderConfiguration {
+            get { providerConfiguration(for: activeProvider) }
+            set { setProviderConfiguration(newValue, for: activeProvider) }
+        }
+
+        public func providerConfiguration(
+            for provider: AIKitProviderKind
+        ) -> ProviderConfiguration {
+            switch provider {
+            case .openAI:
+                openAI
+            case .anthropic:
+                anthropic
+            case .ollama:
+                ollama
+            case .other:
+                other
+            }
+        }
+
+        public mutating func setProviderConfiguration(
+            _ providerConfiguration: ProviderConfiguration,
+            for provider: AIKitProviderKind
+        ) {
+            switch provider {
+            case .openAI:
+                openAI = providerConfiguration
+            case .anthropic:
+                anthropic = providerConfiguration
+            case .ollama:
+                ollama = providerConfiguration
+            case .other:
+                other = providerConfiguration
+            }
         }
     }
 
@@ -255,12 +462,18 @@ extension AIKitConfiguration {
         value: JSONValue
     ) throws {
         switch key {
-        case "provider", "providername":
+        case "provider", "providername", "activeprovider":
             core.providerName = try value.string(section: .core, key: originalKey)
         case "model":
-            core.model = try value.string(section: .core, key: originalKey)
+            core.model = try value.optionalString(section: .core, key: originalKey)
         case "baseurl":
             core.baseURL = try value.optionalString(section: .core, key: originalKey)
+        case "models", "availablemodels", "availablemodel":
+            var providerConfiguration = core.activeProviderConfiguration
+            providerConfiguration.replaceAvailableModels(
+                try value.stringArray(section: .core, key: originalKey)
+            )
+            core.activeProviderConfiguration = providerConfiguration
         case "timeout":
             core.timeout = try value.optionalDouble(section: .core, key: originalKey)
         case "temperature":
@@ -335,6 +548,11 @@ extension AIKitConfiguration {
 private extension String {
     var normalizedConfigurationKey: String {
         lowercased().filter { $0.isLetter || $0.isNumber }
+    }
+
+    var emptyAsNil: String? {
+        let trimmed = trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 }
 
@@ -444,6 +662,25 @@ private extension JSONValue {
                 .split(separator: ",")
                 .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
                 .filter { !$0.isEmpty })
+        default:
+            throw AIKitConfigurationError.invalidValue(
+                section: section, key: key, expected: "an array of strings"
+            )
+        }
+    }
+
+    func stringArray(
+        section: AIKitConfiguration.Section,
+        key: String
+    ) throws -> [String] {
+        switch self {
+        case .array(let values):
+            return try values.map { try $0.string(section: section, key: key) }
+        case .string(let value):
+            return value
+                .split(separator: ",")
+                .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
         default:
             throw AIKitConfigurationError.invalidValue(
                 section: section, key: key, expected: "an array of strings"

@@ -265,14 +265,13 @@ public struct AIKitView: View {
             let isRefreshingModels = model.isRefreshingModels(for: selectedProvider)
             HStack(spacing: 8) {
                 Menu {
-                    if modelOptions.isEmpty {
-                        Button(modelMenuTitle) {}
-                            .disabled(true)
-                    } else {
-                        ForEach(modelOptions, id: \.self) { modelName in
-                            Button(modelName) {
-                                model.update(\.core.model, to: modelName)
-                            }
+                    Button("None") {
+                        model.selectModel(nil, for: selectedProvider)
+                    }
+                    Divider()
+                    ForEach(modelOptions, id: \.self) { modelName in
+                        Button(modelName) {
+                            model.selectModel(modelName, for: selectedProvider)
                         }
                     }
                 } label: {
@@ -470,15 +469,9 @@ public struct AIKitView: View {
     }
 
     private var modelMenuTitle: String {
-        guard !model.modelOptions(for: selectedProvider).isEmpty else {
-            return "unavailable"
-        }
-        let configured = model.configuration.core.model
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        if !configured.isEmpty {
-            return configured
-        }
-        return model.modelOptions(for: selectedProvider).first ?? "unavailable"
+        model.configuration.core
+            .providerConfiguration(for: selectedProvider)
+            .defaultModel ?? "None"
     }
 
     private func refreshModelCatalog() async {
@@ -1420,23 +1413,7 @@ public extension View {
 @MainActor
 @Observable
 private final class AIKitConfigurationViewModel {
-    private struct ProviderCoreState {
-        var model: String
-        var baseURL: String?
-
-        init(core: AIKitConfiguration.Core) {
-            self.model = core.model
-            self.baseURL = core.baseURL
-        }
-
-        init(provider: AIKitProviderKind) {
-            self.model = provider.defaultModel
-            self.baseURL = nil
-        }
-    }
-
     private struct ModelCatalogState {
-        var options: [String] = []
         var status: String?
         var statusIsError = false
         var isRefreshing = false
@@ -1450,7 +1427,6 @@ private final class AIKitConfigurationViewModel {
     private let store: AIKitConfigurationStore
     private let toolRegistry: ToolRegistry?
     private let modelCatalog: AIKitModelCatalog
-    private var providerCoreStates: [AIKitProviderKind: ProviderCoreState] = [:]
     private var modelCatalogStates: [AIKitProviderKind: ModelCatalogState] = [:]
     @ObservationIgnored private var saveTask: Task<Void, Never>?
 
@@ -1466,12 +1442,11 @@ private final class AIKitConfigurationViewModel {
     }
 
     var selectedProvider: AIKitProviderKind {
-        AIKitProviderKind(providerName: configuration.core.providerName) ?? .other
+        configuration.core.activeProvider
     }
 
     func load() async {
         configuration = await store.snapshot()
-        syncSelectedProviderCoreState()
         recentChanges = await store.recentChanges(limit: 6)
         if let toolRegistry {
             availableTools = await toolRegistry.registeredDescriptors()
@@ -1480,7 +1455,7 @@ private final class AIKitConfigurationViewModel {
     }
 
     func modelOptions(for provider: AIKitProviderKind) -> [String] {
-        modelCatalogStates[provider]?.options ?? []
+        configuration.core.providerConfiguration(for: provider).availableModels
     }
 
     func modelCatalogStatus(for provider: AIKitProviderKind) -> String? {
@@ -1496,16 +1471,14 @@ private final class AIKitConfigurationViewModel {
     }
 
     func selectProvider(_ provider: AIKitProviderKind) {
-        syncSelectedProviderCoreState()
+        configuration.core.activeProvider = provider
+        saveCurrentConfiguration(status: "Saved")
+    }
 
-        var core = configuration.core
-        let providerState = providerCoreStates[provider]
-            ?? ProviderCoreState(provider: provider)
-        core.providerName = provider.rawValue
-        core.model = providerState.model
-        core.baseURL = provider.usesEditableBaseURL ? providerState.baseURL : nil
-        configuration.core = core
-        syncSelectedProviderCoreState()
+    func selectModel(_ model: String?, for provider: AIKitProviderKind) {
+        var providerConfiguration = configuration.core.providerConfiguration(for: provider)
+        providerConfiguration.defaultModel = model?.emptyAsNil
+        configuration.core.setProviderConfiguration(providerConfiguration, for: provider)
         saveCurrentConfiguration(status: "Saved")
     }
 
@@ -1514,21 +1487,17 @@ private final class AIKitConfigurationViewModel {
         to value: Value
     ) {
         configuration[keyPath: keyPath] = value
-        syncSelectedProviderCoreState()
         saveCurrentConfiguration(status: "Saved")
     }
 
     func update(_ change: (inout AIKitConfiguration) -> Void) {
         change(&configuration)
-        syncSelectedProviderCoreState()
         saveCurrentConfiguration(status: "Saved")
     }
 
     func resetToDefaults() {
         configuration = .standard
-        providerCoreStates = [:]
         modelCatalogStates = [:]
-        syncSelectedProviderCoreState()
         saveCurrentConfiguration(status: "Reset")
     }
 
@@ -1557,33 +1526,21 @@ private final class AIKitConfigurationViewModel {
                 timeout: configuration.core.timeout
             )
             updateModelCatalogState(provider) { state in
-                state.options = models
                 state.status = models.isEmpty
                     ? "No models returned."
                     : "Loaded \(models.count) models."
                 state.statusIsError = false
             }
-            if let first = models.first {
-                providerCoreStates[
-                    provider,
-                    default: ProviderCoreState(provider: provider)
-                ].model = first
-                if selectedProvider == provider {
-                    configuration.core.model = first
-                    syncSelectedProviderCoreState()
-                    saveCurrentConfiguration(status: "Saved")
-                }
-            }
+            var providerConfiguration = configuration.core.providerConfiguration(for: provider)
+            providerConfiguration.replaceAvailableModels(models)
+            configuration.core.setProviderConfiguration(providerConfiguration, for: provider)
+            saveCurrentConfiguration(status: "Saved")
         } catch {
             updateModelCatalogState(provider) { state in
                 state.status = error.localizedDescription
                 state.statusIsError = true
             }
         }
-    }
-
-    private func syncSelectedProviderCoreState() {
-        providerCoreStates[selectedProvider] = ProviderCoreState(core: configuration.core)
     }
 
     private func updateModelCatalogState(

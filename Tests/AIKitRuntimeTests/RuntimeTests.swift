@@ -622,7 +622,7 @@ import AIKitTestSupport
         #expect(sawUsage)
     }
 
-    @Test func defaultsToProviderModelWhenOptionUnset() async throws {
+    @Test func defaultsToProviderConfigurationModelWhenOptionUnset() async throws {
         let provider = MockProvider(
             responses: [LLMResponse(content: [.text("hi")], stopReason: .endTurn)],
             defaultModel: "provider-default"
@@ -790,7 +790,11 @@ private struct EmptyInputTool: Tool {
 }
 
 private struct MalformedStreamingToolProvider: LLMProvider {
-    let defaultModel = "malformed-stream"
+    let configuration = LLMProviderConfiguration(
+        apiKey: "",
+        baseURL: URL(string: "mock://malformed-stream")!,
+        defaultModel: "malformed-stream"
+    )
 
     func complete(_ request: LLMRequest) async throws -> LLMResponse {
         LLMResponse(content: [.text("unused")], stopReason: .endTurn)
@@ -811,7 +815,11 @@ private struct MalformedStreamingToolProvider: LLMProvider {
 
 /// Always sleeps before answering, so a turn deadline must interrupt it.
 private final class SlowProvider: LLMProvider, @unchecked Sendable {
-    let defaultModel = "slow"
+    let configuration = LLMProviderConfiguration(
+        apiKey: "",
+        baseURL: URL(string: "mock://slow")!,
+        defaultModel: "slow"
+    )
     private let delay: Duration
     init(delay: Duration) { self.delay = delay }
 

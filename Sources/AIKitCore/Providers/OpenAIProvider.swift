@@ -10,11 +10,8 @@ import Foundation
 /// `/v1/v1/chat/completions`.
 public struct OpenAIProvider: LLMProvider {
     public static let defaultBaseURL = URL(string: "https://api.openai.com")!
-    public static let defaultModel = "gpt-4o"
 
-    let configuration: LLMProviderConfiguration
-
-    public var defaultModel: String { configuration.defaultModel }
+    public let configuration: LLMProviderConfiguration
 
     public init(configuration: LLMProviderConfiguration) {
         self.configuration = configuration
@@ -22,7 +19,8 @@ public struct OpenAIProvider: LLMProvider {
 
     public init(
         apiKey: String,
-        model: String = OpenAIProvider.defaultModel,
+        model: String? = nil,
+        availableModels: [String] = [],
         baseURL: URL = OpenAIProvider.defaultBaseURL,
         timeout: TimeInterval? = nil,
         session: URLSession = .shared
@@ -31,6 +29,7 @@ public struct OpenAIProvider: LLMProvider {
             apiKey: apiKey,
             baseURL: baseURL,
             defaultModel: model,
+            availableModels: availableModels,
             timeout: timeout,
             session: session
         ))

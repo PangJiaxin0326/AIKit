@@ -26,6 +26,12 @@ public enum OrchestratorEvent: Sendable {
     case error(any Error)
 }
 
+private extension String {
+    var emptyAsNil: String? {
+        isEmpty ? nil : self
+    }
+}
+
 /// A UI-friendly snapshot of the runtime state the orchestrator already owns.
 public struct OrchestratorSnapshot: Sendable, Hashable {
     public var contexts: [ViewContext]
@@ -113,9 +119,9 @@ public struct OrchestratorActivity: Sendable, Equatable {
 /// so concurrent `run` calls on one instance serialize cleanly.
 public actor Orchestrator {
     public struct Options: Sendable {
-        /// The model to request. `nil` defers to the provider's `defaultModel`,
-        /// so there is a single source of truth instead of a value that is
-        /// silently ignored.
+        /// The model to request. `nil` defers to the provider configuration's
+        /// selected model. If neither has a model, the turn fails before
+        /// building a request.
         public var model: String?
         public var maxIterations: Int
         public var stream: Bool
@@ -389,6 +395,9 @@ public actor Orchestrator {
         // Resolve the fenced-tool fallback once per turn: an explicit option
         // wins; otherwise enable it only for providers without native tools.
         let useFallback = options.toolCallFallback ?? !llm.supportsNativeTools
+        let configuredModel = (options.model ?? llm.defaultModel)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .emptyAsNil
 
         let deadline = options.maxTurnDuration.map {
             ContinuousClock.now.advanced(by: .seconds($0))
@@ -417,13 +426,20 @@ public actor Orchestrator {
                     limit: options.memoryWindow, view: viewID
                 )) ?? []
                 let manifest = await tools.manifest(for: context.toolNames)
+                guard let selectedModel = configuredModel else {
+                    let error = LLMError.missingModel
+                    recordFailure(errorMessage(error), turn: turnID)
+                    emit(.error(error))
+                    return
+                }
+
                 let request = PromptBuilder.build(
                     instruction: instruction,
                     context: context,
                     memory: recent,
                     transcript: transcript,
                     toolManifest: manifest,
-                    model: options.model ?? llm.defaultModel,
+                    model: selectedModel,
                     temperature: options.temperature,
                     maxTokens: options.maxTokens,
                     extraBody: options.extraBody,

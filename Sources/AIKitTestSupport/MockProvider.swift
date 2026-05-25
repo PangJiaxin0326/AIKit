@@ -10,26 +10,38 @@ public final class MockProvider: LLMProvider, @unchecked Sendable {
     private var index = 0
     public private(set) var receivedRequests: [LLMRequest] = []
 
-    public let defaultModel: String
+    public let configuration: LLMProviderConfiguration
     public let supportsNativeTools: Bool
 
     public init(
         responses: [LLMResponse],
-        defaultModel: String = "mock-model",
+        defaultModel: String? = "mock-model",
+        availableModels: [String] = [],
         supportsNativeTools: Bool = true
     ) {
         self.scripted = responses.map { .success($0) }
-        self.defaultModel = defaultModel
+        self.configuration = LLMProviderConfiguration(
+            apiKey: "",
+            baseURL: URL(string: "mock://provider")!,
+            defaultModel: defaultModel,
+            availableModels: availableModels
+        )
         self.supportsNativeTools = supportsNativeTools
     }
 
     public init(
         results: [Result<LLMResponse, LLMError>],
-        defaultModel: String = "mock-model",
+        defaultModel: String? = "mock-model",
+        availableModels: [String] = [],
         supportsNativeTools: Bool = true
     ) {
         self.scripted = results
-        self.defaultModel = defaultModel
+        self.configuration = LLMProviderConfiguration(
+            apiKey: "",
+            baseURL: URL(string: "mock://provider")!,
+            defaultModel: defaultModel,
+            availableModels: availableModels
+        )
         self.supportsNativeTools = supportsNativeTools
     }
 

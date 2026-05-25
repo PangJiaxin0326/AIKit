@@ -276,4 +276,69 @@ private struct EchoTool: Tool {
         let snapshot = await store.snapshot()
         #expect(snapshot.capability.enabledToolNames == ["navigate", "searchMemory"])
     }
+
+    @Test func coreStoresProviderConfigurationsIndependently() {
+        var core = AIKitConfiguration.Core(activeProvider: .ollama)
+        core.model = "llama3.1"
+        core.baseURL = "http://localhost:11434"
+
+        core.activeProvider = .openAI
+        core.model = "gpt-5"
+
+        #expect(core.providerConfiguration(for: .ollama).defaultModel == "llama3.1")
+        #expect(core.providerConfiguration(for: .ollama).baseURL == "http://localhost:11434")
+        #expect(core.providerConfiguration(for: .openAI).defaultModel == "gpt-5")
+    }
+
+    @Test func refreshedModelListKeepsOnlyStillAvailableDefault() {
+        var provider = AIKitConfiguration.Core.ProviderConfiguration(
+            defaultModel: "gpt-5",
+            availableModels: ["gpt-5"]
+        )
+
+        provider.replaceAvailableModels(["gpt-4o", "gpt-5"])
+        #expect(provider.defaultModel == "gpt-5")
+        #expect(provider.availableModels == ["gpt-4o", "gpt-5"])
+
+        provider.replaceAvailableModels(["gpt-4o"])
+        #expect(provider.defaultModel == nil)
+
+        provider.defaultModel = "gpt-4o"
+        provider.replaceAvailableModels([])
+        #expect(provider.defaultModel == nil)
+        #expect(provider.availableModels == [])
+    }
+
+    @Test func corePersistsAvailableModels() throws {
+        let configuration = AIKitConfiguration(core: .init(
+            activeProvider: .openAI,
+            openAI: .init(defaultModel: "gpt-5", availableModels: ["gpt-4o", "gpt-5"])
+        ))
+
+        let data = try JSONEncoder().encode(configuration)
+        let decoded = try JSONDecoder().decode(AIKitConfiguration.self, from: data)
+
+        #expect(decoded.core.activeProvider == .openAI)
+        #expect(decoded.core.providerConfiguration(for: .openAI).defaultModel == "gpt-5")
+        #expect(decoded.core.providerConfiguration(for: .openAI).availableModels == [
+            "gpt-4o",
+            "gpt-5",
+        ])
+    }
+
+    @Test func coreDecodesLegacyActiveProviderFields() throws {
+        let data = """
+        {
+          "providerName": "Ollama",
+          "model": "llama3.1",
+          "baseURL": "http://localhost:11434"
+        }
+        """.data(using: .utf8)!
+
+        let decoded = try JSONDecoder().decode(AIKitConfiguration.Core.self, from: data)
+
+        #expect(decoded.activeProvider == .ollama)
+        #expect(decoded.providerConfiguration(for: .ollama).defaultModel == "llama3.1")
+        #expect(decoded.providerConfiguration(for: .ollama).baseURL == "http://localhost:11434")
+    }
 }

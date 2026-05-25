@@ -12,11 +12,8 @@ import Foundation
 /// a single complete block rather than incremental deltas.
 public struct OllamaProvider: LLMProvider {
     public static let defaultBaseURL = URL(string: "http://localhost:11434")!
-    public static let defaultModel = "llama3.1"
 
-    let configuration: LLMProviderConfiguration
-
-    public var defaultModel: String { configuration.defaultModel }
+    public let configuration: LLMProviderConfiguration
 
     /// Ollama tool support is a property of the *model*, not the endpoint:
     /// `llama3.1` emits native `tool_calls`, but `gemma`, `phi`, and most older
@@ -34,7 +31,8 @@ public struct OllamaProvider: LLMProvider {
     }
 
     public init(
-        model: String = OllamaProvider.defaultModel,
+        model: String? = nil,
+        availableModels: [String] = [],
         baseURL: URL = OllamaProvider.defaultBaseURL,
         apiKey: String = "",
         timeout: TimeInterval? = nil,
@@ -44,6 +42,7 @@ public struct OllamaProvider: LLMProvider {
             apiKey: apiKey,
             baseURL: baseURL,
             defaultModel: model,
+            availableModels: availableModels,
             timeout: timeout,
             session: session
         ))

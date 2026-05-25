@@ -8,7 +8,11 @@ public struct LLMProviderConfiguration: Sendable {
     /// vLLM in no-auth mode) expect.
     public var apiKey: String
     public var baseURL: URL
-    public var defaultModel: String
+    /// The model selected most recently by the host. `nil` means no model is
+    /// selected, which lets UI surfaces offer an explicit "None" state.
+    public var defaultModel: String?
+    /// Models fetched from the provider's model-list endpoint.
+    public var availableModels: [String]
     /// Per-request timeout. `nil` falls back to the `URLSession` default.
     public var timeout: TimeInterval?
     /// Injected so tests can supply a `URLProtocol`-stubbed session.
@@ -17,23 +21,51 @@ public struct LLMProviderConfiguration: Sendable {
     public init(
         apiKey: String,
         baseURL: URL,
-        defaultModel: String,
+        defaultModel: String? = nil,
+        availableModels: [String] = [],
         timeout: TimeInterval? = nil,
         session: URLSession = .shared
     ) {
         self.apiKey = apiKey
         self.baseURL = baseURL
-        self.defaultModel = defaultModel
+        self.defaultModel = defaultModel?.trimmingCharacters(in: .whitespacesAndNewlines).emptyAsNil
+        self.availableModels = Self.normalizedModels(availableModels)
         self.timeout = timeout
         self.session = session
+    }
+
+    public mutating func replaceAvailableModels(_ models: [String]) {
+        let normalized = Self.normalizedModels(models)
+        availableModels = normalized
+        guard let defaultModel, normalized.contains(defaultModel) else {
+            self.defaultModel = nil
+            return
+        }
+    }
+
+    private static func normalizedModels(_ models: [String]) -> [String] {
+        var seen: Set<String> = []
+        var normalized: [String] = []
+        for model in models {
+            let trimmed = model.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty, seen.insert(trimmed).inserted else { continue }
+            normalized.append(trimmed)
+        }
+        return normalized
+    }
+}
+
+private extension String {
+    var emptyAsNil: String? {
+        isEmpty ? nil : self
     }
 }
 
 /// A stateless transport to an LLM. No memory, retries, or parsing.
 public protocol LLMProvider: Sendable {
-    /// The model used when an `LLMRequest` does not override it. Lets the
-    /// Runtime resolve a single source of truth for "which model".
-    var defaultModel: String { get }
+    /// Provider transport configuration, including the host-selected model
+    /// and the latest fetched model list.
+    var configuration: LLMProviderConfiguration { get }
 
     /// Whether the Runtime can rely on native function calling for **every**
     /// model this provider serves.

@@ -13,6 +13,8 @@ public enum LLMError: Error, Sendable, Hashable {
     case encodingFailed(String)
     /// No API key was provided in the configuration.
     case missingAPIKey
+    /// No model was selected for the request.
+    case missingModel
     /// Networking failed before a response was received.
     case transport(String)
     /// The request exceeded its configured timeout. Retriable.
@@ -58,6 +60,8 @@ extension LLMError: LocalizedError {
             return "LLM request encoding failed: \(detail)"
         case .missingAPIKey:
             return "LLM provider configuration is missing an API key"
+        case .missingModel:
+            return "LLM provider configuration is missing a selected model"
         case .transport(let detail):
             return "LLM transport error: \(detail)"
         case .timeout(let detail):

@@ -304,6 +304,7 @@ public struct LLMResponse: Sendable {
 }
 
 public protocol LLMProvider: Sendable {
+    var configuration: LLMProviderConfiguration { get }
     func complete(_ request: LLMRequest) async throws -> LLMResponse
     func stream(_ request: LLMRequest) -> AsyncThrowingStream<LLMResponseChunk, Error>
 }
@@ -317,17 +318,19 @@ public struct LLMClient: Sendable {
 
 ### Provider configuration
 
-`LLMProvider` implementations are constructed by the host app and injected. The
-package ships four:
+`LLMProvider` implementations are constructed by the host app and injected.
+`LLMProviderConfiguration.defaultModel` is optional and represents the last
+model selected by the host; `availableModels` stores the latest fetched model
+list. The package ships four:
 
-- **AnthropicProvider** — Messages API, default model
-  `claude-opus-4-7`. Supports tool use blocks natively and image inputs.
-- **OpenAIProvider** — Chat Completions API, default model
-  `gpt-4o`. Maps tool use to function calling. Supports image input, wav/mp3
+- **AnthropicProvider** — Messages API. Supports tool use blocks natively and
+  image inputs.
+- **OpenAIProvider** — Chat Completions API. Maps tool use to function calling.
+  Supports image input, wav/mp3
   audio input, and generated audio output through `AudioOutputOptions`.
-- **OllamaProvider** — native Ollama chat API, default model `llama3.1`.
-  Supports base64 image inputs for multimodal local models. Reports
-  non-guaranteed native tools so AIKit enables the fenced fallback.
+- **OllamaProvider** — native Ollama chat API. Supports base64 image inputs for
+  multimodal local models. Reports non-guaranteed native tools so AIKit enables
+  the fenced fallback.
 - **AppleIntelligenceProvider** — on-device Foundation Models framework.
   Requires Apple Intelligence availability and uses the fenced tool fallback.
 
@@ -337,7 +340,7 @@ with a MIME type; `AudioContent` accepts URL or data plus an optional
 `AudioFormat` and transcript. Providers must fail with `LLMError.unsupported`
 for media modes they cannot encode rather than silently dropping content.
 
-Credentials come from `LLMProvider.Configuration` (passed in init); the package
+Credentials come from `LLMProviderConfiguration` (passed in init); the package
 never reads environment variables itself. The host app decides where keys live.
 
 ### Streaming

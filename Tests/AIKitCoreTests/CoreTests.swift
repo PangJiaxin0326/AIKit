@@ -122,7 +122,7 @@ import AIKitTestSupport
 
     @Test func appleIntelligencePromptIncludesToolManifest() {
         let request = LLMRequest(
-            model: AppleIntelligenceProvider.defaultModel,
+            model: "apple-intelligence",
             system: "You are embedded in an app.",
             messages: [
                 .init(role: .user, text: "Open settings"),

@@ -12,14 +12,22 @@ import FoundationModels
 /// fenced-```tool``` fallback so the runtime can continue to dispatch tools
 /// through the registry without a second adapter layer.
 public struct AppleIntelligenceProvider: LLMProvider {
-    public static let defaultModel = "apple-intelligence"
-
-    public let defaultModel: String
+    public let configuration: LLMProviderConfiguration
 
     public var supportsNativeTools: Bool { false }
 
-    public init(model: String = Self.defaultModel) {
-        self.defaultModel = model
+    public init(
+        model: String? = nil,
+        availableModels: [String] = [],
+        timeout: TimeInterval? = nil
+    ) {
+        self.configuration = LLMProviderConfiguration(
+            apiKey: "",
+            baseURL: URL(string: "aikit-apple-intelligence://local")!,
+            defaultModel: model,
+            availableModels: availableModels,
+            timeout: timeout
+        )
     }
 
     public func complete(_ request: LLMRequest) async throws -> LLMResponse {

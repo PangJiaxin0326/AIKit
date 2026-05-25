@@ -23,18 +23,6 @@ public enum AIKitProviderKind: String, CaseIterable, Codable, Sendable, Hashable
         }
     }
 
-    public var defaultModel: String {
-        switch self {
-        case .openAI:
-            OpenAIProvider.defaultModel
-        case .anthropic:
-            AnthropicProvider.defaultModel
-        case .ollama:
-            OllamaProvider.defaultModel
-        case .other:
-            OpenAIProvider.defaultModel
-        }
-    }
 }
 
 public struct AIKitModelCatalog: Sendable {
