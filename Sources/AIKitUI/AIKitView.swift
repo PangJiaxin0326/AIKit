@@ -124,6 +124,9 @@ public final class AIKitSession {
 /// and Safety configuration.
 public struct AIKitView: View {
     @State private var model: AIKitConfigurationViewModel
+    @AppStorage("openAIAPIKey") private var openAIAPIKey = ""
+    @AppStorage("anthropicAPIKey") private var anthropicAPIKey = ""
+    @AppStorage("otherProviderAPIKey") private var otherProviderAPIKey = ""
 
     private let orchestrator: Orchestrator?
 
@@ -196,17 +199,30 @@ public struct AIKitView: View {
 
     private var coreSection: some View {
         AIKitConfigurationSection(title: "Core", systemImage: "cpu") {
-            LabeledContent("Provider") {
-                TextField("Provider", text: binding(\.core.providerName))
-                    .multilineTextAlignment(.trailing)
+            Picker("Provider", selection: providerBinding) {
+                ForEach(AIKitProviderKind.allCases) { provider in
+                    Text(provider.rawValue).tag(provider)
+                }
             }
-            LabeledContent("Model") {
-                TextField("Model", text: binding(\.core.model))
-                    .multilineTextAlignment(.trailing)
+            .pickerStyle(.segmented)
+
+            providerCredentialRow
+            modelRow
+
+            if let modelCatalogStatus = model.modelCatalogStatus {
+                Text(modelCatalogStatus)
+                    .font(.footnote)
+                    .foregroundStyle(model.modelCatalogStatusIsError ? .red : .secondary)
             }
-            LabeledContent("Base URL") {
-                TextField("Base URL", text: optionalStringBinding(\.core.baseURL))
-                    .multilineTextAlignment(.trailing)
+
+            if selectedProvider.usesEditableBaseURL {
+                LabeledContent("Base URL") {
+                    TextField(
+                        selectedProvider.defaultBaseURLPlaceholder,
+                        text: optionalStringBinding(\.core.baseURL)
+                    )
+                        .multilineTextAlignment(.trailing)
+                }
             }
             LabeledContent("Timeout") {
                 TextField("Seconds", text: optionalDoubleBinding(\.core.timeout))
@@ -219,6 +235,62 @@ public struct AIKitView: View {
             LabeledContent("Max tokens") {
                 TextField("Default", text: optionalIntBinding(\.core.maxTokens))
                     .multilineTextAlignment(.trailing)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var providerCredentialRow: some View {
+        switch selectedProvider {
+        case .openAI, .anthropic, .other:
+            LabeledContent("API key") {
+                SecureField("API key", text: providerAPIKeyBinding)
+                    .multilineTextAlignment(.trailing)
+                    .autocorrectionDisabled()
+                    #if os(iOS)
+                    .textInputAutocapitalization(.never)
+                    #endif
+                    .textContentType(.password)
+            }
+        case .ollama:
+            EmptyView()
+        }
+    }
+
+    private var modelRow: some View {
+        LabeledContent("Model") {
+            HStack(spacing: 8) {
+                Menu {
+                    if model.modelOptions.isEmpty {
+                        Button(modelMenuTitle) {}
+                            .disabled(true)
+                    } else {
+                        ForEach(model.modelOptions, id: \.self) { modelName in
+                            Button(modelName) {
+                                model.update(\.core.model, to: modelName)
+                            }
+                        }
+                    }
+                } label: {
+                    Text(modelMenuTitle)
+                        .lineLimit(1)
+                        .frame(maxWidth: .infinity, alignment: .trailing)
+                }
+                .menuStyle(.button)
+
+                Button {
+                    Task { await refreshModelCatalog() }
+                } label: {
+                    if model.isRefreshingModels {
+                        ProgressView()
+                            .controlSize(.small)
+                    } else {
+                        Image(systemName: "arrow.clockwise")
+                    }
+                }
+                .buttonStyle(.borderless)
+                .disabled(model.isRefreshingModels)
+                .accessibilityLabel("Refresh models")
             }
         }
     }
@@ -338,6 +410,94 @@ public struct AIKitView: View {
             .buttonStyle(.bordered)
         }
         .frame(maxWidth: .infinity, alignment: .trailing)
+    }
+
+    private var selectedProvider: AIKitProviderKind {
+        AIKitProviderKind(providerName: model.configuration.core.providerName) ?? .other
+    }
+
+    private var providerBinding: Binding<AIKitProviderKind> {
+        Binding(
+            get: { selectedProvider },
+            set: { provider in
+                model.update { configuration in
+                    configuration.core.providerName = provider.rawValue
+                    configuration.core.model = provider.defaultModel
+                    if !provider.usesEditableBaseURL {
+                        configuration.core.baseURL = nil
+                    }
+                }
+                model.clearModelCatalog()
+            }
+        )
+    }
+
+    private var providerAPIKeyBinding: Binding<String> {
+        Binding(
+            get: {
+                switch selectedProvider {
+                case .openAI:
+                    openAIAPIKey
+                case .anthropic:
+                    anthropicAPIKey
+                case .ollama:
+                    ""
+                case .other:
+                    otherProviderAPIKey
+                }
+            },
+            set: { newValue in
+                switch selectedProvider {
+                case .openAI:
+                    openAIAPIKey = newValue
+                case .anthropic:
+                    anthropicAPIKey = newValue
+                case .ollama:
+                    break
+                case .other:
+                    otherProviderAPIKey = newValue
+                }
+            }
+        )
+    }
+
+    private var providerAPIKey: String {
+        switch selectedProvider {
+        case .openAI:
+            openAIAPIKey
+        case .anthropic:
+            anthropicAPIKey
+        case .ollama:
+            ""
+        case .other:
+            otherProviderAPIKey
+        }
+    }
+
+    private var modelMenuTitle: String {
+        let configured = model.configuration.core.model
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if !configured.isEmpty {
+            return configured
+        }
+        return model.modelOptions.first ?? "Select model"
+    }
+
+    private func refreshModelCatalog() async {
+        await model.refreshModels(
+            provider: selectedProvider,
+            baseURL: selectedProvider.usesEditableBaseURL ? resolvedCoreBaseURL : nil,
+            apiKey: providerAPIKey
+        )
+    }
+
+    private var resolvedCoreBaseURL: URL? {
+        let rawValue = model.configuration.core.baseURL?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let rawValue, !rawValue.isEmpty else {
+            return selectedProvider.defaultEditableBaseURL
+        }
+        return URL(string: rawValue)
     }
 
     private func binding<Value>(
@@ -1264,16 +1424,26 @@ public extension View {
 private final class AIKitConfigurationViewModel {
     var configuration: AIKitConfiguration
     var availableTools: [ToolDescriptor] = []
+    var modelOptions: [String] = []
     var recentChanges: [AIKitConfigurationChange] = []
     var status: String?
+    var modelCatalogStatus: String?
+    var modelCatalogStatusIsError = false
+    var isRefreshingModels = false
 
     private let store: AIKitConfigurationStore
     private let toolRegistry: ToolRegistry?
+    private let modelCatalog: AIKitModelCatalog
     @ObservationIgnored private var saveTask: Task<Void, Never>?
 
-    init(store: AIKitConfigurationStore, toolRegistry: ToolRegistry?) {
+    init(
+        store: AIKitConfigurationStore,
+        toolRegistry: ToolRegistry?,
+        modelCatalog: AIKitModelCatalog = AIKitModelCatalog()
+    ) {
         self.store = store
         self.toolRegistry = toolRegistry
+        self.modelCatalog = modelCatalog
         self.configuration = .standard
     }
 
@@ -1301,7 +1471,46 @@ private final class AIKitConfigurationViewModel {
 
     func resetToDefaults() {
         configuration = .standard
+        clearModelCatalog()
         saveCurrentConfiguration(status: "Reset")
+    }
+
+    func clearModelCatalog() {
+        modelOptions = []
+        modelCatalogStatus = nil
+        modelCatalogStatusIsError = false
+    }
+
+    func refreshModels(
+        provider: AIKitProviderKind,
+        baseURL: URL?,
+        apiKey: String
+    ) async {
+        guard !isRefreshingModels else { return }
+        isRefreshingModels = true
+        modelCatalogStatus = nil
+        modelCatalogStatusIsError = false
+        defer { isRefreshingModels = false }
+
+        do {
+            let models = try await modelCatalog.fetchModels(
+                for: provider,
+                baseURL: baseURL,
+                apiKey: apiKey,
+                timeout: configuration.core.timeout
+            )
+            modelOptions = models
+            if configuration.core.model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+               let first = models.first {
+                update(\.core.model, to: first)
+            }
+            modelCatalogStatus = models.isEmpty
+                ? "No models returned."
+                : "Loaded \(models.count) models."
+        } catch {
+            modelCatalogStatus = error.localizedDescription
+            modelCatalogStatusIsError = true
+        }
     }
 
     private func saveCurrentConfiguration(status: String) {
@@ -1393,6 +1602,41 @@ private enum ChatbotMenu: String, CaseIterable, Identifiable {
     case activity = "Activity"
 
     var id: String { rawValue }
+}
+
+private extension AIKitProviderKind {
+    var usesEditableBaseURL: Bool {
+        switch self {
+        case .openAI, .anthropic:
+            false
+        case .ollama, .other:
+            true
+        }
+    }
+
+    var defaultEditableBaseURL: URL? {
+        switch self {
+        case .openAI, .anthropic:
+            nil
+        case .ollama:
+            OllamaProvider.defaultBaseURL
+        case .other:
+            nil
+        }
+    }
+
+    var defaultBaseURLPlaceholder: String {
+        switch self {
+        case .openAI:
+            OpenAIProvider.defaultBaseURL.absoluteString
+        case .anthropic:
+            AnthropicProvider.defaultBaseURL.absoluteString
+        case .ollama:
+            OllamaProvider.defaultBaseURL.absoluteString
+        case .other:
+            "https://api.example.com"
+        }
+    }
 }
 
 private extension AIKitConfiguration.ToolCallFallbackMode {

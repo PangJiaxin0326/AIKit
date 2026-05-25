@@ -263,6 +263,73 @@ import AIKitTestSupport
 }
 
 @Suite(.serialized) struct HTTPProviderTests {
+    @Test func modelCatalogFetchesOpenAIModels() async throws {
+        let body = """
+        {"data":[{"id":"gpt-5"},{"id":"gpt-4o"}]}
+        """.data(using: .utf8)!
+        URLProtocolStub.setStub(.init(body: body))
+        let catalog = AIKitModelCatalog(session: URLProtocolStub.makeSession())
+
+        let models = try await catalog.fetchModels(for: .openAI, apiKey: "sk-test")
+
+        #expect(models == ["gpt-4o", "gpt-5"])
+        let request = try #require(URLProtocolStub.recordedRequests.last)
+        #expect(request.url?.absoluteString == "https://api.openai.com/v1/models")
+        #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer sk-test")
+    }
+
+    @Test func modelCatalogFetchesAnthropicModels() async throws {
+        let body = """
+        {"data":[{"id":"claude-sonnet-4-5"},{"id":"claude-opus-4-1"}]}
+        """.data(using: .utf8)!
+        URLProtocolStub.setStub(.init(body: body))
+        let catalog = AIKitModelCatalog(session: URLProtocolStub.makeSession())
+
+        let models = try await catalog.fetchModels(for: .anthropic, apiKey: "anthropic-key")
+
+        #expect(models == ["claude-opus-4-1", "claude-sonnet-4-5"])
+        let request = try #require(URLProtocolStub.recordedRequests.last)
+        #expect(request.url?.absoluteString == "https://api.anthropic.com/v1/models")
+        #expect(request.value(forHTTPHeaderField: "x-api-key") == "anthropic-key")
+        #expect(request.value(forHTTPHeaderField: "anthropic-version") == AnthropicProvider.apiVersion)
+    }
+
+    @Test func modelCatalogFetchesOllamaTags() async throws {
+        let body = """
+        {"models":[{"name":"llama3.1:latest"},{"model":"gemma3:latest"}]}
+        """.data(using: .utf8)!
+        URLProtocolStub.setStub(.init(body: body))
+        let catalog = AIKitModelCatalog(session: URLProtocolStub.makeSession())
+
+        let models = try await catalog.fetchModels(
+            for: .ollama,
+            baseURL: URL(string: "http://localhost:11434")!
+        )
+
+        #expect(models == ["gemma3:latest", "llama3.1:latest"])
+        let request = try #require(URLProtocolStub.recordedRequests.last)
+        #expect(request.url?.absoluteString == "http://localhost:11434/api/tags")
+    }
+
+    @Test func modelCatalogFetchesOtherOpenAICompatibleModels() async throws {
+        let body = """
+        {"data":[{"id":"local-chat"}]}
+        """.data(using: .utf8)!
+        URLProtocolStub.setStub(.init(body: body))
+        let catalog = AIKitModelCatalog(session: URLProtocolStub.makeSession())
+
+        let models = try await catalog.fetchModels(
+            for: .other,
+            baseURL: URL(string: "https://models.example.test/v1")!,
+            apiKey: "optional-key"
+        )
+
+        #expect(models == ["local-chat"])
+        let request = try #require(URLProtocolStub.recordedRequests.last)
+        #expect(request.url?.absoluteString == "https://models.example.test/v1/models")
+        #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer optional-key")
+    }
+
     @Test func decodesMessagesResponse() async throws {
         let body = """
         {

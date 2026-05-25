@@ -30,7 +30,7 @@ public struct AIKitConfiguration: Codable, Sendable, Hashable {
         public var maxTokens: Int?
 
         public init(
-            providerName: String = "Host provider",
+            providerName: String = AIKitProviderKind.ollama.rawValue,
             model: String = "",
             baseURL: String? = nil,
             timeout: TimeInterval? = nil,

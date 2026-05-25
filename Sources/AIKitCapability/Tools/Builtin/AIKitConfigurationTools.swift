@@ -88,9 +88,10 @@ public struct SetAIKitConfigurationTool: Tool {
     public static let name = "setAIKitConfiguration"
     public static let description = """
     Change one AIKit configuration field. Sections are core, capability, \
-    runtime, and safety. Useful keys include model, providerName, \
-    enabledToolNames, systemPromptFragment, maxIterations, streamsResponses, \
-    toolCallFallback, enabledGuardrailIDs, and outputLengthLimit.
+    runtime, and safety. Useful keys include model, providerName (OpenAI, \
+    Anthropic, Ollama, or Other), baseURL, enabledToolNames, \
+    systemPromptFragment, maxIterations, streamsResponses, toolCallFallback, \
+    enabledGuardrailIDs, and outputLengthLimit.
     """
     public static let schema = ToolSchema(json: .object([
         "type": .string("object"),
