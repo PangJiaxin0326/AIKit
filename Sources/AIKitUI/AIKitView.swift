@@ -209,7 +209,8 @@ public struct AIKitView: View {
             providerCredentialRow
             modelRow
 
-            if let modelCatalogStatus = model.modelCatalogStatus(for: selectedProvider) {
+            if selectedProvider != .other,
+               let modelCatalogStatus = model.modelCatalogStatus(for: selectedProvider) {
                 Text(modelCatalogStatus)
                     .font(.footnote)
                     .foregroundStyle(
@@ -261,39 +262,48 @@ public struct AIKitView: View {
 
     private var modelRow: some View {
         LabeledContent("Model") {
-            let modelOptions = model.modelOptions(for: selectedProvider)
-            let isRefreshingModels = model.isRefreshingModels(for: selectedProvider)
-            HStack(spacing: 8) {
-                Menu {
-                    Button("None") {
-                        model.selectModel(nil, for: selectedProvider)
+            if selectedProvider == .other {
+                TextField("Model", text: selectedProviderModelBinding)
+                    .multilineTextAlignment(.trailing)
+                    .autocorrectionDisabled()
+                    #if os(iOS)
+                    .textInputAutocapitalization(.never)
+                    #endif
+            } else {
+                let modelOptions = model.modelOptions(for: selectedProvider)
+                let isRefreshingModels = model.isRefreshingModels(for: selectedProvider)
+                HStack(spacing: 8) {
+                    Menu {
+                        Button("None") {
+                            model.selectModel(nil, for: selectedProvider)
+                        }
+                        Divider()
+                        ForEach(modelOptions, id: \.self) { modelName in
+                            Button(modelName) {
+                                model.selectModel(modelName, for: selectedProvider)
+                            }
+                        }
+                    } label: {
+                        Text(modelMenuTitle)
+                            .lineLimit(1)
+                            .frame(maxWidth: .infinity, alignment: .trailing)
                     }
-                    Divider()
-                    ForEach(modelOptions, id: \.self) { modelName in
-                        Button(modelName) {
-                            model.selectModel(modelName, for: selectedProvider)
+                    .menuStyle(.button)
+
+                    Button {
+                        Task { await refreshModelCatalog() }
+                    } label: {
+                        if isRefreshingModels {
+                            ProgressView()
+                                .controlSize(.small)
+                        } else {
+                            Image(systemName: "arrow.clockwise")
                         }
                     }
-                } label: {
-                    Text(modelMenuTitle)
-                        .lineLimit(1)
-                        .frame(maxWidth: .infinity, alignment: .trailing)
+                    .buttonStyle(.borderless)
+                    .disabled(isRefreshingModels)
+                    .accessibilityLabel("Refresh models")
                 }
-                .menuStyle(.button)
-
-                Button {
-                    Task { await refreshModelCatalog() }
-                } label: {
-                    if isRefreshingModels {
-                        ProgressView()
-                            .controlSize(.small)
-                    } else {
-                        Image(systemName: "arrow.clockwise")
-                    }
-                }
-                .buttonStyle(.borderless)
-                .disabled(isRefreshingModels)
-                .accessibilityLabel("Refresh models")
             }
         }
     }
@@ -466,6 +476,17 @@ public struct AIKitView: View {
         case .other:
             otherProviderAPIKey
         }
+    }
+
+    private var selectedProviderModelBinding: Binding<String> {
+        Binding(
+            get: {
+                model.configuration.core
+                    .providerConfiguration(for: selectedProvider)
+                    .defaultModel ?? ""
+            },
+            set: { model.selectModel($0, for: selectedProvider) }
+        )
     }
 
     private var modelMenuTitle: String {
