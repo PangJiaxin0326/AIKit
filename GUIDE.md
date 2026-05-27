@@ -321,7 +321,11 @@ public struct LLMClient: Sendable {
 `LLMProvider` implementations are constructed by the host app and injected.
 `LLMProviderConfiguration.defaultModel` is optional and represents the last
 model selected by the host; `availableModels` stores the latest fetched model
-list. The package ships four:
+list. `AIKitProviderDefinition` centralizes provider UI/catalog metadata as
+static definitions with a model-list URL and streaming endpoint; OpenAI,
+Anthropic, Ollama, and Volcengine Ark have hard-coded defaults, with only
+Ollama's streaming endpoint exposed as an editable Core setting. The package
+ships four provider implementations:
 
 - **AnthropicProvider** — Messages API. Supports tool use blocks natively and
   image inputs.

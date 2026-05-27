@@ -280,13 +280,13 @@ private struct EchoTool: Tool {
     @Test func coreStoresProviderConfigurationsIndependently() {
         var core = AIKitConfiguration.Core(activeProvider: .ollama)
         core.model = "llama3.1"
-        core.baseURL = "http://localhost:11434"
+        core.endpointURL = "http://localhost:11434/api/chat"
 
         core.activeProvider = .openAI
         core.model = "gpt-5"
 
         #expect(core.providerConfiguration(for: .ollama).defaultModel == "llama3.1")
-        #expect(core.providerConfiguration(for: .ollama).baseURL == "http://localhost:11434")
+        #expect(core.providerConfiguration(for: .ollama).endpointURL == "http://localhost:11434/api/chat")
         #expect(core.providerConfiguration(for: .openAI).defaultModel == "gpt-5")
     }
 
@@ -326,6 +326,27 @@ private struct EchoTool: Tool {
         ])
     }
 
+    @Test func corePersistsArkConfigurationAndEndpointURL() throws {
+        let configuration = AIKitConfiguration(core: .init(
+            activeProvider: .ark,
+            ark: .init(
+                defaultModel: "doubao-seed-1-6",
+                availableModels: ["doubao-seed-1-6"],
+                endpointURL: "https://ark.cn-beijing.volces.com/api/v3/chat/completions"
+            )
+        ))
+
+        let data = try JSONEncoder().encode(configuration)
+        let decoded = try JSONDecoder().decode(AIKitConfiguration.self, from: data)
+
+        #expect(decoded.core.activeProvider == .ark)
+        #expect(decoded.core.providerConfiguration(for: .ark).defaultModel == "doubao-seed-1-6")
+        #expect(
+            decoded.core.providerConfiguration(for: .ark).endpointURL ==
+            "https://ark.cn-beijing.volces.com/api/v3/chat/completions"
+        )
+    }
+
     @Test func coreDecodesLegacyActiveProviderFields() throws {
         let data = """
         {
@@ -339,6 +360,27 @@ private struct EchoTool: Tool {
 
         #expect(decoded.activeProvider == .ollama)
         #expect(decoded.providerConfiguration(for: .ollama).defaultModel == "llama3.1")
-        #expect(decoded.providerConfiguration(for: .ollama).baseURL == "http://localhost:11434")
+        #expect(decoded.providerConfiguration(for: .ollama).endpointURL == "http://localhost:11434")
+    }
+
+    @Test func coreDecodesLegacyOtherProviderAsArk() throws {
+        let data = """
+        {
+          "activeProvider": "Other",
+          "other": {
+            "defaultModel": "legacy-model",
+            "baseURL": "https://ark.cn-beijing.volces.com/api/v3/chat/completions"
+          }
+        }
+        """.data(using: .utf8)!
+
+        let decoded = try JSONDecoder().decode(AIKitConfiguration.Core.self, from: data)
+
+        #expect(decoded.activeProvider == .ark)
+        #expect(decoded.providerConfiguration(for: .ark).defaultModel == "legacy-model")
+        #expect(
+            decoded.providerConfiguration(for: .ark).endpointURL ==
+            "https://ark.cn-beijing.volces.com/api/v3/chat/completions"
+        )
     }
 }

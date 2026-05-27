@@ -93,6 +93,10 @@ for try await event in await orchestrator.run("Take me to settings") {
 ## Providers
 
 AIKit ships providers for Anthropic, OpenAI, Ollama, and Apple Intelligence.
+The Core dashboard uses shared `AIKitProviderDefinition` metadata for OpenAI,
+Anthropic, Ollama, and Volcengine Ark, including default model-list URLs and
+streaming endpoints. Ollama's streaming endpoint is editable; the others are
+fixed defaults.
 `AppleIntelligenceProvider` uses Apple's on-device Foundation Models framework,
 requires Apple Intelligence to be available on the device, and does not need an
 API key. It reports `supportsNativeTools == false`, so AIKit enables the fenced

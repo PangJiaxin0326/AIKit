@@ -89,7 +89,7 @@ public struct SetAIKitConfigurationTool: Tool {
     public static let description = """
     Change one AIKit configuration field. Sections are core, capability, \
     runtime, and safety. Useful keys include model, activeProvider (OpenAI, \
-    Anthropic, Ollama, or Other), availableModels, baseURL, enabledToolNames, \
+    Anthropic, Ollama, or Ark), availableModels, endpointURL, enabledToolNames, \
     systemPromptFragment, maxIterations, streamsResponses, toolCallFallback, \
     enabledGuardrailIDs, and outputLengthLimit.
     """

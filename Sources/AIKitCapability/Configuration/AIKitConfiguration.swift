@@ -25,21 +25,23 @@ public struct AIKitConfiguration: Codable, Sendable, Hashable {
         public struct ProviderConfiguration: Codable, Sendable, Hashable {
             public var defaultModel: String?
             public var availableModels: [String]
-            public var baseURL: String?
+            public var endpointURL: String?
 
             public init(
                 defaultModel: String? = nil,
                 availableModels: [String] = [],
+                endpointURL: String? = nil,
                 baseURL: String? = nil
             ) {
                 self.defaultModel = defaultModel?.emptyAsNil
                 self.availableModels = Self.normalizedModels(availableModels)
-                self.baseURL = baseURL?.emptyAsNil
+                self.endpointURL = (endpointURL ?? baseURL)?.emptyAsNil
             }
 
             private enum CodingKeys: String, CodingKey {
                 case defaultModel
                 case availableModels
+                case endpointURL
                 case baseURL
             }
 
@@ -53,17 +55,27 @@ public struct AIKitConfiguration: Codable, Sendable, Hashable {
                     [String].self,
                     forKey: .availableModels
                 ) ?? [])
-                self.baseURL = try container.decodeIfPresent(
+                let endpointURL = try container.decodeIfPresent(
+                    String.self,
+                    forKey: .endpointURL
+                )?.emptyAsNil
+                let legacyBaseURL = try container.decodeIfPresent(
                     String.self,
                     forKey: .baseURL
                 )?.emptyAsNil
+                self.endpointURL = endpointURL ?? legacyBaseURL
             }
 
             public func encode(to encoder: any Encoder) throws {
                 var container = encoder.container(keyedBy: CodingKeys.self)
                 try container.encodeIfPresent(defaultModel, forKey: .defaultModel)
                 try container.encode(availableModels, forKey: .availableModels)
-                try container.encodeIfPresent(baseURL, forKey: .baseURL)
+                try container.encodeIfPresent(endpointURL, forKey: .endpointURL)
+            }
+
+            public var baseURL: String? {
+                get { endpointURL }
+                set { endpointURL = newValue?.emptyAsNil }
             }
 
             public mutating func replaceAvailableModels(_ models: [String]) {
@@ -91,7 +103,7 @@ public struct AIKitConfiguration: Codable, Sendable, Hashable {
         public var openAI: ProviderConfiguration
         public var anthropic: ProviderConfiguration
         public var ollama: ProviderConfiguration
-        public var other: ProviderConfiguration
+        public var ark: ProviderConfiguration
         public var timeout: TimeInterval?
         public var temperature: Double?
         public var maxTokens: Int?
@@ -101,7 +113,8 @@ public struct AIKitConfiguration: Codable, Sendable, Hashable {
             openAI: ProviderConfiguration = ProviderConfiguration(),
             anthropic: ProviderConfiguration = ProviderConfiguration(),
             ollama: ProviderConfiguration = ProviderConfiguration(),
-            other: ProviderConfiguration = ProviderConfiguration(),
+            ark: ProviderConfiguration = ProviderConfiguration(),
+            other: ProviderConfiguration? = nil,
             timeout: TimeInterval? = nil,
             temperature: Double? = nil,
             maxTokens: Int? = nil
@@ -110,7 +123,7 @@ public struct AIKitConfiguration: Codable, Sendable, Hashable {
             self.openAI = openAI
             self.anthropic = anthropic
             self.ollama = ollama
-            self.other = other
+            self.ark = other ?? ark
             self.timeout = timeout
             self.temperature = temperature
             self.maxTokens = maxTokens
@@ -121,12 +134,14 @@ public struct AIKitConfiguration: Codable, Sendable, Hashable {
             case openAI
             case anthropic
             case ollama
+            case ark
             case other
             case timeout
             case temperature
             case maxTokens
             case providerName
             case model
+            case endpointURL
             case baseURL
         }
 
@@ -157,7 +172,10 @@ public struct AIKitConfiguration: Codable, Sendable, Hashable {
                 ProviderConfiguration.self,
                 forKey: .ollama
             ) ?? ProviderConfiguration()
-            self.other = try container.decodeIfPresent(
+            self.ark = try container.decodeIfPresent(
+                ProviderConfiguration.self,
+                forKey: .ark
+            ) ?? container.decodeIfPresent(
                 ProviderConfiguration.self,
                 forKey: .other
             ) ?? ProviderConfiguration()
@@ -165,16 +183,23 @@ public struct AIKitConfiguration: Codable, Sendable, Hashable {
             self.temperature = try container.decodeIfPresent(Double.self, forKey: .temperature)
             self.maxTokens = try container.decodeIfPresent(Int.self, forKey: .maxTokens)
 
-            if container.contains(.model) || container.contains(.baseURL) {
+            if container.contains(.model) ||
+                container.contains(.endpointURL) ||
+                container.contains(.baseURL) {
                 var legacyConfiguration = providerConfiguration(for: activeProvider)
                 legacyConfiguration.defaultModel = try container.decodeIfPresent(
                     String.self,
                     forKey: .model
                 )?.emptyAsNil
-                legacyConfiguration.baseURL = try container.decodeIfPresent(
+                let endpointURL = try container.decodeIfPresent(
+                    String.self,
+                    forKey: .endpointURL
+                )?.emptyAsNil
+                let legacyBaseURL = try container.decodeIfPresent(
                     String.self,
                     forKey: .baseURL
                 )?.emptyAsNil
+                legacyConfiguration.endpointURL = endpointURL ?? legacyBaseURL
                 setProviderConfiguration(legacyConfiguration, for: activeProvider)
             }
         }
@@ -185,7 +210,7 @@ public struct AIKitConfiguration: Codable, Sendable, Hashable {
             try container.encode(openAI, forKey: .openAI)
             try container.encode(anthropic, forKey: .anthropic)
             try container.encode(ollama, forKey: .ollama)
-            try container.encode(other, forKey: .other)
+            try container.encode(ark, forKey: .ark)
             try container.encodeIfPresent(timeout, forKey: .timeout)
             try container.encodeIfPresent(temperature, forKey: .temperature)
             try container.encodeIfPresent(maxTokens, forKey: .maxTokens)
@@ -194,7 +219,7 @@ public struct AIKitConfiguration: Codable, Sendable, Hashable {
         public var providerName: String {
             get { activeProvider.rawValue }
             set {
-                activeProvider = AIKitProviderKind(providerName: newValue) ?? .other
+                activeProvider = AIKitProviderKind(providerName: newValue) ?? .ark
             }
         }
 
@@ -207,13 +232,23 @@ public struct AIKitConfiguration: Codable, Sendable, Hashable {
             }
         }
 
-        public var baseURL: String? {
-            get { activeProviderConfiguration.baseURL }
+        public var endpointURL: String? {
+            get { activeProviderConfiguration.endpointURL }
             set {
                 var providerConfiguration = activeProviderConfiguration
-                providerConfiguration.baseURL = newValue?.emptyAsNil
+                providerConfiguration.endpointURL = newValue?.emptyAsNil
                 setProviderConfiguration(providerConfiguration, for: activeProvider)
             }
+        }
+
+        public var baseURL: String? {
+            get { endpointURL }
+            set { endpointURL = newValue }
+        }
+
+        public var other: ProviderConfiguration {
+            get { ark }
+            set { ark = newValue }
         }
 
         public var activeProviderConfiguration: ProviderConfiguration {
@@ -231,8 +266,8 @@ public struct AIKitConfiguration: Codable, Sendable, Hashable {
                 anthropic
             case .ollama:
                 ollama
-            case .other:
-                other
+            case .ark:
+                ark
             }
         }
 
@@ -247,8 +282,8 @@ public struct AIKitConfiguration: Codable, Sendable, Hashable {
                 anthropic = providerConfiguration
             case .ollama:
                 ollama = providerConfiguration
-            case .other:
-                other = providerConfiguration
+            case .ark:
+                ark = providerConfiguration
             }
         }
     }
@@ -466,8 +501,8 @@ extension AIKitConfiguration {
             core.providerName = try value.string(section: .core, key: originalKey)
         case "model":
             core.model = try value.optionalString(section: .core, key: originalKey)
-        case "baseurl":
-            core.baseURL = try value.optionalString(section: .core, key: originalKey)
+        case "endpoint", "endpointurl", "llmendpoint", "streamingendpoint", "baseurl":
+            core.endpointURL = try value.optionalString(section: .core, key: originalKey)
         case "models", "availablemodels", "availablemodel":
             var providerConfiguration = core.activeProviderConfiguration
             providerConfiguration.replaceAvailableModels(

@@ -129,6 +129,7 @@ extension URL {
     /// - `http://host:11434/v1`            → `…/v1/chat/completions` (no double `v1`)
     /// - `http://host:11434/v1/`           → trailing slash tolerated
     /// - `http://host/v1/chat/completions` → used verbatim (full override)
+    /// - `http://host/api/v3/chat/completions` → used verbatim (alternate API prefix)
     ///
     /// Throws `LLMError.unsupported` rather than silently returning `self`
     /// when the composed string isn't a valid URL: a misconfigured base URL
@@ -157,24 +158,48 @@ extension URL {
             throw LLMError.unsupported("endpoint path must not be empty")
         }
 
-        let trimmed = absoluteString.hasSuffix("/")
-            ? String(absoluteString.dropLast())
-            : absoluteString
-        let components = normalizedEndpointPath.split(
+        let endpointComponents = URLComponents(string: normalizedEndpointPath)
+        let endpointPath = (endpointComponents?.path ?? normalizedEndpointPath)
+            .trimmingCharacters(in: endpointPathCharacters)
+        guard !endpointPath.isEmpty else {
+            throw LLMError.unsupported("endpoint path must not be empty")
+        }
+
+        let components = endpointPath.split(
             separator: "/",
             omittingEmptySubsequences: true
         )
         let firstPathComponent = components.first.map(String.init)
         let remainder = components.dropFirst().joined(separator: "/")
-        let composed: String
-        if trimmed.hasSuffix("/\(normalizedEndpointPath)") {
-            composed = trimmed
-        } else if let firstPathComponent, trimmed.hasSuffix("/\(firstPathComponent)") {
-            composed = remainder.isEmpty ? trimmed : "\(trimmed)/\(remainder)"
-        } else {
-            composed = "\(trimmed)/\(normalizedEndpointPath)"
+        let baseComponents = URLComponents(url: self, resolvingAgainstBaseURL: false)
+        let basePath = (baseComponents?.path ?? "")
+            .trimmingCharacters(in: endpointPathCharacters)
+        let baseEndsWithPath: (String) -> Bool = { suffix in
+            basePath == suffix || basePath.hasSuffix("/\(suffix)")
         }
-        guard let url = URL(string: composed) else {
+
+        if baseEndsWithPath(endpointPath) || (!remainder.isEmpty && baseEndsWithPath(remainder)) {
+            return self
+        }
+
+        var resolvedComponents = baseComponents
+        let pathToAppend: String
+        if let firstPathComponent, baseEndsWithPath(firstPathComponent) {
+            pathToAppend = remainder
+        } else {
+            pathToAppend = endpointPath
+        }
+
+        let resolvedPath = [basePath, pathToAppend]
+            .filter { !$0.isEmpty }
+            .joined(separator: "/")
+        resolvedComponents?.path = resolvedPath.isEmpty ? "" : "/\(resolvedPath)"
+        if let endpointComponents {
+            resolvedComponents?.percentEncodedQuery = endpointComponents.percentEncodedQuery
+            resolvedComponents?.percentEncodedFragment = endpointComponents.percentEncodedFragment
+        }
+        guard let url = resolvedComponents?.url else {
+            let composed = [absoluteString, normalizedEndpointPath].joined(separator: "/")
             throw LLMError.unsupported("invalid endpoint URL: \(composed)")
         }
         return url

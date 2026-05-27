@@ -109,6 +109,26 @@ import AIKitTestSupport
 }
 
 @Suite struct ProviderCapabilityTests {
+    @Test func providerDefinitionsExposeDefaultEndpoints() {
+        #expect(AIKitProviderDefinition.all.map(\.kind) == [
+            .openAI,
+            .anthropic,
+            .ollama,
+            .ark,
+        ])
+        #expect(
+            AIKitProviderDefinition.ark.modelListURL.absoluteString ==
+            "https://ark.cn-beijing.volces.com/api/v3/models"
+        )
+        #expect(
+            AIKitProviderDefinition.ark.streamingEndpoint.absoluteString ==
+            "https://ark.cn-beijing.volces.com/api/v3/chat/completions"
+        )
+        #expect(AIKitProviderDefinition.ollama.allowsStreamingEndpointOverride)
+        #expect(!AIKitProviderDefinition.openAI.allowsStreamingEndpointOverride)
+        #expect(AIKitProviderKind(providerName: "Other") == .ark)
+    }
+
     /// REVIEW3 finding **#1**: Ollama tool support is per-model, so the
     /// provider cannot guarantee native tool calling and must report `false`
     /// (which makes the additive fenced fallback the default). Fixed-contract
@@ -193,6 +213,10 @@ import AIKitTestSupport
             ("http://localhost:11434/v1", "http://localhost:11434/v1/chat/completions"),
             ("http://localhost:11434/v1/", "http://localhost:11434/v1/chat/completions"),
             ("http://h/v1/chat/completions", "http://h/v1/chat/completions"),
+            (
+                "https://ark.cn-beijing.volces.com/api/v3/chat/completions",
+                "https://ark.cn-beijing.volces.com/api/v3/chat/completions"
+            ),
         ]
         for (input, expected) in cases {
             let resolved = try URL(string: input)!
@@ -219,6 +243,12 @@ import AIKitTestSupport
             try URL(string: "https://ignored.example.test")!
                 .resolvingEndpointPath("https://proxy.example.test/custom/chat/completions")
                 .absoluteString == "https://proxy.example.test/custom/chat/completions"
+        )
+        #expect(
+            try URL(string: "https://ark.cn-beijing.volces.com/api/v3/chat/completions?region=cn")!
+                .resolvingEndpointPath("v1/chat/completions")
+                .absoluteString ==
+            "https://ark.cn-beijing.volces.com/api/v3/chat/completions?region=cn"
         )
     }
 
@@ -322,33 +352,29 @@ import AIKitTestSupport
         URLProtocolStub.setStub(.init(body: body))
         let catalog = AIKitModelCatalog(session: URLProtocolStub.makeSession())
 
-        let models = try await catalog.fetchModels(
-            for: .ollama,
-            baseURL: URL(string: "http://localhost:11434")!
-        )
+        let models = try await catalog.fetchModels(for: .ollama)
 
         #expect(models == ["gemma3:latest", "llama3.1:latest"])
         let request = try #require(URLProtocolStub.recordedRequests.last)
         #expect(request.url?.absoluteString == "http://localhost:11434/api/tags")
     }
 
-    @Test func modelCatalogFetchesOtherOpenAICompatibleModels() async throws {
+    @Test func modelCatalogFetchesArkModels() async throws {
         let body = """
-        {"data":[{"id":"local-chat"}]}
+        {"data":[{"id":"doubao-seed-1-6"}]}
         """.data(using: .utf8)!
         URLProtocolStub.setStub(.init(body: body))
         let catalog = AIKitModelCatalog(session: URLProtocolStub.makeSession())
 
         let models = try await catalog.fetchModels(
-            for: .other,
-            baseURL: URL(string: "https://models.example.test/v1")!,
-            apiKey: "optional-key"
+            for: .ark,
+            apiKey: "ark-key"
         )
 
-        #expect(models == ["local-chat"])
+        #expect(models == ["doubao-seed-1-6"])
         let request = try #require(URLProtocolStub.recordedRequests.last)
-        #expect(request.url?.absoluteString == "https://models.example.test/v1/models")
-        #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer optional-key")
+        #expect(request.url?.absoluteString == "https://ark.cn-beijing.volces.com/api/v3/models")
+        #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer ark-key")
     }
 
     @Test func decodesMessagesResponse() async throws {
@@ -701,6 +727,27 @@ import AIKitTestSupport
             request.url?.absoluteString ==
             "https://resource.openai.azure.com/openai/deployments/gpt-4o/chat/completions?api-version=2024-10-21"
         )
+    }
+
+    @Test func openAIProviderAcceptsFullCompatibleChatCompletionsBaseURL() async throws {
+        let body = """
+        {"choices":[{"message":{"content":"ark path"},"finish_reason":"stop"}]}
+        """.data(using: .utf8)!
+        URLProtocolStub.setStub(.init(body: body))
+        let endpoint = URL(string: "https://ark.cn-beijing.volces.com/api/v3/chat/completions")!
+        let provider = OpenAIProvider(
+            apiKey: "test-key",
+            baseURL: endpoint,
+            session: URLProtocolStub.makeSession()
+        )
+
+        let response = try await provider.complete(
+            LLMRequest(model: "ep-test", messages: [.init(role: .user, text: "hi")])
+        )
+
+        #expect(response.text == "ark path")
+        let request = try #require(URLProtocolStub.recordedRequests.last)
+        #expect(request.url?.absoluteString == endpoint.absoluteString)
     }
 
     @Test func openAIEncodesImageAudioAndDecodesVoiceOutput() async throws {
