@@ -135,17 +135,44 @@ extension URL {
     /// should surface as a clear configuration error, not an opaque 404 from
     /// a request that quietly went to the bare base URL instead.
     func resolvingEndpoint(apiPrefix: String, endpoint: String) throws -> URL {
+        try resolvingEndpointPath("\(apiPrefix)/\(endpoint)")
+    }
+
+    /// Resolves a provider endpoint path against this base URL.
+    ///
+    /// The endpoint path may be absolute, in which case it is used verbatim.
+    /// Relative paths tolerate a base URL that already ends with either the
+    /// first path segment or the complete endpoint path.
+    func resolvingEndpointPath(_ endpointPath: String) throws -> URL {
+        let trimmedEndpointPath = endpointPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let url = URL(string: trimmedEndpointPath), url.scheme != nil {
+            return url
+        }
+
+        let endpointPathCharacters = CharacterSet(charactersIn: "/")
+        let normalizedEndpointPath = trimmedEndpointPath.trimmingCharacters(
+            in: endpointPathCharacters
+        )
+        guard !normalizedEndpointPath.isEmpty else {
+            throw LLMError.unsupported("endpoint path must not be empty")
+        }
+
         let trimmed = absoluteString.hasSuffix("/")
             ? String(absoluteString.dropLast())
             : absoluteString
-        let fullPath = "\(apiPrefix)/\(endpoint)"
+        let components = normalizedEndpointPath.split(
+            separator: "/",
+            omittingEmptySubsequences: true
+        )
+        let firstPathComponent = components.first.map(String.init)
+        let remainder = components.dropFirst().joined(separator: "/")
         let composed: String
-        if trimmed.hasSuffix("/\(fullPath)") {
+        if trimmed.hasSuffix("/\(normalizedEndpointPath)") {
             composed = trimmed
-        } else if trimmed.hasSuffix("/\(apiPrefix)") {
-            composed = "\(trimmed)/\(endpoint)"
+        } else if let firstPathComponent, trimmed.hasSuffix("/\(firstPathComponent)") {
+            composed = remainder.isEmpty ? trimmed : "\(trimmed)/\(remainder)"
         } else {
-            composed = "\(trimmed)/\(fullPath)"
+            composed = "\(trimmed)/\(normalizedEndpointPath)"
         }
         guard let url = URL(string: composed) else {
             throw LLMError.unsupported("invalid endpoint URL: \(composed)")

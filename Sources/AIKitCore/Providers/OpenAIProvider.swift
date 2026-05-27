@@ -3,18 +3,29 @@ import Foundation
 /// `LLMProvider` backed by the OpenAI Chat Completions API. Tool use is mapped
 /// to function calling.
 ///
-/// Works unmodified against any OpenAI-compatible backend (Ollama, llama.cpp,
+/// Works unmodified against many OpenAI-compatible backends (Ollama, llama.cpp,
 /// vLLM, LM Studio). For no-auth local backends pass an empty `apiKey`: the
-/// `Authorization` header is then omitted entirely. The base URL tolerates a
-/// trailing `/v1` so `http://localhost:11434/v1` does not become
-/// `/v1/v1/chat/completions`.
+/// `Authorization` header is then omitted entirely. The request path is
+/// configurable for gateways and providers that expose the Chat Completions
+/// protocol somewhere other than `/v1/chat/completions`.
 public struct OpenAIProvider: LLMProvider {
     public static let defaultBaseURL = URL(string: "https://api.openai.com")!
+    public static let defaultChatCompletionsPath = "v1/chat/completions"
 
     public let configuration: LLMProviderConfiguration
+    /// Relative or absolute endpoint for Chat Completions-compatible requests.
+    ///
+    /// Relative values are resolved against `configuration.baseURL` while
+    /// tolerating a base URL that already includes the leading path segment
+    /// (for example `/v1`) or the whole endpoint.
+    public let chatCompletionsPath: String
 
-    public init(configuration: LLMProviderConfiguration) {
+    public init(
+        configuration: LLMProviderConfiguration,
+        chatCompletionsPath: String = OpenAIProvider.defaultChatCompletionsPath
+    ) {
         self.configuration = configuration
+        self.chatCompletionsPath = chatCompletionsPath
     }
 
     public init(
@@ -22,6 +33,7 @@ public struct OpenAIProvider: LLMProvider {
         model: String? = nil,
         availableModels: [String] = [],
         baseURL: URL = OpenAIProvider.defaultBaseURL,
+        chatCompletionsPath: String = OpenAIProvider.defaultChatCompletionsPath,
         timeout: TimeInterval? = nil,
         session: URLSession = .shared
     ) {
@@ -32,7 +44,7 @@ public struct OpenAIProvider: LLMProvider {
             availableModels: availableModels,
             timeout: timeout,
             session: session
-        ))
+        ), chatCompletionsPath: chatCompletionsPath)
     }
 
     // MARK: - Non-streaming
@@ -106,9 +118,7 @@ public struct OpenAIProvider: LLMProvider {
     ]
 
     private func makeURLRequest(_ request: LLMRequest, stream: Bool) throws -> URLRequest {
-        let url = try configuration.baseURL.resolvingEndpoint(
-            apiPrefix: "v1", endpoint: "chat/completions"
-        )
+        let url = try configuration.baseURL.resolvingEndpointPath(chatCompletionsPath)
         var urlRequest = URLRequest(url: url)
         urlRequest.httpMethod = "POST"
         urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")

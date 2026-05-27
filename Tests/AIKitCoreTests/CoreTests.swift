@@ -201,6 +201,27 @@ import AIKitTestSupport
         }
     }
 
+    @Test func resolvesCustomEndpointPath() throws {
+        let azurePath = "openai/deployments/gpt-4o/chat/completions?api-version=2024-10-21"
+        #expect(
+            try URL(string: "https://resource.openai.azure.com/openai")!
+                .resolvingEndpointPath(azurePath)
+                .absoluteString ==
+            "https://resource.openai.azure.com/openai/deployments/gpt-4o/chat/completions?api-version=2024-10-21"
+        )
+        #expect(
+            try URL(string: "https://gateway.example.test")!
+                .resolvingEndpointPath("openai-compatible/v2/chat/completions")
+                .absoluteString ==
+            "https://gateway.example.test/openai-compatible/v2/chat/completions"
+        )
+        #expect(
+            try URL(string: "https://ignored.example.test")!
+                .resolvingEndpointPath("https://proxy.example.test/custom/chat/completions")
+                .absoluteString == "https://proxy.example.test/custom/chat/completions"
+        )
+    }
+
     @Test func ollamaApiPrefix() throws {
         #expect(
             try URL(string: "http://localhost:11434")!
@@ -656,6 +677,30 @@ import AIKitTestSupport
         #expect(response.stopReason == .toolUse)
         #expect(response.toolUses.first?.name == "setSetting")
         #expect(response.toolUses.first?.input.objectValue?["key"]?.stringValue == "theme")
+    }
+
+    @Test func openAIProviderUsesCustomChatCompletionsPath() async throws {
+        let body = """
+        {"choices":[{"message":{"content":"custom path"},"finish_reason":"stop"}]}
+        """.data(using: .utf8)!
+        URLProtocolStub.setStub(.init(body: body))
+        let provider = OpenAIProvider(
+            apiKey: "test-key",
+            baseURL: URL(string: "https://resource.openai.azure.com/openai")!,
+            chatCompletionsPath: "openai/deployments/gpt-4o/chat/completions?api-version=2024-10-21",
+            session: URLProtocolStub.makeSession()
+        )
+
+        let response = try await provider.complete(
+            LLMRequest(model: "gpt-4o", messages: [.init(role: .user, text: "hi")])
+        )
+
+        #expect(response.text == "custom path")
+        let request = try #require(URLProtocolStub.recordedRequests.last)
+        #expect(
+            request.url?.absoluteString ==
+            "https://resource.openai.azure.com/openai/deployments/gpt-4o/chat/completions?api-version=2024-10-21"
+        )
     }
 
     @Test func openAIEncodesImageAudioAndDecodesVoiceOutput() async throws {
