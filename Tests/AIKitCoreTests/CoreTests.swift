@@ -114,8 +114,19 @@ import AIKitTestSupport
             .openAI,
             .anthropic,
             .ollama,
+            .appleIntelligence,
             .ark,
         ])
+        #expect(AIKitProviderDefinition.appleIntelligence.displayName == "Apple Intelligence")
+        #expect(AIKitProviderDefinition.appleIntelligence.apiKeyStrategy == .none)
+        #expect(AIKitProviderDefinition.appleIntelligence.staticModelIDs == [
+            "apple-intelligence",
+        ])
+        #expect(!AIKitProviderDefinition.appleIntelligence.supportsModelCatalogRefresh)
+        #expect(
+            AIKitProviderDefinition.appleIntelligence.streamingEndpointDisplayName ==
+            "On-device"
+        )
         #expect(
             AIKitProviderDefinition.ark.modelListURL.absoluteString ==
             "https://ark.cn-beijing.volces.com/api/v3/models"
@@ -127,6 +138,7 @@ import AIKitTestSupport
         #expect(AIKitProviderDefinition.ollama.allowsStreamingEndpointOverride)
         #expect(!AIKitProviderDefinition.openAI.allowsStreamingEndpointOverride)
         #expect(AIKitProviderKind(providerName: "Other") == .ark)
+        #expect(AIKitProviderKind(providerName: "Apple Intelligence") == .appleIntelligence)
     }
 
     /// REVIEW3 finding **#1**: Ollama tool support is per-model, so the
@@ -375,6 +387,16 @@ import AIKitTestSupport
         let request = try #require(URLProtocolStub.recordedRequests.last)
         #expect(request.url?.absoluteString == "https://ark.cn-beijing.volces.com/api/v3/models")
         #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer ark-key")
+    }
+
+    @Test func modelCatalogReturnsAppleIntelligenceStaticModel() async throws {
+        URLProtocolStub.setStub(nil)
+        let catalog = AIKitModelCatalog(session: URLProtocolStub.makeSession())
+
+        let models = try await catalog.fetchModels(for: .appleIntelligence)
+
+        #expect(models == ["apple-intelligence"])
+        #expect(URLProtocolStub.recordedRequests.isEmpty)
     }
 
     @Test func decodesMessagesResponse() async throws {

@@ -4,6 +4,7 @@ public enum AIKitProviderKind: String, CaseIterable, Codable, Sendable, Hashable
     case openAI = "OpenAI"
     case anthropic = "Anthropic"
     case ollama = "Ollama"
+    case appleIntelligence = "Apple Intelligence"
     case ark = "Ark"
 
     public var id: String { rawValue }
@@ -16,6 +17,8 @@ public enum AIKitProviderKind: String, CaseIterable, Codable, Sendable, Hashable
             self = .anthropic
         case "ollama":
             self = .ollama
+        case "appleintelligence", "applefoundationmodels", "foundationmodels", "foundationmodel":
+            self = .appleIntelligence
         case "ark", "volcengine", "volcengineark", "doubao", "other", "custom":
             self = .ark
         default:
@@ -52,12 +55,14 @@ public struct AIKitProviderDefinition: Sendable, Hashable, Identifiable {
         case openAICompatible
         case anthropic
         case ollama
+        case staticList([String])
     }
 
     public enum StreamingProtocol: Sendable, Hashable {
         case openAIChatCompletions
         case anthropicMessages
         case ollamaChat
+        case foundationModels
     }
 
     public let kind: AIKitProviderKind
@@ -68,8 +73,18 @@ public struct AIKitProviderDefinition: Sendable, Hashable, Identifiable {
     public let modelListFormat: ModelListFormat
     public let streamingProtocol: StreamingProtocol
     public let allowsStreamingEndpointOverride: Bool
+    public let supportsModelCatalogRefresh: Bool
+    public let streamingEndpointDisplayName: String?
 
     public var id: AIKitProviderKind { kind }
+    public var staticModelIDs: [String] {
+        switch modelListFormat {
+        case .openAICompatible, .anthropic, .ollama:
+            []
+        case .staticList(let models):
+            models
+        }
+    }
 
     public init(
         kind: AIKitProviderKind,
@@ -79,7 +94,9 @@ public struct AIKitProviderDefinition: Sendable, Hashable, Identifiable {
         streamingEndpoint: URL,
         modelListFormat: ModelListFormat,
         streamingProtocol: StreamingProtocol,
-        allowsStreamingEndpointOverride: Bool = false
+        allowsStreamingEndpointOverride: Bool = false,
+        supportsModelCatalogRefresh: Bool = true,
+        streamingEndpointDisplayName: String? = nil
     ) {
         self.kind = kind
         self.displayName = displayName
@@ -89,6 +106,8 @@ public struct AIKitProviderDefinition: Sendable, Hashable, Identifiable {
         self.modelListFormat = modelListFormat
         self.streamingProtocol = streamingProtocol
         self.allowsStreamingEndpointOverride = allowsStreamingEndpointOverride
+        self.supportsModelCatalogRefresh = supportsModelCatalogRefresh
+        self.streamingEndpointDisplayName = streamingEndpointDisplayName
     }
 
     public static let openAI = AIKitProviderDefinition(
@@ -122,6 +141,18 @@ public struct AIKitProviderDefinition: Sendable, Hashable, Identifiable {
         allowsStreamingEndpointOverride: true
     )
 
+    public static let appleIntelligence = AIKitProviderDefinition(
+        kind: .appleIntelligence,
+        displayName: "Apple Intelligence",
+        apiKeyStrategy: .none,
+        modelListURL: URL(string: "aikit-apple-intelligence://local/models")!,
+        streamingEndpoint: URL(string: "aikit-apple-intelligence://local")!,
+        modelListFormat: .staticList(["apple-intelligence"]),
+        streamingProtocol: .foundationModels,
+        supportsModelCatalogRefresh: false,
+        streamingEndpointDisplayName: "On-device"
+    )
+
     public static let ark = AIKitProviderDefinition(
         kind: .ark,
         displayName: "Volcengine Ark",
@@ -136,6 +167,7 @@ public struct AIKitProviderDefinition: Sendable, Hashable, Identifiable {
         .openAI,
         .anthropic,
         .ollama,
+        .appleIntelligence,
         .ark,
     ]
 }
@@ -149,6 +181,8 @@ public extension AIKitProviderKind {
             .anthropic
         case .ollama:
             .ollama
+        case .appleIntelligence:
+            .appleIntelligence
         case .ark:
             .ark
         }
@@ -184,6 +218,10 @@ public struct AIKitModelCatalog: Sendable {
         apiKey: String = "",
         timeout: TimeInterval? = nil
     ) async throws -> [String] {
+        if case .staticList(let models) = provider.definition.modelListFormat {
+            return uniqueSorted(models)
+        }
+
         let request = try makeRequest(
             provider: provider,
             apiKey: apiKey,
@@ -247,6 +285,8 @@ public struct AIKitModelCatalog: Sendable {
         case .ollama:
             let response = try JSONDecoder().decode(OllamaTags.self, from: data)
             return uniqueSorted(response.models.compactMap { $0.name ?? $0.model })
+        case .staticList(let models):
+            return uniqueSorted(models)
         }
     }
 

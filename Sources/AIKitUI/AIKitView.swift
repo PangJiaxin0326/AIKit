@@ -249,7 +249,7 @@ public struct AIKitView: View {
                     #endif
                     .textContentType(.password)
             }
-        case .ollama:
+        case .ollama, .appleIntelligence:
             EmptyView()
         }
     }
@@ -276,26 +276,32 @@ public struct AIKitView: View {
                 }
                 .menuStyle(.button)
 
-                Button {
-                    Task { await refreshModelCatalog() }
-                } label: {
-                    if isRefreshingModels {
-                        ProgressView()
-                            .controlSize(.small)
-                    } else {
-                        Image(systemName: "arrow.clockwise")
+                if selectedProviderDefinition.supportsModelCatalogRefresh {
+                    Button {
+                        Task { await refreshModelCatalog() }
+                    } label: {
+                        if isRefreshingModels {
+                            ProgressView()
+                                .controlSize(.small)
+                        } else {
+                            Image(systemName: "arrow.clockwise")
+                        }
                     }
+                    .buttonStyle(.borderless)
+                    .disabled(isRefreshingModels)
+                    .accessibilityLabel("Refresh models")
                 }
-                .buttonStyle(.borderless)
-                .disabled(isRefreshingModels)
-                .accessibilityLabel("Refresh models")
             }
         }
     }
 
     private var endpointRow: some View {
         LabeledContent("Endpoint") {
-            if selectedProviderDefinition.allowsStreamingEndpointOverride {
+            if let displayName = selectedProviderDefinition.streamingEndpointDisplayName {
+                Text(displayName)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+            } else if selectedProviderDefinition.allowsStreamingEndpointOverride {
                 TextField(
                     selectedProviderDefinition.streamingEndpoint.absoluteString,
                     text: selectedProviderEndpointBinding
@@ -454,7 +460,7 @@ public struct AIKitView: View {
                     openAIAPIKey
                 case .anthropic:
                     anthropicAPIKey
-                case .ollama:
+                case .ollama, .appleIntelligence:
                     ""
                 case .ark:
                     arkAPIKey
@@ -466,7 +472,7 @@ public struct AIKitView: View {
                     openAIAPIKey = newValue
                 case .anthropic:
                     anthropicAPIKey = newValue
-                case .ollama:
+                case .ollama, .appleIntelligence:
                     break
                 case .ark:
                     arkAPIKey = newValue
@@ -481,7 +487,7 @@ public struct AIKitView: View {
             openAIAPIKey
         case .anthropic:
             anthropicAPIKey
-        case .ollama:
+        case .ollama, .appleIntelligence:
             ""
         case .ark:
             arkAPIKey
@@ -1476,7 +1482,8 @@ private final class AIKitConfigurationViewModel {
     }
 
     func modelOptions(for provider: AIKitProviderKind) -> [String] {
-        configuration.core.providerConfiguration(for: provider).availableModels
+        let configuredModels = configuration.core.providerConfiguration(for: provider).availableModels
+        return configuredModels.isEmpty ? provider.definition.staticModelIDs : configuredModels
     }
 
     func modelCatalogStatus(for provider: AIKitProviderKind) -> String? {

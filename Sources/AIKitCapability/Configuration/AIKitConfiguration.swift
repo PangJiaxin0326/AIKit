@@ -103,6 +103,7 @@ public struct AIKitConfiguration: Codable, Sendable, Hashable {
         public var openAI: ProviderConfiguration
         public var anthropic: ProviderConfiguration
         public var ollama: ProviderConfiguration
+        public var appleIntelligence: ProviderConfiguration
         public var ark: ProviderConfiguration
         public var timeout: TimeInterval?
         public var temperature: Double?
@@ -113,6 +114,7 @@ public struct AIKitConfiguration: Codable, Sendable, Hashable {
             openAI: ProviderConfiguration = ProviderConfiguration(),
             anthropic: ProviderConfiguration = ProviderConfiguration(),
             ollama: ProviderConfiguration = ProviderConfiguration(),
+            appleIntelligence: ProviderConfiguration = ProviderConfiguration(),
             ark: ProviderConfiguration = ProviderConfiguration(),
             other: ProviderConfiguration? = nil,
             timeout: TimeInterval? = nil,
@@ -123,6 +125,7 @@ public struct AIKitConfiguration: Codable, Sendable, Hashable {
             self.openAI = openAI
             self.anthropic = anthropic
             self.ollama = ollama
+            self.appleIntelligence = appleIntelligence
             self.ark = other ?? ark
             self.timeout = timeout
             self.temperature = temperature
@@ -134,6 +137,7 @@ public struct AIKitConfiguration: Codable, Sendable, Hashable {
             case openAI
             case anthropic
             case ollama
+            case appleIntelligence
             case ark
             case other
             case timeout
@@ -171,6 +175,10 @@ public struct AIKitConfiguration: Codable, Sendable, Hashable {
             self.ollama = try container.decodeIfPresent(
                 ProviderConfiguration.self,
                 forKey: .ollama
+            ) ?? ProviderConfiguration()
+            self.appleIntelligence = try container.decodeIfPresent(
+                ProviderConfiguration.self,
+                forKey: .appleIntelligence
             ) ?? ProviderConfiguration()
             self.ark = try container.decodeIfPresent(
                 ProviderConfiguration.self,
@@ -210,6 +218,7 @@ public struct AIKitConfiguration: Codable, Sendable, Hashable {
             try container.encode(openAI, forKey: .openAI)
             try container.encode(anthropic, forKey: .anthropic)
             try container.encode(ollama, forKey: .ollama)
+            try container.encode(appleIntelligence, forKey: .appleIntelligence)
             try container.encode(ark, forKey: .ark)
             try container.encodeIfPresent(timeout, forKey: .timeout)
             try container.encodeIfPresent(temperature, forKey: .temperature)
@@ -266,6 +275,8 @@ public struct AIKitConfiguration: Codable, Sendable, Hashable {
                 anthropic
             case .ollama:
                 ollama
+            case .appleIntelligence:
+                appleIntelligence
             case .ark:
                 ark
             }
@@ -282,6 +293,8 @@ public struct AIKitConfiguration: Codable, Sendable, Hashable {
                 anthropic = providerConfiguration
             case .ollama:
                 ollama = providerConfiguration
+            case .appleIntelligence:
+                appleIntelligence = providerConfiguration
             case .ark:
                 ark = providerConfiguration
             }

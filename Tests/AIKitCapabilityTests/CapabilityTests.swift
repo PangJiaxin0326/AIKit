@@ -347,6 +347,28 @@ private struct EchoTool: Tool {
         )
     }
 
+    @Test func corePersistsAppleIntelligenceConfiguration() throws {
+        let configuration = AIKitConfiguration(core: .init(
+            activeProvider: .appleIntelligence,
+            appleIntelligence: .init(
+                defaultModel: "apple-intelligence",
+                availableModels: ["apple-intelligence"]
+            )
+        ))
+
+        let data = try JSONEncoder().encode(configuration)
+        let decoded = try JSONDecoder().decode(AIKitConfiguration.self, from: data)
+
+        #expect(decoded.core.activeProvider == .appleIntelligence)
+        #expect(
+            decoded.core.providerConfiguration(for: .appleIntelligence).defaultModel ==
+            "apple-intelligence"
+        )
+        #expect(decoded.core.providerConfiguration(for: .appleIntelligence).availableModels == [
+            "apple-intelligence",
+        ])
+    }
+
     @Test func coreDecodesLegacyActiveProviderFields() throws {
         let data = """
         {
