@@ -605,6 +605,33 @@ import AIKitTestSupport
         #expect(response.usage.outputTokens == 3)
     }
 
+    @Test func ollamaKeepsPlannerControlsAtTopLevel() async throws {
+        let body = """
+        {"model":"gemma4:e4b","message":{"role":"assistant","content":"{}"},\
+        "done":true,"done_reason":"stop"}
+        """.data(using: .utf8)!
+        URLProtocolStub.setStub(.init(body: body))
+        let provider = OllamaProvider(session: URLProtocolStub.makeSession())
+        _ = try await provider.complete(LLMRequest(
+            model: "gemma4:e4b",
+            extraBody: [
+                "think": .bool(false),
+                "format": .string("json"),
+                "keep_alive": .string("5m"),
+                "num_ctx": .int(4096),
+            ]
+        ))
+
+        let sent = try recordedRequestJSON()
+        #expect(sent["think"] == .bool(false))
+        #expect(sent["format"] == .string("json"))
+        #expect(sent["keep_alive"] == .string("5m"))
+        let options = try #require(sent["options"]?.objectValue)
+        #expect(options["num_ctx"] == .int(4096))
+        #expect(options["think"] == nil)
+        #expect(options["format"] == nil)
+    }
+
     /// REVIEW2 finding **F2**: tool calls mean `.toolUse` regardless of
     /// `done_reason` — the single `stopReason()` source must enforce that.
     @Test func ollamaToolCallsOverrideLengthDoneReason() async throws {

@@ -24,6 +24,12 @@ public actor ErrorHandler {
             return .abort(error)
 
         case .malformedOutput:
+            if case OutputParser.ParserError.malformedWorkflow = error {
+                return .abort(error)
+            }
+            if error is WorkflowError {
+                return .abort(error)
+            }
             let detail: String
             if case OutputParser.ParserError.malformedToolInput(let name, let raw) = error {
                 detail = "Your previous tool call to '\(name)' had malformed JSON input: \(raw)."
@@ -31,8 +37,7 @@ public actor ErrorHandler {
                 detail = "Your previous response could not be parsed."
             }
             return .fallback(prompt:
-                "\(detail) Re-issue the tool call with valid JSON matching the schema, "
-                + "or give a final answer.")
+                "\(detail) Re-issue valid JSON matching the schema, or give a final answer.")
 
         case .transient, .toolRetriable:
             guard policy.retriableCategories.contains(category),

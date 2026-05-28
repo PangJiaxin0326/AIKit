@@ -164,6 +164,13 @@ one turn: it may loop through several LLM↔tool iterations, with guardrails run
 at four stages (`prePrompt`, `preToolUse`, `postToolUse`, `finalResult`). See
 `GUIDE.md` for the full design.
 
+For low-latency mobile agents, AIKit also supports AIToolKit `WorkflowSpec`:
+the model can emit one topological JSON DAG containing multiple ordered or
+dependent tool nodes, and the device executes those nodes locally without a
+second LLM pass. In workflow-planning mode, providers see only the synthetic
+`workflow_run` tool; app tools are supplied as catalog context. See
+`AI_Agent_DAG_Workflow_Schema_Design.md` for the schema guidance.
+
 ## Testing
 
 ```sh

@@ -173,9 +173,12 @@ public protocol Tool: Sendable {
 
     static var name: String { get }            // stable identifier, e.g. "navigate"
     static var description: String { get }     // shown to the LLM
-    static var schema: ToolSchema { get }      // JSON schema for Input
+    static var inputSchema: ToolSchema { get } // JSON schema for Input
+    static var outputSchema: ToolSchema { get }
+    static var annotations: ToolAnnotations { get }
+    static var inputExamples: [JSONValue] { get }
 
-    func invoke(_ input: Input, in context: ToolContext) async throws -> Output
+    func call(_ input: Input, in context: ToolContext) async throws -> Output
 }
 
 public struct ToolContext: Sendable {
@@ -193,17 +196,20 @@ public actor ToolRegistry {
     /// Returns the schema bundle for the given subset (used by PromptBuilder).
     public func manifest(for names: Set<String>) -> [ToolDescriptor]
 
-    /// Dispatches an invocation by name; decodes input from JSON, encodes output.
-    public func invoke(name: String, jsonInput: Data, context: ToolContext) async throws -> Data
+    /// Dispatches an invocation by name; decodes input JSON, encodes output JSON.
+    public func call(_ call: ToolCall, context: ToolContext) async throws -> JSONValue
 }
 ```
 
 Requirements:
 
-- Tools must be `Sendable`; closures captured inside `invoke` must respect
+- Tools must be `Sendable`; closures captured inside `call` must respect
   Swift 6 concurrency rules.
 - Tool errors conform to `ToolError` and carry `isRetriable: Bool` so the
   ErrorHandler can decide whether to loop back.
+- Output schemas and annotations live with the tool descriptor so workflow
+  planning can reason about references, side effects, cacheability, and
+  approval requirements without app-specific prompt glue.
 - Built‑in tools (provided by AIKit, opt‑in): `navigate`, `setProfile`,
   `setSetting`, `searchMemory`, `getAIKitConfiguration`, and
   `setAIKitConfiguration`. Each lives in
@@ -378,6 +384,8 @@ public actor Orchestrator {
         public var maxIterations: Int = 8
         public var stream: Bool = true
         public var retry: RetryPolicy = .default
+        public var toolCallFallback: Bool?
+        public var workflowPlanning: Bool = true
     }
 }
 
@@ -410,16 +418,30 @@ loop iteration = 0..<options.maxIterations:
         case .toolCalls(calls):
             for call in calls:
                 guardrails.verify(.preToolUse, call)
-                result = try await tools.invoke(call)
+                result = try await tools.call(call)
                 guardrails.verify(.postToolUse, result)
                 transcript.append(call, result)
                 memory.append(toolInvoked, toolResult)
+        case .workflow(spec):
+            validated = WorkflowValidator.validate(spec, policy: WorkflowValidationPolicy(descriptors: manifest))
+            result = try await WorkflowExecutor(registry: tools).execute(validated)
+            final = result.finalText ?? WorkflowFinalRenderer.displayString(result.finalValue)
+            guardrails.verify(.finalResult, final)
+            emit(.finalAnswer(final)); return
     continue
 emit(.error(IterationLimitExceeded))
 ```
 
 The Orchestrator is an actor so concurrent `run` calls on the same instance
 serialize cleanly. Hosts wanting parallelism instantiate multiple orchestrators.
+
+Workflow specs are the preferred path for latency-sensitive local agents when a
+request needs more than one tool, ordered side effects, or a dependent tool
+input. The LLM is called once, the device executes the topological step DAG
+locally, and the final answer is emitted without looping back to the model.
+The workflow protocol, schema, validator, executor, reference resolver, and
+trace types are owned by `AIToolKit`; AIKit Runtime supplies prompt assembly,
+guardrails, memory, and app-context orchestration around that foundation.
 
 ### 5.2 PromptBuilder
 
@@ -433,7 +455,9 @@ public enum PromptBuilder {
         context: ResolvedContext,
         memory: [UsageEvent],
         transcript: [TranscriptEntry],
-        toolManifest: [ToolDescriptor]
+        toolManifest: [ToolDescriptor],
+        toolCallFallbackHint: Bool = false,
+        workflowPlanningHint: Bool = false
     ) -> LLMRequest
 }
 ```
@@ -446,6 +470,13 @@ Rules:
   prompt, capped at `Options.memoryWindow` events.
 - Transcript becomes the `messages` array, oldest first.
 - `tools` is filtered to the view's `toolNames` only.
+- When `Options.workflowPlanning` is true, the prompt includes the workflow
+  instruction and exposes only the runtime synthetic descriptor named
+  `workflow_run` in `LLMRequest.tools`. Underlying app tools are described in
+  the catalog as context, including input/output schemas and annotations, but
+  are not provider-executable tools. Native function-calling models can call
+  `workflow_run`; local/text-only models can emit the same `WorkflowSpec` as
+  raw JSON or a fenced `workflow` block.
 
 ### 5.3 OutputParser
 
@@ -456,6 +487,8 @@ public enum ParsedOutput: Sendable {
     case final(String)
     case toolCalls([ToolCall])
     case mixed(text: String, toolCalls: [ToolCall])
+    case workflow(WorkflowSpec)
+    case mixedWorkflow(text: String, workflow: WorkflowSpec)
 }
 
 public enum OutputParser {
@@ -465,6 +498,150 @@ public enum OutputParser {
 
 Errors: `OutputParser.Error.malformedToolInput(name:, raw:)` carries the bad
 JSON so the ErrorHandler can re‑prompt with a corrective message.
+
+### 5.3.1 WorkflowSpec schema
+
+`WorkflowSpec` is AIKit's single-round-trip schema for multi-tool DAG execution.
+The model emits one topological `nodes` sequence, not nested tool-call
+expressions, and references predecessor outputs with opaque `$ref` objects so
+intermediate tool results do not re-enter the LLM context.
+
+```json
+{
+  "schema_version": "workflow.v1",
+  "workflow_id": "wf_email_alex",
+  "intent": "Create an email draft to Alex using the passport renewal document.",
+  "mode": "execute",
+  "nodes": [
+    {
+      "id": "find_alex",
+      "kind": "tool",
+      "tool": "findContact",
+      "depends_on": [],
+      "input": { "query": "Alex" },
+      "policy": {
+        "timeout_ms": 5000,
+        "retry": {
+          "max_attempts": 1,
+          "backoff_ms": 0,
+          "retry_only_if_tool_error_is_retriable": true
+        },
+        "on_error": "abort",
+        "default_output": null
+      },
+      "output_policy": {
+        "store": true,
+        "expose_to_final": true,
+        "max_bytes": 65536,
+        "redaction": "tool_default"
+      }
+    },
+    {
+      "id": "find_document",
+      "kind": "tool",
+      "tool": "searchDocuments",
+      "depends_on": [],
+      "input": { "query": "passport renewal" },
+      "policy": {
+        "timeout_ms": 5000,
+        "retry": {
+          "max_attempts": 1,
+          "backoff_ms": 0,
+          "retry_only_if_tool_error_is_retriable": true
+        },
+        "on_error": "abort",
+        "default_output": null
+      },
+      "output_policy": {
+        "store": true,
+        "expose_to_final": true,
+        "max_bytes": 65536,
+        "redaction": "tool_default"
+      }
+    },
+    {
+      "id": "draft_email",
+      "kind": "tool",
+      "tool": "createEmailDraft",
+      "depends_on": ["find_alex", "find_document"],
+      "input": {
+        "recipient": {
+          "$ref": { "source": "node", "node": "find_alex", "path": "" }
+        },
+        "body": {
+          "$ref": { "source": "node", "node": "find_document", "path": "/body" }
+        }
+      },
+      "policy": {
+        "timeout_ms": 5000,
+        "retry": {
+          "max_attempts": 1,
+          "backoff_ms": 0,
+          "retry_only_if_tool_error_is_retriable": true
+        },
+        "on_error": "abort",
+        "default_output": null
+      },
+      "output_policy": {
+        "store": true,
+        "expose_to_final": true,
+        "max_bytes": 65536,
+        "redaction": "tool_default"
+      }
+    }
+  ],
+  "final": {
+    "kind": "node_output",
+    "value": null,
+    "template": null,
+    "bindings": {},
+    "node": "draft_email",
+    "path": "/draftID",
+    "message": null
+  },
+  "limits": {
+    "max_nodes": 12,
+    "max_parallelism": 4,
+    "deadline_ms": 15000,
+    "max_output_bytes_per_node": 65536
+  },
+  "metadata": {}
+}
+```
+
+Rules:
+
+- `nodes[].id` is unique, stable, lowercase snake case, and contains no dots.
+- `nodes[].tool` must be one of the current view's available tool names.
+- `nodes` must be topological: every `depends_on` id and every node `$ref` must
+  point to an earlier node in the array.
+- `depends_on` expresses ordered side effects even when no value is referenced.
+- Dependent inputs use
+  `{"$ref":{"source":"node","node":"node_id","path":"/jsonPointer"}}`.
+  Context and user-input references use the same object with `source` set to
+  `context` or `user_input`.
+- The runtime validates duplicate ids, unavailable tools, approval policy,
+  unknown dependencies, non-topological ordering, cycles, limits, and unresolved
+  references before or during execution.
+- The runtime renders `final` locally as a raw value, node output projection,
+  deterministic template, or prepared message. It must not make a second LLM
+  call for final synthesis.
+
+Practical constraints for mobile latency:
+
+- Keep the request-specific tool manifest small. The preferred target is no more
+  than five candidate tools in prompt context.
+- Represent dependent work as a topological DAG: two independent source/read
+  nodes followed by one parent node with `depends_on` listing both source ids.
+- For local Gemma-class models, include one tiny fan-in example in the workflow
+  instruction. A zero-example prompt was cheaper but unstable; a large pattern
+  card was reliable but wasted tokens.
+- Descriptive node ids are the most stable default. Short deterministic ids
+  (`s1`, `s2`, `s3`) reduce completion latency, but should be paired with
+  explicit correct/incorrect reference examples and parser repair or fallback.
+- Do not pressure small local models to minify aggressively. In experiments,
+  minification wording caused malformed JSON even when `format: "json"` was
+  enabled.
 
 ### 5.4 ErrorHandler & RetryPolicy
 
@@ -593,7 +770,7 @@ streaming and non‑streaming codepaths.
 4. Built‑in tools: `navigate`, `setProfile`, `setSetting`, `searchMemory`,
    `getAIKitConfiguration`, `setAIKitConfiguration`.
 
-**Exit:** Register a fake tool, invoke it through `ToolRegistry.invoke(name:…)`,
+**Exit:** Register a fake tool, invoke it through `ToolRegistry.call(_:,context:)`,
 confirm event lands in memory.
 
 ### Phase 3 — Runtime (2 days)

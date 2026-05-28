@@ -28,11 +28,20 @@ public struct GetAIKitConfigurationTool: Tool {
     public static let description = """
     Read AIKit's current Core, Capability, Runtime, and Safety configuration.
     """
-    public static let schema = ToolSchema.object(
+    public static let inputSchema = ToolSchema.object(
         properties: [
             "includeRecentChanges": .boolean,
         ]
     )
+    public static let annotations = ToolAnnotations(
+        isReadOnly: true,
+        isIdempotent: true,
+        sideEffect: .none,
+        sensitiveOutput: .privateContent
+    )
+    public static let inputExamples: [JSONValue] = [
+        .object(["includeRecentChanges": .bool(true)]),
+    ]
 
     private let store: AIKitConfigurationStore
 
@@ -40,7 +49,7 @@ public struct GetAIKitConfigurationTool: Tool {
         self.store = store
     }
 
-    public func invoke(_ input: Input, in context: ToolContext) async throws -> Output {
+    public func call(_ input: Input, in context: ToolContext) async throws -> Output {
         let changes = await store.recentChanges(
             limit: input.includeRecentChanges == false ? 0 : 10
         )
@@ -94,7 +103,7 @@ public struct SetAIKitConfigurationTool: Tool {
     streamsResponses, toolCallFallback, enabledGuardrailIDs, and \
     outputLengthLimit.
     """
-    public static let schema = ToolSchema(json: .object([
+    public static let inputSchema = ToolSchema(json: .object([
         "type": .string("object"),
         "properties": .object([
             "section": .object([
@@ -116,6 +125,10 @@ public struct SetAIKitConfigurationTool: Tool {
             .string("value"),
         ]),
     ]))
+    public static let annotations = ToolAnnotations(
+        sideEffect: .localWrite,
+        sensitiveOutput: .privateContent
+    )
 
     private let store: AIKitConfigurationStore
 
@@ -123,7 +136,7 @@ public struct SetAIKitConfigurationTool: Tool {
         self.store = store
     }
 
-    public func invoke(_ input: Input, in context: ToolContext) async throws -> Output {
+    public func call(_ input: Input, in context: ToolContext) async throws -> Output {
         let change = try await store.set(
             section: input.section,
             key: input.key,

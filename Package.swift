@@ -22,7 +22,7 @@ let package = Package(
         .library(name: "AIKitUI", targets: ["AIKitUI"]),
     ],
     dependencies: [
-        .package(url: "https://github.com/PangJiaxin0326/AIToolKit.git", branch: "main"),
+        .package(path: "../AIToolKit"),
         .package(url: "https://github.com/PangJiaxin0326/MultiModalKit.git", branch: "main"),
     ],
     targets: [

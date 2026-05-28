@@ -7,12 +7,15 @@ public enum ParsedOutput: Sendable, Hashable {
     case final(String)
     case toolCalls([ToolCall])
     case mixed(text: String, toolCalls: [ToolCall])
+    case workflow(WorkflowSpec)
+    case mixedWorkflow(text: String, workflow: WorkflowSpec)
 }
 
 /// Converts an `LLMResponse` into app-aware intents.
 public enum OutputParser {
     public enum ParserError: Error, Sendable, Hashable {
         case malformedToolInput(name: String, raw: String)
+        case malformedWorkflow(raw: String)
         case empty
     }
 
@@ -26,6 +29,7 @@ public enum OutputParser {
     ) throws -> ParsedOutput {
         var text = ""
         var calls: [ToolCall] = []
+        var workflow: WorkflowSpec?
 
         for block in response.content {
             switch block {
@@ -59,12 +63,37 @@ public enum OutputParser {
 
         var trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
 
+        workflow = try Self.popWorkflowCall(from: &calls)
+
+        if workflow == nil, !trimmed.isEmpty {
+            if let recovered = try Self.recoverWorkflowSpec(in: trimmed) {
+                workflow = recovered.spec
+                trimmed = recovered.remainingText
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+        }
+
         if allowToolCallFallback, calls.isEmpty, !trimmed.isEmpty {
             if let recovered = try Self.recoverFencedToolCall(in: trimmed) {
                 calls.append(recovered.call)
                 trimmed = recovered.remainingText
                     .trimmingCharacters(in: .whitespacesAndNewlines)
             }
+        }
+
+        if workflow == nil {
+            workflow = try Self.popWorkflowCall(from: &calls)
+        }
+
+        if let workflow {
+            guard calls.isEmpty else {
+                throw ParserError.malformedWorkflow(
+                    raw: "Workflow specs cannot be mixed with separate tool calls."
+                )
+            }
+            return trimmed.isEmpty
+                ? .workflow(workflow)
+                : .mixedWorkflow(text: trimmed, workflow: workflow)
         }
 
         switch (trimmed.isEmpty, calls.isEmpty) {
@@ -147,6 +176,98 @@ public enum OutputParser {
         pattern: "```[ \\t]*tool[ \\t]*\\r?\\n(.*?)```",
         options: [.dotMatchesLineSeparators, .caseInsensitive]
     )
+
+    private static let workflowFenceRegex = try? NSRegularExpression(
+        pattern: "```[ \\t]*(workflow|json|tool)[ \\t]*\\r?\\n(.*?)```",
+        options: [.dotMatchesLineSeparators, .caseInsensitive]
+    )
+
+    private static func popWorkflowCall(from calls: inout [ToolCall]) throws -> WorkflowSpec? {
+        guard let index = calls.firstIndex(where: { $0.name == WorkflowSpec.toolName })
+        else { return nil }
+        let call = calls.remove(at: index)
+        do {
+            return try WorkflowSpec.decodeToolCallInput(call.input)
+        } catch {
+            throw ParserError.malformedWorkflow(raw: Self.rawJSON(call.input))
+        }
+    }
+
+    private static func decodeWorkflowCandidate(_ value: JSONValue) throws -> WorkflowSpec? {
+        if case .object(let object) = value,
+           let name = object["name"]?.stringValue ?? object["tool"]?.stringValue,
+           name == WorkflowSpec.toolName,
+           let input = object["input"] ?? object["arguments"] {
+            do {
+                return try WorkflowSpec.decodeToolCallInput(input)
+            } catch {
+                throw ParserError.malformedWorkflow(raw: Self.rawJSON(value))
+            }
+        }
+        do {
+            return try WorkflowSpec.decodeToolCallInput(value)
+        } catch {
+            return nil
+        }
+    }
+
+    private static func recoverWorkflowSpec(
+        in text: String
+    ) throws -> (spec: WorkflowSpec, remainingText: String)? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let looksLikeWorkflow = Self.looksLikeWorkflowJSON(trimmed)
+        if trimmed.hasPrefix("{"),
+           let data = trimmed.data(using: .utf8),
+           let value = try? JSONValue(data: data) {
+            if let plan = try Self.decodeWorkflowCandidate(value) {
+                return (plan, "")
+            }
+            if looksLikeWorkflow {
+                throw ParserError.malformedWorkflow(raw: trimmed)
+            }
+        }
+
+        guard let regex = workflowFenceRegex else { return nil }
+        let range = NSRange(text.startIndex..., in: text)
+        for match in regex.matches(in: text, range: range) {
+            guard let bodyRange = Range(match.range(at: 2), in: text)
+            else { continue }
+            let body = String(text[bodyRange])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard Self.looksLikeWorkflowJSON(body)
+            else { continue }
+            guard let data = body.data(using: .utf8),
+                  let value = try? JSONValue(data: data)
+            else {
+                throw ParserError.malformedWorkflow(raw: body)
+            }
+            if let plan = try Self.decodeWorkflowCandidate(value) {
+                var remaining = text
+                if let fullRange = Range(match.range, in: text) {
+                    remaining.removeSubrange(fullRange)
+                }
+                return (plan, remaining)
+            }
+            throw ParserError.malformedWorkflow(raw: body)
+        }
+        return nil
+    }
+
+    private static func looksLikeWorkflowJSON(_ text: String) -> Bool {
+        text.contains(WorkflowSpec.schemaVersion)
+            || text.contains("\"\(WorkflowSpec.toolName)\"")
+            || (text.contains("\"nodes\"")
+                && text.contains("\"tool\"")
+                && text.contains("\"input\"")
+                && text.contains("\"depends_on\""))
+    }
+
+    private static func rawJSON(_ value: JSONValue) -> String {
+        guard let data = try? value.data(),
+              let text = String(data: data, encoding: .utf8)
+        else { return "\(value)" }
+        return text
+    }
 
     /// Looks for a fenced ```tool block holding a single JSON object describing
     /// a tool call. A block that is present but unparseable is a hard error so

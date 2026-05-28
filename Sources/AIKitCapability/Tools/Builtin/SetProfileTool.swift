@@ -19,13 +19,24 @@ public struct SetProfileTool: Tool {
 
     public static let name = "setProfile"
     public static let description = "Set a key/value pair on the user's profile."
-    public static let schema = ToolSchema.object(
+    public static let inputSchema = ToolSchema.object(
         properties: [
             "key": .string(description: "Profile field name"),
             "value": .string(description: "New value"),
         ],
         required: ["key", "value"]
     )
+    public static let outputSchema = ToolSchema.strictObject(
+        properties: ["applied": .boolean],
+        required: ["applied"]
+    )
+    public static let annotations = ToolAnnotations(
+        sideEffect: .localWrite,
+        sensitiveOutput: .none
+    )
+    public static let inputExamples: [JSONValue] = [
+        .object(["key": .string("theme"), "value": .string("dark")]),
+    ]
 
     private let handler: @Sendable (Input, ToolContext) async throws -> Output
 
@@ -33,7 +44,7 @@ public struct SetProfileTool: Tool {
         self.handler = handler
     }
 
-    public func invoke(_ input: Input, in context: ToolContext) async throws -> Output {
+    public func call(_ input: Input, in context: ToolContext) async throws -> Output {
         try await handler(input, context)
     }
 }

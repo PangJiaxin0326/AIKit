@@ -16,10 +16,21 @@ public struct NavigateTool: Tool {
 
     public static let name = "navigate"
     public static let description = "Navigate the app to a named destination/screen."
-    public static let schema = ToolSchema.object(
+    public static let inputSchema = ToolSchema.object(
         properties: ["destination": .string(description: "Destination identifier")],
         required: ["destination"]
     )
+    public static let outputSchema = ToolSchema.strictObject(
+        properties: ["navigated": .boolean],
+        required: ["navigated"]
+    )
+    public static let annotations = ToolAnnotations(
+        sideEffect: .localWrite,
+        sensitiveOutput: .none
+    )
+    public static let inputExamples: [JSONValue] = [
+        .object(["destination": .string("settings")]),
+    ]
 
     private let handler: @Sendable (Input, ToolContext) async throws -> Output
 
@@ -27,7 +38,7 @@ public struct NavigateTool: Tool {
         self.handler = handler
     }
 
-    public func invoke(_ input: Input, in context: ToolContext) async throws -> Output {
+    public func call(_ input: Input, in context: ToolContext) async throws -> Output {
         try await handler(input, context)
     }
 }

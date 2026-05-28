@@ -12,9 +12,9 @@ public struct LLMRequest: Sendable, Hashable {
     /// Providers that do not support audio output throw `LLMError.unsupported`.
     public var audioOutput: AudioOutputOptions?
     /// Provider-specific knobs merged into the request body. Local models need
-    /// these (`num_ctx`, `keep_alive`, `stop`, `top_p`, `seed`, …). Reserved
-    /// keys owned by the wire encoder (`model`, `messages`, `stream`, …) are
-    /// never overwritten by these values.
+    /// these (`num_ctx`, `keep_alive`, `format`, `think`, `stop`, `top_p`,
+    /// `seed`, …). Reserved keys owned by the wire encoder (`model`,
+    /// `messages`, `stream`, …) are never overwritten by these values.
     public var extraBody: [String: JSONValue]
 
     public init(

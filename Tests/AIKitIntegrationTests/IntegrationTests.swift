@@ -43,7 +43,7 @@ private actor InvocationFlag {
             memory: InMemoryMemoryStore(),
             contextResolver: await resolver(toolNames: ["navigate"]),
             guardrails: PolicyEngine(rails: [AllowlistedTools(allowed: ["navigate"])]),
-            options: .init(model: "test", stream: false)
+            options: .init(model: "test", stream: false, workflowPlanning: false)
         )
 
         var final: String?
@@ -79,7 +79,10 @@ private actor InvocationFlag {
             memory: InMemoryMemoryStore(),
             contextResolver: await resolver(toolNames: ["navigate"]),
             guardrails: PolicyEngine(rails: [AllowlistedTools(allowed: ["searchMemory"])]),
-            options: .init(model: "test", stream: false, retry: .init(maxAttempts: 1))
+            options: .init(
+                model: "test", stream: false,
+                retry: .init(maxAttempts: 1), workflowPlanning: false
+            )
         )
 
         var caught: (any Error)?
@@ -111,7 +114,7 @@ private actor InvocationFlag {
             memory: InMemoryMemoryStore(),
             contextResolver: await resolver(toolNames: [ReportFailureTool.name]),
             guardrails: PolicyEngine(rails: [AllowlistedTools(allowed: [ReportFailureTool.name])]),
-            options: .init(model: "test", stream: false)
+            options: .init(model: "test", stream: false, workflowPlanning: false)
         )
 
         var failure: String?

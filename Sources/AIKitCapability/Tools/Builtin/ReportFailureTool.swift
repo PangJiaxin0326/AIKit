@@ -24,16 +24,29 @@ public struct ReportFailureTool: Tool {
         plain reason the user can act on (what is unclear or missing). Do not \
         call any other tool in the same turn.
         """
-    public static let schema = ToolSchema.object(
+    public static let inputSchema = ToolSchema.object(
         properties: [
             "reason": .string(description: "Why you can't confidently proceed"),
         ],
         required: ["reason"]
     )
+    public static let outputSchema = ToolSchema.strictObject(
+        properties: ["acknowledged": .boolean],
+        required: ["acknowledged"]
+    )
+    public static let annotations = ToolAnnotations(
+        isReadOnly: true,
+        isIdempotent: true,
+        sideEffect: .none,
+        sensitiveOutput: .none
+    )
+    public static let inputExamples: [JSONValue] = [
+        .object(["reason": .string("I need the destination before I can continue.")]),
+    ]
 
     public init() {}
 
-    public func invoke(_ input: Input, in context: ToolContext) async throws -> Output {
+    public func call(_ input: Input, in context: ToolContext) async throws -> Output {
         Output()
     }
 }

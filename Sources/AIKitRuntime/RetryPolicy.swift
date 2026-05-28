@@ -69,6 +69,8 @@ public enum ErrorClassifier {
             return toolError.isRetriable ? .toolRetriable : .fatal
         case is OutputParser.ParserError:
             return .malformedOutput
+        case is WorkflowError:
+            return .malformedOutput
         case let llmError as LLMError:
             switch llmError {
             case .httpStatus(let code, _):

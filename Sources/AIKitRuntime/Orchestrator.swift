@@ -151,6 +151,11 @@ public actor Orchestrator {
         /// prompted to emit a redundant fenced block. Set `true`/`false` to
         /// force it (e.g. a tool-less model behind a native-looking provider).
         public var toolCallFallback: Bool?
+        /// Adds AIKit's WorkflowSpec schema to prompts and native tool
+        /// manifests. This lets the model describe multiple dependent tool
+        /// calls in one response; the device executes them locally and emits
+        /// the final answer without a second LLM pass.
+        public var workflowPlanning: Bool
 
         public init(
             model: String? = nil,
@@ -162,7 +167,8 @@ public actor Orchestrator {
             temperature: Double? = nil,
             maxTokens: Int? = nil,
             extraBody: [String: JSONValue] = [:],
-            toolCallFallback: Bool? = nil
+            toolCallFallback: Bool? = nil,
+            workflowPlanning: Bool = true
         ) {
             self.model = model
             self.maxIterations = maxIterations
@@ -174,6 +180,7 @@ public actor Orchestrator {
             self.maxTokens = maxTokens
             self.extraBody = extraBody
             self.toolCallFallback = toolCallFallback
+            self.workflowPlanning = workflowPlanning
         }
     }
 
@@ -443,7 +450,8 @@ public actor Orchestrator {
                     temperature: options.temperature,
                     maxTokens: options.maxTokens,
                     extraBody: options.extraBody,
-                    toolCallFallbackHint: useFallback
+                    toolCallFallbackHint: useFallback,
+                    workflowPlanningHint: options.workflowPlanning
                 )
                 let rendered = RenderedPrompt(request: request, toolNames: context.toolNames)
                 emit(.promptBuilt(rendered))
@@ -498,6 +506,11 @@ public actor Orchestrator {
                     return
 
                 case .toolCalls(let calls):
+                    if options.workflowPlanning {
+                        throw OutputParser.ParserError.malformedWorkflow(
+                            raw: "Expected a single \(WorkflowSpec.toolName) call or WorkflowSpec JSON, not direct tool calls."
+                        )
+                    }
                     if let reason = failureReason(in: calls) {
                         recordFailure(reason, turn: turnID)
                         emit(.failure(reason: reason))
@@ -511,6 +524,11 @@ public actor Orchestrator {
                     )
 
                 case .mixed(let text, let calls):
+                    if options.workflowPlanning {
+                        throw OutputParser.ParserError.malformedWorkflow(
+                            raw: "Expected a single \(WorkflowSpec.toolName) call or WorkflowSpec JSON, not direct tool calls."
+                        )
+                    }
                     if let reason = failureReason(in: calls) {
                         recordFailure(reason, turn: turnID)
                         emit(.failure(reason: reason))
@@ -528,6 +546,22 @@ public actor Orchestrator {
                         resolved, viewID: viewID, turnID: turnID, deadline: deadline,
                         transcript: &transcript, emit: emit
                     )
+
+                case .workflow(let plan):
+                    try await executeWorkflow(
+                        plan, narration: nil, manifest: manifest,
+                        viewID: viewID, turnID: turnID, deadline: deadline,
+                        transcript: &transcript, emit: emit
+                    )
+                    return
+
+                case .mixedWorkflow(let text, let plan):
+                    try await executeWorkflow(
+                        plan, narration: text, manifest: manifest,
+                        viewID: viewID, turnID: turnID, deadline: deadline,
+                        transcript: &transcript, emit: emit
+                    )
+                    return
                 }
                 attempt = 0
             } catch {
@@ -602,11 +636,11 @@ public actor Orchestrator {
         turnID: Int,
         deadline: ContinuousClock.Instant?,
         transcript: inout [TranscriptEntry],
-        emit: @Sendable (OrchestratorEvent) -> Void
+        emit: @escaping @Sendable (OrchestratorEvent) -> Void
     ) async throws {
         for index in calls.indices {
             do {
-                try await execute(
+                _ = try await execute(
                     calls[index],
                     viewID: viewID,
                     turnID: turnID,
@@ -622,6 +656,129 @@ public actor Orchestrator {
                 throw error
             }
         }
+    }
+
+    private func executeWorkflow(
+        _ spec: WorkflowSpec,
+        narration: String?,
+        manifest: [ToolDescriptor],
+        viewID: ViewContext.ID,
+        turnID: Int,
+        deadline: ContinuousClock.Instant?,
+        transcript: inout [TranscriptEntry],
+        emit: @escaping @Sendable (OrchestratorEvent) -> Void
+    ) async throws {
+        if !options.stream, let narration, !narration.isEmpty {
+            emit(.llmDelta(narration))
+        }
+
+        let validated = try WorkflowValidator.validate(
+            spec,
+            policy: WorkflowValidationPolicy(descriptors: manifest)
+        )
+        let guardrails = self.guardrails
+        let tools = self.tools
+        let memory = self.memory
+        let logger = self.logger
+        let descriptorsByName = Dictionary(uniqueKeysWithValues: manifest.map { ($0.name, $0) })
+        let toolContext = ToolContext(
+            viewID: viewID.rawValue,
+            metadata: ["leafViewID": viewID.rawValue],
+            logger: logger
+        )
+        let executor = WorkflowExecutor { node, resolvedInput, executionContext in
+            guard let tool = node.tool else {
+                throw WorkflowError.missingTool(nodeID: node.id)
+            }
+            let call = ToolCall(
+                id: "workflow-\(node.id)",
+                name: tool,
+                input: resolvedInput
+            )
+            let (resolvedPayload, warnings) = try await guardrails.resolve(
+                .preToolUse, .preToolUse(call)
+            )
+            for warning in warnings {
+                emit(.verification(stage: .preToolUse, outcome: .warn(reason: warning)))
+            }
+            let effectiveCall: ToolCall
+            if case .preToolUse(let rewritten) = resolvedPayload {
+                effectiveCall = rewritten
+            } else {
+                effectiveCall = call
+            }
+            emit(.verification(stage: .preToolUse, outcome: .pass))
+
+            let inputData = (try? effectiveCall.input.data()) ?? Data("{}".utf8)
+            emit(.toolCall(name: effectiveCall.name, input: inputData))
+            try? await memory.append(UsageEvent(
+                viewID: viewID, kind: .toolInvoked,
+                text: "\(effectiveCall.name) \(String(decoding: inputData, as: UTF8.self))"
+            ))
+
+            let outputValue: JSONValue
+            do {
+                outputValue = try await tools.call(
+                    effectiveCall,
+                    context: executionContext.toolContext
+                )
+            } catch {
+                let output = Self.toolErrorOutput(error)
+                _ = try await guardrails.verify(
+                    .postToolUse,
+                    .postToolUse(
+                        name: effectiveCall.name,
+                        output: output,
+                        isError: true
+                    )
+                )
+                emit(.verification(stage: .postToolUse, outcome: .pass))
+                emit(.toolResult(name: effectiveCall.name, output: output))
+                throw error
+            }
+
+            let diagnosticValue = WorkflowOutputRedactor.diagnosticValue(
+                outputValue,
+                node: node,
+                descriptor: descriptorsByName[effectiveCall.name]
+            )
+            let diagnosticOutput = (try? diagnosticValue.data())
+                ?? Data(WorkflowFinalRenderer.displayString(diagnosticValue).utf8)
+            _ = try await guardrails.verify(
+                .postToolUse,
+                .postToolUse(name: effectiveCall.name, output: diagnosticOutput, isError: false)
+            )
+            emit(.verification(stage: .postToolUse, outcome: .pass))
+            emit(.toolResult(name: effectiveCall.name, output: diagnosticOutput))
+            try? await memory.append(UsageEvent(
+                viewID: viewID, kind: .toolResult,
+                text: "\(effectiveCall.name) -> \(String(decoding: diagnosticOutput, as: UTF8.self))"
+            ))
+            return outputValue
+        }
+
+        let result = try await withTurnDeadline(deadline) {
+            try await executor.execute(
+                validated,
+                context: WorkflowExecutionContext(toolContext: toolContext)
+            )
+        }
+
+        let final = (result.finalText ?? WorkflowFinalRenderer.displayString(result.finalValue))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .emptyAsNil
+            ?? "Done."
+        setPhase(.verifying, turn: turnID)
+        _ = try await withTurnDeadline(deadline) {
+            try await self.guardrails.verify(
+                .finalResult, .finalResult(final)
+            )
+        }
+        emit(.verification(stage: .finalResult, outcome: .pass))
+        try? await memory.append(UsageEvent(
+            viewID: viewID, kind: .llmResponse, text: final
+        ))
+        emit(.finalAnswer(final))
     }
 
     private func appendSkippedToolResults(
@@ -646,7 +803,7 @@ public actor Orchestrator {
         deadline: ContinuousClock.Instant?,
         transcript: inout [TranscriptEntry],
         emit: @Sendable (OrchestratorEvent) -> Void
-    ) async throws {
+    ) async throws -> Data {
         // `resolve` runs payload-rewriting rails (e.g. PIIRedactor in redact
         // mode) before the block checks, so the tool sees the sanitized input.
         // Raced against the turn budget so a slow rail can't overrun it.
@@ -682,7 +839,7 @@ public actor Orchestrator {
             // A hung or slow tool must not be able to overrun the turn budget,
             // so the invocation is raced against the deadline too.
             output = try await withTurnDeadline(deadline) {
-                try await self.tools.invoke(
+                try await self.tools.call(
                     name: effectiveCall.name, jsonInput: inputData, context: context
                 )
             }
@@ -736,6 +893,7 @@ public actor Orchestrator {
             content: String(decoding: output, as: UTF8.self),
             isError: isError
         ))
+        return output
     }
 
     // MARK: - Deadline

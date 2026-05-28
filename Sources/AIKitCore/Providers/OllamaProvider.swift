@@ -148,12 +148,13 @@ public struct OllamaProvider: LLMProvider {
         if let maxTokens = request.maxTokens {
             options["num_predict"] = .int(maxTokens)
         }
-        // `keep_alive` is a top-level Ollama key; everything else flows into
+        // These are top-level Ollama keys; everything else flows into
         // `options` (num_ctx, top_p, seed, stop, …) unless it shadows a
-        // reserved key the encoder already set.
+        // reserved key the encoder already set. `think: false` is important
+        // for small reasoning models used as low-latency workflow planners.
         for (key, value) in request.extraBody {
-            if key == "keep_alive" {
-                body["keep_alive"] = value
+            if ["keep_alive", "format", "think"].contains(key) {
+                body[key] = value
             } else if !Self.reservedOptionKeys.contains(key) {
                 options[key] = value
             }

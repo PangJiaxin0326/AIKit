@@ -149,6 +149,134 @@ import AIKitTestSupport
     }
 }
 
+@Suite struct WorkflowSpecTests {
+    @Test func parsesTopologicalWorkflowJSONAndResolvesReferences() throws {
+        let spec = WorkflowSpec(
+            workflowID: "wf_join",
+            intent: "Join two source values.",
+            nodes: [
+                WorkflowNode(
+                    id: "a",
+                    tool: "tool1",
+                    input: .object(["x": .string("LLM value")])
+                ),
+                WorkflowNode(
+                    id: "b",
+                    tool: "tool2",
+                    input: .object(["y": .string("LLM value")])
+                ),
+                WorkflowNode(
+                    id: "c",
+                    tool: "tool3",
+                    dependsOn: ["a", "b"],
+                    input: .object([
+                        "left": workflowRef(node: "a", path: "/value"),
+                        "right": workflowRef(node: "b", path: "/value"),
+                    ])
+                ),
+            ],
+            final: .nodeOutput("c")
+        )
+        let json = try workflowJSONString(spec)
+        let response = LLMResponse(content: [.text(json)], stopReason: .endTurn)
+        guard case .workflow(let plan) = try OutputParser.parse(response) else {
+            Issue.record("expected workflow spec")
+            return
+        }
+
+        let validated = try WorkflowValidator.validate(
+            plan,
+            policy: WorkflowValidationPolicy(availableTools: ["tool1", "tool2", "tool3"])
+        )
+        #expect(validated.levels.map { $0.map(\.id).sorted() } == [["a", "b"], ["c"]])
+
+        let input = try WorkflowReferenceResolver.resolve(
+            plan.nodes[2].input,
+            outputs: [
+                "a": .object(["value": .string("left-value")]),
+                "b": .object(["value": .string("right-value")]),
+            ],
+            currentNodeID: "c"
+        )
+        #expect(input.objectValue?["left"]?.stringValue == "left-value")
+        #expect(input.objectValue?["right"]?.stringValue == "right-value")
+    }
+
+    @Test func rejectsNonTopologicalWorkflowOrder() throws {
+        let plan = WorkflowSpec(
+            workflowID: "wf_bad_order",
+            intent: "Reference a later node.",
+            nodes: [
+                WorkflowNode(
+                    id: "c",
+                    tool: "tool3",
+                    dependsOn: ["a"],
+                    input: .object(["left": workflowRef(node: "a", path: "/value")])
+                ),
+                WorkflowNode(id: "a", tool: "tool1"),
+            ],
+            final: .nodeOutput("c")
+        )
+        #expect(throws: WorkflowError.self) {
+            _ = try WorkflowValidator.validate(
+                plan,
+                policy: WorkflowValidationPolicy(availableTools: ["tool1", "tool3"])
+            )
+        }
+    }
+
+    @Test func parsesNativeWorkflowToolCall() throws {
+        let spec = WorkflowSpec(
+            workflowID: "wf_open_settings",
+            intent: "Open settings.",
+            nodes: [
+                WorkflowNode(
+                    id: "open_settings",
+                    tool: "navigate",
+                    input: .object(["destination": .string("settings")])
+                ),
+            ],
+            final: .nodeOutput("open_settings")
+        )
+        let input = try JSONValue(data: workflowJSONString(spec).data(using: .utf8)!)
+        let response = LLMResponse(
+            content: [.toolUse(id: "wf", name: WorkflowSpec.toolName, input: input)],
+            stopReason: .toolUse
+        )
+        guard case .workflow(let plan) = try OutputParser.parse(response) else {
+            Issue.record("expected workflow spec")
+            return
+        }
+        #expect(plan.nodes.compactMap(\.tool) == ["navigate"])
+    }
+
+    @Test func promptBuilderCanExposeWorkflowSchema() {
+        let context = ResolvedContext(
+            stack: [.init("home")],
+            systemPromptFragment: "",
+            toolNames: ["navigate", "setProfile"],
+            metadata: [:]
+        )
+        let request = PromptBuilder.build(
+            instruction: "Open settings and remember my theme",
+            context: context,
+            memory: [],
+            transcript: [],
+            toolManifest: [
+                ToolDescriptor(name: "navigate", description: "nav", inputSchema: .object([:])),
+                ToolDescriptor(name: "setProfile", description: "profile", inputSchema: .object([:])),
+            ],
+            model: "test-model",
+            workflowPlanningHint: true
+        )
+        #expect(request.system?.contains("WorkflowSpec is a topological DAG") == true)
+        #expect(request.system?.contains("- navigate: nav") == true)
+        #expect(request.system?.contains("Input schema:") == true)
+        #expect(request.system?.contains("- setProfile: profile") == true)
+        #expect(request.tools.map { $0.name } == [WorkflowSpec.toolName])
+    }
+}
+
 @Suite struct RetryPolicyTests {
     @Test func exponentialBackoffCaps() {
         let backoff = RetryPolicy.Backoff.exponential(base: 0.4, cap: 4.0)
@@ -216,7 +344,7 @@ import AIKitTestSupport
             memory: InMemoryMemoryStore(),
             contextResolver: resolver,
             guardrails: guardrails,
-            options: .init(model: "test", stream: false)
+            options: .init(model: "test", stream: false, workflowPlanning: false)
         )
     }
 
@@ -247,6 +375,44 @@ import AIKitTestSupport
         #expect(finalAnswer == "You're on settings now.")
     }
 
+    @Test func workflowPlanningRejectsDirectToolCallsWithoutInvokingTool() async throws {
+        let flag = InvocationFlag()
+        let registry = ToolRegistry()
+        await registry.register(NavigateTool { _, _ in
+            await flag.mark()
+            return .init(navigated: true)
+        })
+        let resolver = ContextResolver()
+        await resolver.push(ViewContext(
+            id: .init("home"), displayName: "Home", toolNames: ["navigate"]
+        ))
+        let provider = MockProvider(responses: [
+            LLMResponse(
+                content: [.toolUse(
+                    id: "t1", name: "navigate",
+                    input: .object(["destination": .string("settings")])
+                )],
+                stopReason: .toolUse
+            ),
+        ])
+        let orchestrator = Orchestrator(
+            llm: LLMClient(provider: provider),
+            tools: registry,
+            memory: InMemoryMemoryStore(),
+            contextResolver: resolver,
+            guardrails: PolicyEngine(),
+            options: .init(model: "test", stream: false)
+        )
+
+        var caught: (any Error)?
+        for try await event in await orchestrator.run("Go to settings") {
+            if case .error(let error) = event { caught = error }
+        }
+        #expect(caught is OutputParser.ParserError)
+        #expect(await flag.didInvoke == false)
+        #expect(provider.receivedRequests.count == 1)
+    }
+
     @Test func malformedToolInputCorrectedOnSecondAttemptWithoutOrphanToolMessage() async throws {
         let registry = ToolRegistry()
         await registry.register(NavigateTool { input, _ in
@@ -275,7 +441,8 @@ import AIKitTestSupport
             guardrails: PolicyEngine(),
             options: .init(
                 model: "test", stream: false,
-                retry: .init(maxAttempts: 2, backoff: .none)
+                retry: .init(maxAttempts: 2, backoff: .none),
+                workflowPlanning: false
             )
         )
 
@@ -333,7 +500,8 @@ import AIKitTestSupport
             guardrails: PolicyEngine(),
             options: .init(
                 model: "test", stream: false,
-                retry: .init(maxAttempts: 2, backoff: .none)
+                retry: .init(maxAttempts: 2, backoff: .none),
+                workflowPlanning: false
             )
         )
 
@@ -385,7 +553,8 @@ import AIKitTestSupport
             guardrails: PolicyEngine(),
             options: .init(
                 model: "test", stream: false,
-                retry: .init(maxAttempts: 2, backoff: .none)
+                retry: .init(maxAttempts: 2, backoff: .none),
+                workflowPlanning: false
             )
         )
 
@@ -451,7 +620,8 @@ import AIKitTestSupport
             guardrails: PolicyEngine(),
             options: .init(
                 model: "test", stream: false,
-                retry: .init(maxAttempts: 2, backoff: .none)
+                retry: .init(maxAttempts: 2, backoff: .none),
+                workflowPlanning: false
             )
         )
 
@@ -499,7 +669,8 @@ import AIKitTestSupport
             guardrails: PolicyEngine(rails: [RecordingPostToolUseRail(recorder: recorder)]),
             options: .init(
                 model: "test", stream: false,
-                retry: .init(maxAttempts: 1, backoff: .none)
+                retry: .init(maxAttempts: 1, backoff: .none),
+                workflowPlanning: false
             )
         )
 
@@ -534,7 +705,8 @@ import AIKitTestSupport
             guardrails: PolicyEngine(rails: [BlockingPostToolUseRail()]),
             options: .init(
                 model: "test", stream: false,
-                retry: .init(maxAttempts: 1, backoff: .none)
+                retry: .init(maxAttempts: 1, backoff: .none),
+                workflowPlanning: false
             )
         )
 
@@ -665,7 +837,7 @@ import AIKitTestSupport
             memory: InMemoryMemoryStore(),
             contextResolver: resolver,
             guardrails: PolicyEngine(rails: [PIIRedactor(mode: .redact)]),
-            options: .init(stream: false)
+            options: .init(stream: false, workflowPlanning: false)
         )
         for try await event in await orchestrator.run("go") {
             if case .error(let e) = event { Issue.record("unexpected: \(e)") }
@@ -674,6 +846,95 @@ import AIKitTestSupport
         #expect(destination?.contains("[REDACTED]") == true)
         #expect(destination?.contains("a@b.com") == false)
     }
+
+    @Test func workflowSpecExecutesTopologicalDAGWithoutSecondLLMCall() async throws {
+        let recorder = WorkflowRecorder()
+        let registry = ToolRegistry()
+        await registry.register(FindContactTool(recorder: recorder))
+        await registry.register(CreateReminderTool(recorder: recorder))
+        await registry.register(NavigateTool { input, _ in
+            await recorder.record("navigate:\(input.destination)")
+            return .init(navigated: true)
+        })
+        let resolver = ContextResolver()
+        await resolver.push(ViewContext(
+            id: .init("home"),
+            displayName: "Home",
+            toolNames: ["findContact", "createReminder", "navigate"]
+        ))
+        let workflow = try workflowJSONString(WorkflowSpec(
+            workflowID: "wf_call_alex",
+            intent: "Find Alex, create a reminder, and open reminders.",
+            nodes: [
+                WorkflowNode(
+                    id: "find_alex",
+                    tool: "findContact",
+                    input: .object(["query": .string("Alex")])
+                ),
+                WorkflowNode(
+                    id: "make_reminder",
+                    tool: "createReminder",
+                    dependsOn: ["find_alex"],
+                    input: .object([
+                        "title": .string("Call Alex"),
+                        "contactID": workflowRef(node: "find_alex", path: "/contactID"),
+                    ])
+                ),
+                WorkflowNode(
+                    id: "open_reminders",
+                    tool: "navigate",
+                    dependsOn: ["make_reminder"],
+                    input: .object(["destination": .string("reminders")])
+                ),
+            ],
+            final: .message("Done.")
+        ))
+        let provider = MockProvider(responses: [
+            LLMResponse(content: [.text(workflow)], stopReason: .endTurn),
+        ])
+        let orchestrator = Orchestrator(
+            llm: LLMClient(provider: provider),
+            tools: registry,
+            memory: InMemoryMemoryStore(),
+            contextResolver: resolver,
+            guardrails: PolicyEngine(),
+            options: .init(model: "test", stream: false)
+        )
+
+        var toolNames: [String] = []
+        var final: String?
+        for try await event in await orchestrator.run(
+            "Find Alex, create a reminder to call them, then open reminders."
+        ) {
+            if case .toolCall(let name, _) = event { toolNames.append(name) }
+            if case .finalAnswer(let answer) = event { final = answer }
+            if case .error(let error) = event { Issue.record("unexpected: \(error)") }
+        }
+
+        #expect(toolNames == ["findContact", "createReminder", "navigate"])
+        #expect(final == "Done.")
+        #expect(provider.receivedRequests.count == 1)
+        #expect(await recorder.events == [
+            "find:Alex",
+            "reminder:Call Alex:contact-alex",
+            "navigate:reminders",
+        ])
+    }
+}
+
+private func workflowJSONString(_ spec: WorkflowSpec) throws -> String {
+    let data = try JSONEncoder().encode(spec)
+    return String(decoding: data, as: UTF8.self)
+}
+
+private func workflowRef(node: String, path: String) -> JSONValue {
+    .object([
+        "$ref": .object([
+            "source": .string("node"),
+            "node": .string(node),
+            "path": .string(path),
+        ]),
+    ])
 }
 
 private actor SeenInput {
@@ -700,6 +961,14 @@ private actor ToolInvocationRecorder {
 
     func record(_ destination: String) {
         destinations.append(destination)
+    }
+}
+
+private actor WorkflowRecorder {
+    private(set) var events: [String] = []
+
+    func record(_ event: String) {
+        events.append(event)
     }
 }
 
@@ -767,6 +1036,65 @@ private func hasOnlyMatchedToolResults(in messages: [Message]) -> Bool {
     return true
 }
 
+private struct FindContactTool: Tool {
+    struct Input: Codable, Sendable {
+        let query: String
+    }
+
+    struct Output: Codable, Sendable {
+        let contactID: String
+        let displayName: String
+    }
+
+    static let name = "findContact"
+    static let description = "Find a contact by name."
+    static let inputSchema = ToolSchema.object(
+        properties: ["query": .string(description: "Contact name")],
+        required: ["query"]
+    )
+
+    let recorder: WorkflowRecorder
+
+    func call(_ input: Input, in context: ToolContext) async throws -> Output {
+        await recorder.record("find:\(input.query)")
+        return Output(contactID: "contact-alex", displayName: input.query)
+    }
+}
+
+private struct CreateReminderTool: Tool {
+    struct Input: Codable, Sendable {
+        let title: String
+        let contactID: String
+    }
+
+    struct Output: Codable, Sendable {
+        let reminderID: String
+        let title: String
+        let contactID: String
+    }
+
+    static let name = "createReminder"
+    static let description = "Create a reminder, optionally attached to a contact."
+    static let inputSchema = ToolSchema.object(
+        properties: [
+            "title": .string(description: "Reminder title"),
+            "contactID": .string(description: "Contact identifier"),
+        ],
+        required: ["title", "contactID"]
+    )
+
+    let recorder: WorkflowRecorder
+
+    func call(_ input: Input, in context: ToolContext) async throws -> Output {
+        await recorder.record("reminder:\(input.title):\(input.contactID)")
+        return Output(
+            reminderID: "reminder-1",
+            title: input.title,
+            contactID: input.contactID
+        )
+    }
+}
+
 private struct EmptyInputTool: Tool {
     struct Input: Codable, Sendable {}
     struct Output: Codable, Sendable {
@@ -775,7 +1103,7 @@ private struct EmptyInputTool: Tool {
 
     static let name = "emptyInput"
     static let description = "A no-input test tool."
-    static let schema = ToolSchema.object(properties: [:])
+    static let inputSchema = ToolSchema.object(properties: [:])
 
     let handler: @Sendable () async -> Void
 
@@ -783,7 +1111,7 @@ private struct EmptyInputTool: Tool {
         self.handler = handler
     }
 
-    func invoke(_ input: Input, in context: ToolContext) async throws -> Output {
+    func call(_ input: Input, in context: ToolContext) async throws -> Output {
         await handler()
         return Output(ok: true)
     }
@@ -873,7 +1201,10 @@ private final class SlowProvider: LLMProvider, @unchecked Sendable {
             memory: InMemoryMemoryStore(),
             contextResolver: resolver,
             guardrails: PolicyEngine(),
-            options: .init(model: "test", stream: false, toolCallFallback: true)
+            options: .init(
+                model: "test", stream: false,
+                toolCallFallback: true, workflowPlanning: false
+            )
         )
 
         var toolCalled = false
@@ -928,7 +1259,7 @@ private final class SlowProvider: LLMProvider, @unchecked Sendable {
                 memory: InMemoryMemoryStore(),
                 contextResolver: resolver,
                 guardrails: PolicyEngine(),
-                options: .init(model: "test", stream: false)
+                options: .init(model: "test", stream: false, workflowPlanning: false)
             )
             for try await _ in await orchestrator.run("hi") {}
             return try #require(provider.receivedRequests.first?.system)
@@ -982,7 +1313,8 @@ private struct SlowGuardrail: Guardrail {
             contextResolver: resolver,
             guardrails: PolicyEngine(),
             options: .init(
-                model: "test", stream: false, toolCallFallback: fallback
+                model: "test", stream: false,
+                toolCallFallback: fallback, workflowPlanning: false
             )
         )
         var toolRan = false
@@ -1116,7 +1448,10 @@ private struct SlowGuardrail: Guardrail {
             memory: InMemoryMemoryStore(),
             contextResolver: resolver,
             guardrails: PolicyEngine(),
-            options: .init(model: "test", stream: false, toolCallFallback: true)
+            options: .init(
+                model: "test", stream: false,
+                toolCallFallback: true, workflowPlanning: false
+            )
         )
         var warned = false
         var final: String?
@@ -1207,7 +1542,8 @@ private struct SlowGuardrail: Guardrail {
             guardrails: PolicyEngine(),
             options: .init(
                 model: "test", stream: false,
-                retry: .init(maxAttempts: 1), maxTurnDuration: 0.2
+                retry: .init(maxAttempts: 1), maxTurnDuration: 0.2,
+                workflowPlanning: false
             )
         )
         let start = ContinuousClock.now

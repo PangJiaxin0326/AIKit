@@ -10,14 +10,14 @@ private struct EchoTool: Tool {
 
     static let name = "echo"
     static let description = "Echoes input back, recording the call in memory."
-    static let schema = ToolSchema.object(
+    static let inputSchema = ToolSchema.object(
         properties: ["text": .string(description: "anything")],
         required: ["text"]
     )
 
     let memory: any MemoryStore
 
-    func invoke(_ input: Input, in context: ToolContext) async throws -> Output {
+    func call(_ input: Input, in context: ToolContext) async throws -> Output {
         try await memory.append(UsageEvent(
             viewID: ViewContext.ID(context.viewID),
             kind: .toolInvoked,
@@ -35,7 +35,7 @@ private struct EchoTool: Tool {
         let context = ToolContext(viewID: "home")
 
         let input = try JSONEncoder().encode(EchoTool.Input(text: "hi"))
-        let outData = try await registry.invoke(
+        let outData = try await registry.call(
             name: "echo", jsonInput: input, context: context
         )
         let output = try JSONDecoder().decode(EchoTool.Output.self, from: outData)
@@ -70,10 +70,23 @@ private struct EchoTool: Tool {
         #expect(all.map(\.name) == ["echo", "searchMemory"])
     }
 
+    @Test func builtInDescriptorsExposeWorkflowMetadata() {
+        let navigate = NavigateTool.descriptor
+        #expect(navigate.outputSchema != nil)
+        #expect(navigate.annotations?.sideEffect == .localWrite)
+        #expect(navigate.annotations?.sensitiveOutput == ToolAnnotations.SensitiveOutput.none)
+        #expect(navigate.inputExamples?.isEmpty == false)
+
+        let search = SearchMemoryTool.descriptor
+        #expect(search.outputSchema != nil)
+        #expect(search.annotations?.isReadOnly == true)
+        #expect(search.annotations?.sensitiveOutput == .privateContent)
+    }
+
     @Test func unknownToolThrows() async {
         let registry = ToolRegistry()
         await #expect(throws: ToolRegistryError.self) {
-            try await registry.invoke(
+            try await registry.call(
                 name: "nope",
                 jsonInput: Data("{}".utf8),
                 context: ToolContext(viewID: "v")
@@ -235,7 +248,7 @@ private struct EchoTool: Tool {
             value: 4
         )
         let setData = try JSONEncoder().encode(setInput)
-        let outputData = try await registry.invoke(
+        let outputData = try await registry.call(
             name: SetAIKitConfigurationTool.name,
             jsonInput: setData,
             context: context
@@ -252,7 +265,7 @@ private struct EchoTool: Tool {
         #expect(snapshot.runtime.maxIterations == 4)
 
         let getData = try JSONEncoder().encode(GetAIKitConfigurationTool.Input())
-        let readData = try await registry.invoke(
+        let readData = try await registry.call(
             name: GetAIKitConfigurationTool.name,
             jsonInput: getData,
             context: context

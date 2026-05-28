@@ -32,7 +32,8 @@ public enum PromptBuilder {
         temperature: Double? = nil,
         maxTokens: Int? = nil,
         extraBody: [String: JSONValue] = [:],
-        toolCallFallbackHint: Bool = false
+        toolCallFallbackHint: Bool = false,
+        workflowPlanningHint: Bool = false
     ) -> LLMRequest {
         var systemParts = [basePreamble]
         if !context.systemPromptFragment.isEmpty {
@@ -48,9 +49,12 @@ public enum PromptBuilder {
 
         // Tools restricted to the view's subset (the manifest is already
         // filtered by the registry, but be defensive about empty subsets).
-        let tools = toolManifest.filter { context.toolNames.contains($0.name) }
+        var tools = toolManifest.filter { context.toolNames.contains($0.name) }
 
-        if toolCallFallbackHint, !tools.isEmpty {
+        if workflowPlanningHint, !tools.isEmpty {
+            systemParts.append(WorkflowPromptBuilder.planningInstruction(toolManifest: tools))
+            tools = [WorkflowSchema.descriptor(availableTools: tools)]
+        } else if toolCallFallbackHint, !tools.isEmpty {
             systemParts.append(toolFallbackInstruction)
         }
 
