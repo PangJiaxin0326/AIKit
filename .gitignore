@@ -13,3 +13,7 @@ DerivedData/
 # Local tooling
 .claude/
 .DS_Store
+
+# Markdown docs
+*.md
+!README.md
