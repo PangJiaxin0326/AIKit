@@ -22,7 +22,10 @@ let package = Package(
         .library(name: "AIKitUI", targets: ["AIKitUI"]),
     ],
     dependencies: [
-        .package(path: "../AIToolKit"),
+        // Depend on the published AIToolKit (not a local path) so AIKit
+        // resolves standalone when cloned, and so its identity matches the
+        // AIToolKit MultiModalKit pulls in (no "conflicting identity" warning).
+        .package(url: "https://github.com/PangJiaxin0326/AIToolKit.git", branch: "main"),
         .package(url: "https://github.com/PangJiaxin0326/MultiModalKit.git", branch: "main"),
     ],
     targets: [
