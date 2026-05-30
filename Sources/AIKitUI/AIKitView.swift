@@ -120,6 +120,33 @@ public final class AIKitSession {
     }
 }
 
+/// One proportion scale shared across AIKit's UI — the configuration
+/// dashboard and the floating chatbot — so every surface reads as a single,
+/// deliberately measured system rather than a stack of defaults.
+enum AIKitMetrics {
+    /// Gap between the stacked configuration cards.
+    static let sectionSpacing: CGFloat = 24
+    /// Gap between rows within a card.
+    static let rowSpacing: CGFloat = 16
+    /// Inset inside each card.
+    static let cardPadding: CGFloat = 20
+    /// Margin around the whole dashboard column.
+    static let pagePadding: CGFloat = 24
+    /// Cards and their icon badges share one continuous ("squircle") curve.
+    static let cardRadius: CGFloat = 20
+    static let fieldRadius: CGFloat = 10
+    static let badgeRadius: CGFloat = 8
+    static let badgeSize: CGFloat = 30
+    /// Comfortable reading measure; the column centers within wider windows.
+    static let contentWidth: CGFloat = 640
+
+    /// Floating chatbot overlay — pet button, glass capsule, detail panel.
+    static let petDiameter: CGFloat = 58
+    static let edgeInset: CGFloat = 16
+    static let panelRadius: CGFloat = 22
+    static let panelWidth: CGFloat = 380
+}
+
 /// A SwiftUI state-management surface for AIKit's Core, Capability, Runtime,
 /// and Safety configuration.
 public struct AIKitView: View {
@@ -163,7 +190,7 @@ public struct AIKitView: View {
 
     private var dashboard: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
+            VStack(alignment: .leading, spacing: AIKitMetrics.sectionSpacing) {
                 header
                 coreSection
                 capabilitySection
@@ -174,31 +201,47 @@ public struct AIKitView: View {
                 }
                 resetFooter
             }
-            .padding()
-            .frame(maxWidth: 920, alignment: .leading)
+            .padding(AIKitMetrics.pagePadding)
+            .frame(maxWidth: AIKitMetrics.contentWidth, alignment: .leading)
+            .frame(maxWidth: .infinity)
+            .animation(.snappy(duration: 0.25), value: model.recentChanges.count)
         }
+        .scrollIndicators(.hidden)
+        .background(.background.secondary)
     }
 
     private var header: some View {
-        HStack(alignment: .firstTextBaseline) {
-            VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline) {
                 Text("AIKit")
-                    .font(.title2.weight(.semibold))
-                Text("Core, Capability, Runtime, Safety")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
+                    .font(.largeTitle.weight(.bold))
+                Spacer(minLength: 12)
+                statusBadge
             }
-            Spacer(minLength: 12)
-            if let status = model.status {
+            Text("Core · Capability · Runtime · Safety")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 4)
+        .padding(.bottom, 2)
+        .animation(.snappy(duration: 0.2), value: model.status)
+    }
+
+    @ViewBuilder
+    private var statusBadge: some View {
+        if let status = model.status {
+            HStack(spacing: 5) {
+                Image(systemName: "checkmark.circle.fill")
                 Text(status)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
             }
+            .font(.footnote.weight(.medium))
+            .foregroundStyle(.secondary)
+            .transition(.opacity.combined(with: .move(edge: .trailing)))
         }
     }
 
     private var coreSection: some View {
-        AIKitConfigurationSection(title: "Core", systemImage: "cpu") {
+        AIKitConfigurationSection(title: "Core", systemImage: "cpu", tint: .blue) {
             LabeledContent("Provider") {
                 Picker("Provider", selection: providerBinding) {
                     ForEach(AIKitProviderDefinition.all) { provider in
@@ -321,21 +364,27 @@ public struct AIKitView: View {
     }
 
     private var capabilitySection: some View {
-        AIKitConfigurationSection(title: "Capability", systemImage: "slider.horizontal.3") {
+        AIKitConfigurationSection(title: "Capability", systemImage: "slider.horizontal.3", tint: .purple) {
             LabeledContent("Context") {
                 TextField("Display name", text: binding(\.capability.contextDisplayName))
                     .multilineTextAlignment(.trailing)
             }
-            VStack(alignment: .leading, spacing: 6) {
+            VStack(alignment: .leading, spacing: 8) {
                 Text("System prompt")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                 TextEditor(text: binding(\.capability.systemPromptFragment))
-                    .font(.body)
-                    .frame(minHeight: 84)
+                    .font(.callout)
+                    .scrollContentBackground(.hidden)
+                    .padding(8)
+                    .frame(minHeight: 92)
+                    .background(
+                        .background.secondary,
+                        in: RoundedRectangle(cornerRadius: AIKitMetrics.fieldRadius, style: .continuous)
+                    )
                     .overlay {
-                        RoundedRectangle(cornerRadius: 6)
-                            .stroke(.quaternary)
+                        RoundedRectangle(cornerRadius: AIKitMetrics.fieldRadius, style: .continuous)
+                            .strokeBorder(.separator.opacity(0.5), lineWidth: 0.5)
                     }
             }
             LabeledContent("Memory window") {
@@ -367,7 +416,7 @@ public struct AIKitView: View {
     }
 
     private var runtimeSection: some View {
-        AIKitConfigurationSection(title: "Runtime", systemImage: "point.3.connected.trianglepath.dotted") {
+        AIKitConfigurationSection(title: "Runtime", systemImage: "point.3.connected.trianglepath.dotted", tint: .teal) {
             Toggle("Stream responses", isOn: binding(\.runtime.streamsResponses))
             LabeledContent("Max iterations") {
                 Stepper(
@@ -390,7 +439,7 @@ public struct AIKitView: View {
     }
 
     private var safetySection: some View {
-        AIKitConfigurationSection(title: "Safety", systemImage: "shield.lefthalf.filled") {
+        AIKitConfigurationSection(title: "Safety", systemImage: "shield.lefthalf.filled", tint: .green) {
             Toggle("PII redaction", isOn: binding(\.safety.piiRedactionEnabled))
             Toggle("Injection sniffing", isOn: binding(\.safety.injectionSniffingEnabled))
             LabeledContent("Output cap") {
@@ -409,17 +458,30 @@ public struct AIKitView: View {
     }
 
     private var changeLogSection: some View {
-        AIKitConfigurationSection(title: "Configuration Activity", systemImage: "clock") {
-            ForEach(model.recentChanges) { change in
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(change.title)
-                        .font(.subheadline)
-                    Text(change.valueDescription)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(2)
+        AIKitConfigurationSection(
+            title: "Configuration Activity",
+            systemImage: "clock.arrow.circlepath",
+            tint: .gray
+        ) {
+            VStack(alignment: .leading, spacing: 14) {
+                ForEach(model.recentChanges) { change in
+                    HStack(alignment: .top, spacing: 10) {
+                        Circle()
+                            .fill(.tertiary)
+                            .frame(width: 6, height: 6)
+                            .padding(.top, 6)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(change.title)
+                                .font(.subheadline)
+                            Text(change.valueDescription)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(2)
+                        }
+                        Spacer(minLength: 0)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
     }
@@ -430,11 +492,14 @@ public struct AIKitView: View {
             Button(role: .destructive) {
                 model.resetToDefaults()
             } label: {
-                Label("Reset", systemImage: "arrow.counterclockwise")
+                Label("Reset to defaults", systemImage: "arrow.counterclockwise")
+                    .font(.callout)
             }
             .buttonStyle(.bordered)
+            .tint(.red)
+            Spacer()
         }
-        .frame(maxWidth: .infinity, alignment: .trailing)
+        .padding(.top, 4)
     }
 
     private var selectedProvider: AIKitProviderKind {
@@ -629,8 +694,8 @@ struct AssistantChatbotOverlay: View {
 
     private let orchestrator: Orchestrator
 
-    private let petDiameter: CGFloat = 58
-    private let edgeInset: CGFloat = 16
+    private let petDiameter = AIKitMetrics.petDiameter
+    private let edgeInset = AIKitMetrics.edgeInset
 
     @MainActor
     init(orchestrator: Orchestrator) {
@@ -1161,12 +1226,27 @@ struct AssistantChatbotOverlay: View {
     }
 
     private func reasonPanel(_ reason: String) -> some View {
-        ScrollView(.horizontal, showsIndicators: false) {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.callout)
+                .foregroundStyle(.orange)
             Text(reason)
                 .font(.callout)
                 .foregroundStyle(.primary)
                 .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .padding(12)
+        .frame(maxWidth: 280, alignment: .leading)
+        .background(
+            .regularMaterial,
+            in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .strokeBorder(.orange.opacity(0.3), lineWidth: 0.5)
+        }
+        .shadow(color: .black.opacity(0.12), radius: 12, y: 4)
     }
 
     /// Centers the capsule group: docked to the pet's edge at the pet's
@@ -1232,26 +1312,8 @@ struct AssistantChatbotOverlay: View {
     }
 
     private var dialog: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Label("AIKit Assistant", systemImage: "sparkles")
-                    .font(.headline)
-                Spacer()
-                Button {
-                    Task { await refreshSnapshot() }
-                } label: {
-                    Image(systemName: "arrow.clockwise")
-                }
-                .buttonStyle(.borderless)
-                Button {
-                    withAnimation(.spring(duration: 0.24)) {
-                        isDialogPresented = false
-                    }
-                } label: {
-                    Image(systemName: "xmark")
-                }
-                .buttonStyle(.borderless)
-            }
+        VStack(alignment: .leading, spacing: 14) {
+            dialogHeader
 
             Picker("Menu", selection: $selectedMenu) {
                 ForEach(ChatbotMenu.allCases) { menu in
@@ -1260,55 +1322,116 @@ struct AssistantChatbotOverlay: View {
             }
             .pickerStyle(.segmented)
 
-            Divider()
-
             ScrollView {
                 menuContent
                     .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.vertical, 2)
             }
+            .scrollIndicators(.hidden)
             .frame(maxHeight: 260)
 
-            if !session.reasoningText.isEmpty {
-                Text(session.reasoningText)
-                    .font(.caption)
-                    .italic()
-                    .foregroundStyle(.tertiary)
-                    .lineLimit(3)
-            }
-
-            if !session.streamingText.isEmpty {
-                Text(session.streamingText)
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(4)
-            }
-
-            if let error = session.lastError {
-                Text(error)
-                    .font(.caption)
-                    .foregroundStyle(.red)
-                    .lineLimit(3)
-            }
-
-            HStack(alignment: .bottom, spacing: 8) {
-                TextField("Prompt", text: $draft, axis: .vertical)
-                    .textFieldStyle(.roundedBorder)
-                    .lineLimit(1...4)
-                    .disabled(session.isRunning)
-                    .onSubmit(submit)
-                Button(action: submit) {
-                    Image(systemName: "paperplane.fill")
-                }
-                .disabled(session.isRunning || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                .buttonStyle(.borderedProminent)
-            }
+            dialogTranscript
+            dialogInput
         }
-        .padding(14)
-        .frame(maxWidth: 380)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+        .padding(18)
+        .frame(maxWidth: AIKitMetrics.panelWidth)
+        .background(
+            .regularMaterial,
+            in: RoundedRectangle(cornerRadius: AIKitMetrics.panelRadius, style: .continuous)
+        )
         .overlay {
-            RoundedRectangle(cornerRadius: 8)
-                .stroke(.quaternary)
+            RoundedRectangle(cornerRadius: AIKitMetrics.panelRadius, style: .continuous)
+                .strokeBorder(.separator.opacity(0.5), lineWidth: 0.5)
+        }
+        .shadow(color: .black.opacity(0.18), radius: 24, y: 10)
+        .animation(.snappy(duration: 0.2), value: selectedMenu)
+    }
+
+    private var dialogHeader: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "sparkles")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: 26, height: 26)
+                .background(
+                    Color.accentColor.gradient,
+                    in: RoundedRectangle(cornerRadius: 7, style: .continuous)
+                )
+            Text("AIKit Assistant")
+                .font(.headline)
+            Spacer(minLength: 8)
+            Button {
+                Task { await refreshSnapshot() }
+            } label: {
+                Image(systemName: "arrow.clockwise")
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.borderless)
+            .accessibilityLabel("Refresh")
+            Button {
+                withAnimation(.spring(duration: 0.24)) { isDialogPresented = false }
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.callout.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 26, height: 26)
+                    .background(.background.secondary, in: Circle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Close")
+        }
+    }
+
+    @ViewBuilder
+    private var dialogTranscript: some View {
+        if !session.reasoningText.isEmpty {
+            Text(session.reasoningText)
+                .font(.caption)
+                .italic()
+                .foregroundStyle(.tertiary)
+                .lineLimit(3)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        if !session.streamingText.isEmpty {
+            Text(session.streamingText)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .lineLimit(4)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        if let error = session.lastError {
+            Label(error, systemImage: "exclamationmark.triangle.fill")
+                .font(.caption)
+                .foregroundStyle(.red)
+                .lineLimit(3)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private var dialogInput: some View {
+        HStack(alignment: .bottom, spacing: 8) {
+            TextField("Prompt", text: $draft, axis: .vertical)
+                .textFieldStyle(.plain)
+                .lineLimit(1...4)
+                .disabled(session.isRunning)
+                .onSubmit(submit)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(
+                    .background.secondary,
+                    in: RoundedRectangle(cornerRadius: AIKitMetrics.fieldRadius, style: .continuous)
+                )
+                .overlay {
+                    RoundedRectangle(cornerRadius: AIKitMetrics.fieldRadius, style: .continuous)
+                        .strokeBorder(.separator.opacity(0.5), lineWidth: 0.5)
+                }
+            Button(action: submit) {
+                Image(systemName: "paperplane.fill")
+            }
+            .disabled(session.isRunning || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            .buttonStyle(.borderedProminent)
+            .buttonBorderShape(.circle)
+            .accessibilityLabel("Send")
         }
     }
 
@@ -1350,8 +1473,10 @@ struct AssistantChatbotOverlay: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
             } else {
-                Text("No active context")
-                    .foregroundStyle(.secondary)
+                OverlayEmptyState(
+                    systemImage: "questionmark.bubble",
+                    message: "No active context"
+                )
             }
         }
     }
@@ -1371,8 +1496,10 @@ struct AssistantChatbotOverlay: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
             } else {
-                Text("No tools available")
-                    .foregroundStyle(.secondary)
+                OverlayEmptyState(
+                    systemImage: "wrench.and.screwdriver",
+                    message: "No tools available"
+                )
             }
         }
     }
@@ -1381,8 +1508,10 @@ struct AssistantChatbotOverlay: View {
         VStack(alignment: .leading, spacing: 10) {
             let activity = snapshot?.recentActivities ?? []
             if activity.isEmpty && session.lines.isEmpty {
-                Text("No recent activity")
-                    .foregroundStyle(.secondary)
+                OverlayEmptyState(
+                    systemImage: "clock",
+                    message: "No recent activity"
+                )
             }
             ForEach(activity) { event in
                 VStack(alignment: .leading, spacing: 2) {
@@ -1610,19 +1739,42 @@ private final class AIKitConfigurationViewModel {
 private struct AIKitConfigurationSection<Content: View>: View {
     let title: String
     let systemImage: String
+    var tint: Color = .accentColor
     @ViewBuilder var content: Content
 
+    private var shape: RoundedRectangle {
+        RoundedRectangle(cornerRadius: AIKitMetrics.cardRadius, style: .continuous)
+    }
+
     var body: some View {
-        GroupBox {
-            VStack(alignment: .leading, spacing: 12) {
-                content
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-        } label: {
-            Label(title, systemImage: systemImage)
-                .font(.headline)
+        VStack(alignment: .leading, spacing: AIKitMetrics.rowSpacing) {
+            header
+            content
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .groupBoxStyle(.automatic)
+        .padding(AIKitMetrics.cardPadding)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.background, in: shape)
+        .overlay {
+            shape.strokeBorder(.separator.opacity(0.5), lineWidth: 0.5)
+        }
+        .shadow(color: .black.opacity(0.05), radius: 10, y: 3)
+    }
+
+    private var header: some View {
+        HStack(spacing: 12) {
+            Image(systemName: systemImage)
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: AIKitMetrics.badgeSize, height: AIKitMetrics.badgeSize)
+                .background(
+                    tint.gradient,
+                    in: RoundedRectangle(cornerRadius: AIKitMetrics.badgeRadius, style: .continuous)
+                )
+            Text(title)
+                .font(.headline)
+            Spacer(minLength: 0)
+        }
     }
 }
 
@@ -1665,6 +1817,26 @@ private struct VoiceWaveformView: View {
         let ripple = 0.58 + 0.42 * sin(phase + Double(index) * 0.68)
         let height = 5 + 28 * clampedLevel * envelope * ripple
         return CGFloat(height)
+    }
+}
+
+/// A quiet, centered placeholder for the detail panel's empty menus — a soft
+/// glyph over a single line, so an empty state still feels considered.
+private struct OverlayEmptyState: View {
+    let systemImage: String
+    let message: String
+
+    var body: some View {
+        VStack(spacing: 8) {
+            Image(systemName: systemImage)
+                .font(.title2)
+                .foregroundStyle(.tertiary)
+            Text(message)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 28)
     }
 }
 

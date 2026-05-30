@@ -51,8 +51,8 @@ struct VoiceChatbotOverlay: View {
     /// scale-up.
     @GestureState private var isInteracting = false
 
-    private let petDiameter: CGFloat = 58
-    private let edgeInset: CGFloat = 16
+    private let petDiameter = AIKitMetrics.petDiameter
+    private let edgeInset = AIKitMetrics.edgeInset
 
     @MainActor
     init(orchestrator: Orchestrator) {
@@ -81,9 +81,9 @@ struct VoiceChatbotOverlay: View {
                     .animation(.snappy(duration: 0.18), value: controller.audioLevel)
             }
             Circle()
-                .fill(tint)
+                .fill(tint.gradient)
                 .frame(width: petDiameter, height: petDiameter)
-                .shadow(color: .black.opacity(0.18), radius: 6, y: 3)
+                .shadow(color: tint.opacity(0.35), radius: 8, y: 4)
                 .overlay {
                     Image(systemName: symbol)
                         .font(.title2.weight(.semibold))

@@ -156,6 +156,13 @@ public actor Orchestrator {
         /// calls in one response; the device executes them locally and emits
         /// the final answer without a second LLM pass.
         public var workflowPlanning: Bool
+        /// When true (and `workflowPlanning` is on), the synthetic
+        /// `workflow_run` tool advertises the *minimal* WorkflowSpec schema
+        /// (`{schema_version, nodes:[{id, tool, input}]}`) and the planning
+        /// instruction tells the model to emit only those fields. The runtime
+        /// defaults every omitted field, so the model produces far fewer
+        /// output tokens per plan. Requires a lenient `WorkflowSpec` decoder.
+        public var leanWorkflowSchema: Bool
 
         public init(
             model: String? = nil,
@@ -168,7 +175,8 @@ public actor Orchestrator {
             maxTokens: Int? = nil,
             extraBody: [String: JSONValue] = [:],
             toolCallFallback: Bool? = nil,
-            workflowPlanning: Bool = true
+            workflowPlanning: Bool = true,
+            leanWorkflowSchema: Bool = false
         ) {
             self.model = model
             self.maxIterations = maxIterations
@@ -181,6 +189,7 @@ public actor Orchestrator {
             self.extraBody = extraBody
             self.toolCallFallback = toolCallFallback
             self.workflowPlanning = workflowPlanning
+            self.leanWorkflowSchema = leanWorkflowSchema
         }
     }
 
@@ -451,7 +460,8 @@ public actor Orchestrator {
                     maxTokens: options.maxTokens,
                     extraBody: options.extraBody,
                     toolCallFallbackHint: useFallback,
-                    workflowPlanningHint: options.workflowPlanning
+                    workflowPlanningHint: options.workflowPlanning,
+                    leanWorkflowSchemaHint: options.leanWorkflowSchema
                 )
                 let rendered = RenderedPrompt(request: request, toolNames: context.toolNames)
                 emit(.promptBuilt(rendered))
