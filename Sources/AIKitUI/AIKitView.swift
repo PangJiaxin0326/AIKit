@@ -267,14 +267,17 @@ public struct AIKitView: View {
             LabeledContent("Timeout") {
                 TextField("Seconds", text: optionalDoubleBinding(\.core.timeout))
                     .multilineTextAlignment(.trailing)
+                    .aiKitFieldStyle()
             }
             LabeledContent("Temperature") {
                 TextField("Default", text: optionalDoubleBinding(\.core.temperature))
                     .multilineTextAlignment(.trailing)
+                    .aiKitFieldStyle()
             }
             LabeledContent("Max tokens") {
                 TextField("Default", text: optionalIntBinding(\.core.maxTokens))
                     .multilineTextAlignment(.trailing)
+                    .aiKitFieldStyle()
             }
         }
     }
@@ -291,6 +294,7 @@ public struct AIKitView: View {
                     .textInputAutocapitalization(.never)
                     #endif
                     .textContentType(.password)
+                    .aiKitFieldStyle()
             }
         case .ollama, .appleIntelligence:
             EmptyView()
@@ -354,6 +358,7 @@ public struct AIKitView: View {
                     #if os(iOS)
                     .textInputAutocapitalization(.never)
                     #endif
+                    .aiKitFieldStyle()
             } else {
                 Text(selectedProviderDefinition.streamingEndpoint.absoluteString)
                     .lineLimit(1)
@@ -368,6 +373,7 @@ public struct AIKitView: View {
             LabeledContent("Context") {
                 TextField("Display name", text: binding(\.capability.contextDisplayName))
                     .multilineTextAlignment(.trailing)
+                    .aiKitFieldStyle()
             }
             VStack(alignment: .leading, spacing: 8) {
                 Text("System prompt")
@@ -401,6 +407,7 @@ public struct AIKitView: View {
                         text: setBinding(\.capability.enabledToolNames)
                     )
                     .multilineTextAlignment(.trailing)
+                    .aiKitFieldStyle()
                 }
             } else {
                 VStack(alignment: .leading, spacing: 8) {
@@ -428,6 +435,7 @@ public struct AIKitView: View {
             LabeledContent("Turn budget") {
                 TextField("Seconds", text: optionalDoubleBinding(\.runtime.maxTurnDuration))
                     .multilineTextAlignment(.trailing)
+                    .aiKitFieldStyle()
             }
             Picker("Tool fallback", selection: binding(\.runtime.toolCallFallback)) {
                 ForEach(AIKitConfiguration.ToolCallFallbackMode.allCases, id: \.self) { mode in
@@ -445,14 +453,17 @@ public struct AIKitView: View {
             LabeledContent("Output cap") {
                 TextField("Characters", text: optionalIntBinding(\.safety.outputLengthLimit))
                     .multilineTextAlignment(.trailing)
+                    .aiKitFieldStyle()
             }
             LabeledContent("Guardrails") {
                 TextField("Comma-separated", text: setBinding(\.safety.enabledGuardrailIDs))
                     .multilineTextAlignment(.trailing)
+                    .aiKitFieldStyle()
             }
             LabeledContent("Tool allowlist") {
                 TextField("Comma-separated", text: setBinding(\.safety.allowlistedToolNames))
                     .multilineTextAlignment(.trailing)
+                    .aiKitFieldStyle()
             }
         }
     }
@@ -1312,7 +1323,7 @@ struct AssistantChatbotOverlay: View {
     }
 
     private var dialog: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: 12) {
             dialogHeader
 
             Picker("Menu", selection: $selectedMenu) {
@@ -1448,29 +1459,21 @@ struct AssistantChatbotOverlay: View {
     }
 
     private var contextContent: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 14) {
             if let snapshot, !snapshot.contexts.isEmpty {
                 ForEach(snapshot.contexts) { context in
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(context.displayName)
-                            .font(.subheadline.weight(.medium))
+                    OverlayDetailRow(title: context.displayName) {
                         Text(context.id.rawValue)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                            .monospaced()
                         if !context.systemPromptFragment.isEmpty {
                             Text(context.systemPromptFragment)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
                                 .lineLimit(3)
                         }
                         if !context.toolNames.isEmpty {
                             Text(context.toolNames.sorted().joined(separator: ", "))
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
                                 .lineLimit(2)
                         }
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
             } else {
                 OverlayEmptyState(
@@ -1482,18 +1485,13 @@ struct AssistantChatbotOverlay: View {
     }
 
     private var toolsContent: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 14) {
             if let snapshot, !snapshot.availableTools.isEmpty {
                 ForEach(snapshot.availableTools) { tool in
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text(tool.name)
-                            .font(.subheadline.weight(.medium))
+                    OverlayDetailRow(title: tool.name) {
                         Text(tool.description)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
                             .lineLimit(3)
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
             } else {
                 OverlayEmptyState(
@@ -1505,7 +1503,7 @@ struct AssistantChatbotOverlay: View {
     }
 
     private var activityContent: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 14) {
             let activity = snapshot?.recentActivities ?? []
             if activity.isEmpty && session.lines.isEmpty {
                 OverlayEmptyState(
@@ -1514,27 +1512,17 @@ struct AssistantChatbotOverlay: View {
                 )
             }
             ForEach(activity) { event in
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(event.kind.rawValue)
-                        .font(.caption.weight(.medium))
+                OverlayDetailRow(title: event.kind.rawValue) {
                     Text(event.payloadText)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
                         .lineLimit(3)
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
             }
             ForEach(session.lines.suffix(8)) { line in
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(line.role.uppercased())
-                        .font(.caption2.weight(.semibold))
-                        .foregroundStyle(.secondary)
+                OverlayDetailRow(title: line.role.capitalized) {
                     Text(line.text)
-                        .font(.caption)
                         .lineLimit(4)
                         .textSelection(.enabled)
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
     }
@@ -1820,6 +1808,29 @@ private struct VoiceWaveformView: View {
     }
 }
 
+/// One entry in the detail panel's menus: a prominent title tightly paired
+/// with its secondary detail lines. The clear type contrast — bold primary
+/// title over light secondary detail — is what makes each entry read as a
+/// heading with its data, rather than a stack of look-alike lines.
+private struct OverlayDetailRow<Detail: View>: View {
+    let title: String
+    @ViewBuilder var detail: Detail
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(title)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.primary)
+            VStack(alignment: .leading, spacing: 2) {
+                detail
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
 /// A quiet, centered placeholder for the detail panel's empty menus — a soft
 /// glyph over a single line, so an empty state still feels considered.
 private struct OverlayEmptyState: View {
@@ -1877,6 +1888,24 @@ private extension Comparable {
 }
 
 private extension View {
+    /// Inset pill treatment for an inline value field, so a trailing text
+    /// field reads as an editable target rather than text adrift in a row.
+    /// Shared with the system-prompt editor and the detail panel's input.
+    func aiKitFieldStyle() -> some View {
+        textFieldStyle(.plain)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .background(
+                .background.secondary,
+                in: RoundedRectangle(cornerRadius: AIKitMetrics.fieldRadius, style: .continuous)
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: AIKitMetrics.fieldRadius, style: .continuous)
+                    .strokeBorder(.separator.opacity(0.5), lineWidth: 0.5)
+            }
+            .frame(maxWidth: 200, alignment: .trailing)
+    }
+
     @ViewBuilder
     func chatbotCapsuleStyle(tint: Color) -> some View {
         if #available(iOS 26.0, macOS 26.0, visionOS 26.0, *) {
