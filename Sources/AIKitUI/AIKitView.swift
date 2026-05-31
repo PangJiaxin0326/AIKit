@@ -123,6 +123,10 @@ public final class AIKitSession {
 /// One proportion scale shared across AIKit's UI — the configuration
 /// dashboard and the floating chatbot — so every surface reads as a single,
 /// deliberately measured system rather than a stack of defaults.
+///
+/// Spacing follows one quiet rhythm (8 · 12 · 16 · 20 · 24); nested corner
+/// radii stay roughly concentric — an inset control's curve echoes the card
+/// that holds it — so the whole interface reads as a single hand.
 enum AIKitMetrics {
     /// Gap between the stacked configuration cards.
     static let sectionSpacing: CGFloat = 24
@@ -145,6 +149,11 @@ enum AIKitMetrics {
     static let edgeInset: CGFloat = 16
     static let panelRadius: CGFloat = 22
     static let panelWidth: CGFloat = 380
+    /// Inset inside the floating detail panel.
+    static let panelPadding: CGFloat = 20
+    /// Curve for soft cards floating inside or beside the panel — the
+    /// failure-reason note — sized to sit concentrically within the panel.
+    static let controlRadius: CGFloat = 14
 }
 
 /// A SwiftUI state-management surface for AIKit's Core, Capability, Runtime,
@@ -215,11 +224,12 @@ public struct AIKitView: View {
             HStack(alignment: .firstTextBaseline) {
                 Text("AIKit")
                     .font(.largeTitle.weight(.bold))
+                    .tracking(-0.5)
                 Spacer(minLength: 12)
                 statusBadge
             }
             Text("Core · Capability · Runtime · Safety")
-                .font(.callout)
+                .font(.subheadline)
                 .foregroundStyle(.secondary)
         }
         .padding(.horizontal, 4)
@@ -232,10 +242,14 @@ public struct AIKitView: View {
         if let status = model.status {
             HStack(spacing: 5) {
                 Image(systemName: "checkmark.circle.fill")
+                    .foregroundStyle(.green)
                 Text(status)
+                    .foregroundStyle(.secondary)
             }
             .font(.footnote.weight(.medium))
-            .foregroundStyle(.secondary)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .background(.background.secondary, in: Capsule())
             .transition(.opacity.combined(with: .move(edge: .trailing)))
         }
     }
@@ -384,14 +398,7 @@ public struct AIKitView: View {
                     .scrollContentBackground(.hidden)
                     .padding(8)
                     .frame(minHeight: 92)
-                    .background(
-                        .background.secondary,
-                        in: RoundedRectangle(cornerRadius: AIKitMetrics.fieldRadius, style: .continuous)
-                    )
-                    .overlay {
-                        RoundedRectangle(cornerRadius: AIKitMetrics.fieldRadius, style: .continuous)
-                            .strokeBorder(.separator.opacity(0.5), lineWidth: 0.5)
-                    }
+                    .aiKitContainerStyle()
             }
             LabeledContent("Memory window") {
                 Stepper(
@@ -1251,10 +1258,10 @@ struct AssistantChatbotOverlay: View {
         .frame(maxWidth: 280, alignment: .leading)
         .background(
             .regularMaterial,
-            in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+            in: RoundedRectangle(cornerRadius: AIKitMetrics.controlRadius, style: .continuous)
         )
         .overlay {
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
+            RoundedRectangle(cornerRadius: AIKitMetrics.controlRadius, style: .continuous)
                 .strokeBorder(.orange.opacity(0.3), lineWidth: 0.5)
         }
         .shadow(color: .black.opacity(0.12), radius: 12, y: 4)
@@ -1344,7 +1351,7 @@ struct AssistantChatbotOverlay: View {
             dialogTranscript
             dialogInput
         }
-        .padding(18)
+        .padding(AIKitMetrics.panelPadding)
         .frame(maxWidth: AIKitMetrics.panelWidth)
         .background(
             .regularMaterial,
@@ -1375,9 +1382,12 @@ struct AssistantChatbotOverlay: View {
                 Task { await refreshSnapshot() }
             } label: {
                 Image(systemName: "arrow.clockwise")
+                    .font(.callout.weight(.semibold))
                     .foregroundStyle(.secondary)
+                    .frame(width: 26, height: 26)
+                    .background(.background.secondary, in: Circle())
             }
-            .buttonStyle(.borderless)
+            .buttonStyle(.plain)
             .accessibilityLabel("Refresh")
             Button {
                 withAnimation(.spring(duration: 0.24)) { isDialogPresented = false }
@@ -1428,14 +1438,7 @@ struct AssistantChatbotOverlay: View {
                 .onSubmit(submit)
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
-                .background(
-                    .background.secondary,
-                    in: RoundedRectangle(cornerRadius: AIKitMetrics.fieldRadius, style: .continuous)
-                )
-                .overlay {
-                    RoundedRectangle(cornerRadius: AIKitMetrics.fieldRadius, style: .continuous)
-                        .strokeBorder(.separator.opacity(0.5), lineWidth: 0.5)
-                }
+                .aiKitContainerStyle()
             Button(action: submit) {
                 Image(systemName: "paperplane.fill")
             }
@@ -1888,21 +1891,29 @@ private extension Comparable {
 }
 
 private extension View {
+    /// The one inset-container treatment — a soft filled surface inside a
+    /// single hairline and one continuous curve — shared by every editable
+    /// place in the UI: trailing value fields, the system-prompt editor, the
+    /// panel's input. One curve, one hairline, so "a place you can type"
+    /// looks the same everywhere it appears.
+    func aiKitContainerStyle(
+        cornerRadius: CGFloat = AIKitMetrics.fieldRadius
+    ) -> some View {
+        let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+        return background(.background.secondary, in: shape)
+            .overlay {
+                shape.strokeBorder(.separator.opacity(0.5), lineWidth: 0.5)
+            }
+    }
+
     /// Inset pill treatment for an inline value field, so a trailing text
     /// field reads as an editable target rather than text adrift in a row.
-    /// Shared with the system-prompt editor and the detail panel's input.
+    /// Built on ``aiKitContainerStyle`` so it shares the same hairline.
     func aiKitFieldStyle() -> some View {
         textFieldStyle(.plain)
             .padding(.horizontal, 10)
             .padding(.vertical, 7)
-            .background(
-                .background.secondary,
-                in: RoundedRectangle(cornerRadius: AIKitMetrics.fieldRadius, style: .continuous)
-            )
-            .overlay {
-                RoundedRectangle(cornerRadius: AIKitMetrics.fieldRadius, style: .continuous)
-                    .strokeBorder(.separator.opacity(0.5), lineWidth: 0.5)
-            }
+            .aiKitContainerStyle()
             .frame(maxWidth: 200, alignment: .trailing)
     }
 
@@ -1915,6 +1926,9 @@ private extension View {
                 .overlay {
                     Capsule().stroke(tint.opacity(0.35))
                 }
+                // Lift the fallback capsule off the canvas so it carries the
+                // same quiet depth the OS-26 glass renders natively.
+                .shadow(color: tint.opacity(0.25), radius: 10, y: 4)
         }
     }
 }

@@ -83,7 +83,9 @@ struct VoiceChatbotOverlay: View {
             Circle()
                 .fill(tint.gradient)
                 .frame(width: petDiameter, height: petDiameter)
-                .shadow(color: tint.opacity(0.35), radius: 8, y: 4)
+                // One pet, one shadow: the same quiet, diffused lift the
+                // assistant capsule carries, so both overlay modes match.
+                .shadow(color: tint.opacity(0.25), radius: 10, y: 4)
                 .overlay {
                     Image(systemName: symbol)
                         .font(.title2.weight(.semibold))
