@@ -698,6 +698,7 @@ struct AssistantChatbotOverlay: View {
     @State private var voiceError: String?
     @State private var voiceTask: Task<Void, Never>?
     @State private var capsuleSize: CGSize = .zero
+    @State private var floatingSurfaceSize: CGSize = .zero
     /// The last instruction sent from the capsule, carried as context into
     /// a follow-up after a failure.
     @State private var lastInstruction = ""
@@ -752,25 +753,7 @@ struct AssistantChatbotOverlay: View {
                         .position(x: size.width / 2, y: size.height / 2)
                         .transition(.scale.combined(with: .opacity))
                 } else {
-                    floatingControl(in: size)
-                        .chatbotCapsuleStyle(tint: petFill)
-                        .onGeometryChange(for: CGSize.self) { proxy in
-                            proxy.size
-                        } action: { newSize in
-                            capsuleSize = newSize
-                        }
-                        // The failure note floats clear above the bar, anchored
-                        // to the capsule's top edge — so however tall it grows,
-                        // its base always sits a fixed gap above the bar instead
-                        // of overlapping it. It opens from the docked edge toward
-                        // the screen interior.
-                        .overlay(alignment: petEdge == .leading ? .topLeading : .topTrailing) {
-                            if isExpanded, activity.hasFailed, let reason = activity.failureReason {
-                                reasonPanel(reason)
-                                    .alignmentGuide(.top) { $0.height + 10 }
-                                    .transition(.opacity)
-                            }
-                        }
+                    floatingSurface(in: size)
                         .position(floatingCenter(
                             in: size,
                             keyboardOverlap: keyboardOverlap,
@@ -889,8 +872,8 @@ struct AssistantChatbotOverlay: View {
         return CGPoint(x: x, y: y.clamped(to: minY...maxY))
     }
 
-    /// Center for the rendered floating control, switching between the
-    /// expanded capsule row and the collapsed pet button.
+    /// Center for the rendered floating surface, switching between the
+    /// expanded failure/capsule stack and the collapsed pet button.
     private func floatingCenter(
         in size: CGSize,
         keyboardOverlap: CGFloat,
@@ -1126,6 +1109,33 @@ struct AssistantChatbotOverlay: View {
 
     private let capsuleSpacing: CGFloat = 0
     private let capsuleContentPadding: CGFloat = 12
+    private let failurePanelSpacing: CGFloat = 10
+
+    @ViewBuilder
+    private func floatingSurface(in size: CGSize) -> some View {
+        VStack(
+            alignment: petEdge == .leading ? .leading : .trailing,
+            spacing: failurePanelSpacing
+        ) {
+            if isExpanded, activity.hasFailed, let reason = activity.failureReason {
+                reasonPanel(reason)
+                    .transition(.opacity)
+            }
+
+            floatingControl(in: size)
+                .chatbotCapsuleStyle(tint: petFill)
+                .onGeometryChange(for: CGSize.self) { proxy in
+                    proxy.size
+                } action: { newSize in
+                    capsuleSize = newSize
+                }
+        }
+        .onGeometryChange(for: CGSize.self) { proxy in
+            proxy.size
+        } action: { newSize in
+            floatingSurfaceSize = newSize
+        }
+    }
 
     @ViewBuilder
     private func floatingControl(in size: CGSize) -> some View {
@@ -1137,17 +1147,6 @@ struct AssistantChatbotOverlay: View {
         }
         .frame(width: floatingControlWidth(in: size), alignment: .leading)
         .environment(\.layoutDirection, .leftToRight)
-    }
-
-    /// The fail-reason panel (when failed) stacked above the capsule row,
-    /// aligned to the pet's docked edge so it grows toward screen interior.
-    private func capsuleGroup(in size: CGSize) -> some View {
-        VStack(
-            alignment: petEdge == .leading ? .leading : .trailing,
-            spacing: 8
-        ) {
-            capsuleContent(in: size)
-        }
     }
 
     private func capsuleContent(in size: CGSize) -> some View {
@@ -1287,32 +1286,58 @@ struct AssistantChatbotOverlay: View {
         .shadow(color: .black.opacity(0.12), radius: 12, y: 4)
     }
 
-    /// Centers the capsule group: docked to the pet's edge at the pet's
-    /// vertical position — or pinned just above the keyboard.
+    /// Centers the expanded floating surface while keeping the capsule row
+    /// docked to the pet's edge — or pinned just above the keyboard.
     private func capsuleCenter(
         in size: CGSize,
         keyboardOverlap: CGFloat,
         keyboardVisible: Bool
     ) -> CGPoint {
-        let width = floatingControlWidth(in: size)
-        let height = floatingControlHeight
-        let minX = edgeInset + width / 2
-        let maxX = size.width - edgeInset - width / 2
-        let x = maxX >= minX
-            ? (petEdge == .leading ? minX : maxX)
+        let controlWidth = floatingControlWidth(in: size)
+        let controlHeight = floatingControlHeight
+        let surfaceWidth = max(floatingSurfaceSize.width, controlWidth)
+        let surfaceHeight = max(floatingSurfaceSize.height, controlHeight)
+
+        let controlMinX = edgeInset + controlWidth / 2
+        let controlMaxX = size.width - edgeInset - controlWidth / 2
+        let controlX = controlMaxX >= controlMinX
+            ? (petEdge == .leading ? controlMinX : controlMaxX)
             : size.width / 2
-        let minY = edgeInset + height / 2
+        let surfaceXOffset = (surfaceWidth - controlWidth) / 2
+        let targetX = petEdge == .leading
+            ? controlX + surfaceXOffset
+            : controlX - surfaceXOffset
+        let minX = edgeInset + surfaceWidth / 2
+        let maxX = size.width - edgeInset - surfaceWidth / 2
+        let x = maxX >= minX
+            ? targetX.clamped(to: minX...maxX)
+            : size.width / 2
+
+        let controlMinY = edgeInset + controlHeight / 2
+        let controlMaxY = max(
+            controlMinY,
+            maxFloatingCenterY(
+                in: size,
+                controlHeight: controlHeight,
+                keyboardOverlap: keyboardOverlap
+            )
+        )
+        let targetControlY = keyboardVisible
+            ? controlMaxY
+            : restingCenter(in: size).y
+        let controlY = targetControlY.clamped(to: controlMinY...controlMaxY)
+        let surfaceYOffset = (surfaceHeight - controlHeight) / 2
+        let targetY = controlY - surfaceYOffset
+        let minY = edgeInset + surfaceHeight / 2
         let maxY = max(
             minY,
             maxFloatingCenterY(
                 in: size,
-                controlHeight: height,
+                controlHeight: surfaceHeight,
                 keyboardOverlap: keyboardOverlap
             )
         )
-        let targetY = keyboardVisible
-            ? maxY
-            : restingCenter(in: size).y
+
         return CGPoint(x: x, y: targetY.clamped(to: minY...maxY))
     }
 
