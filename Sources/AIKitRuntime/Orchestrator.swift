@@ -171,12 +171,12 @@ public actor Orchestrator {
             retry: RetryPolicy = .default,
             maxTurnDuration: TimeInterval? = nil,
             memoryWindow: Int = 20,
-            temperature: Double? = nil,
+            temperature: Double? = 0.2,
             maxTokens: Int? = nil,
             extraBody: [String: JSONValue] = [:],
             toolCallFallback: Bool? = nil,
             workflowPlanning: Bool = true,
-            leanWorkflowSchema: Bool = false
+            leanWorkflowSchema: Bool = true
         ) {
             self.model = model
             self.maxIterations = maxIterations
@@ -400,6 +400,8 @@ public actor Orchestrator {
         plannerToolNames: Set<String>,
         sources: [String],
         useStructuredOutput: Bool = false,
+        useStructuredPlannerOutput: Bool? = nil,
+        useStructuredBinderOutput: Bool? = nil,
         autoBind: Bool = true,
         planCache: WorkflowPlanCache? = nil
     ) -> AsyncThrowingStream<OrchestratorEvent, any Error> {
@@ -415,6 +417,8 @@ public actor Orchestrator {
                     plannerToolNames: plannerToolNames,
                     sources: sources,
                     useStructuredOutput: useStructuredOutput,
+                    useStructuredPlannerOutput: useStructuredPlannerOutput,
+                    useStructuredBinderOutput: useStructuredBinderOutput,
                     autoBind: autoBind,
                     planCache: planCache,
                     turnID: turnID,
@@ -433,6 +437,8 @@ public actor Orchestrator {
         plannerToolNames: Set<String>,
         sources: [String],
         useStructuredOutput: Bool,
+        useStructuredPlannerOutput: Bool?,
+        useStructuredBinderOutput: Bool?,
         autoBind: Bool,
         planCache: WorkflowPlanCache?,
         turnID: Int,
@@ -471,6 +477,8 @@ public actor Orchestrator {
                 sources: sources,
                 temperature: options.temperature,
                 useStructuredOutput: useStructuredOutput,
+                useStructuredPlannerOutput: useStructuredPlannerOutput,
+                useStructuredBinderOutput: useStructuredBinderOutput,
                 autoBind: autoBind,
                 toolContext: ToolContext(
                     viewID: viewID.rawValue,

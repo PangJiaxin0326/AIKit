@@ -118,7 +118,7 @@ public struct AIKitConfiguration: Codable, Sendable, Hashable {
             ark: ProviderConfiguration = ProviderConfiguration(),
             other: ProviderConfiguration? = nil,
             timeout: TimeInterval? = nil,
-            temperature: Double? = nil,
+            temperature: Double? = 0.2,
             maxTokens: Int? = nil
         ) {
             self.activeProvider = activeProvider
@@ -188,7 +188,7 @@ public struct AIKitConfiguration: Codable, Sendable, Hashable {
                 forKey: .other
             ) ?? ProviderConfiguration()
             self.timeout = try container.decodeIfPresent(TimeInterval.self, forKey: .timeout)
-            self.temperature = try container.decodeIfPresent(Double.self, forKey: .temperature)
+            self.temperature = try container.decodeIfPresent(Double.self, forKey: .temperature) ?? 0.2
             self.maxTokens = try container.decodeIfPresent(Int.self, forKey: .maxTokens)
 
             if container.contains(.model) ||
@@ -325,17 +325,103 @@ public struct AIKitConfiguration: Codable, Sendable, Hashable {
         public var maxIterations: Int
         public var maxTurnDuration: TimeInterval?
         public var toolCallFallback: ToolCallFallbackMode
+        public var workflowPlanning: Bool
+        public var leanWorkflowSchema: Bool
+        public var twoRoundAutoBind: Bool
+        public var twoRoundStructuredPlannerOutput: Bool
+        public var twoRoundStructuredBinderOutput: Bool
+
+        private enum CodingKeys: String, CodingKey {
+            case streamsResponses
+            case maxIterations
+            case maxTurnDuration
+            case toolCallFallback
+            case workflowPlanning
+            case leanWorkflowSchema
+            case twoRoundAutoBind
+            case twoRoundStructuredPlannerOutput
+            case twoRoundStructuredBinderOutput
+        }
 
         public init(
             streamsResponses: Bool = true,
             maxIterations: Int = 8,
             maxTurnDuration: TimeInterval? = nil,
-            toolCallFallback: ToolCallFallbackMode = .automatic
+            toolCallFallback: ToolCallFallbackMode = .automatic,
+            workflowPlanning: Bool = true,
+            leanWorkflowSchema: Bool = true,
+            twoRoundAutoBind: Bool = true,
+            twoRoundStructuredPlannerOutput: Bool = false,
+            twoRoundStructuredBinderOutput: Bool = false
         ) {
             self.streamsResponses = streamsResponses
             self.maxIterations = maxIterations
             self.maxTurnDuration = maxTurnDuration
             self.toolCallFallback = toolCallFallback
+            self.workflowPlanning = workflowPlanning
+            self.leanWorkflowSchema = leanWorkflowSchema
+            self.twoRoundAutoBind = twoRoundAutoBind
+            self.twoRoundStructuredPlannerOutput = twoRoundStructuredPlannerOutput
+            self.twoRoundStructuredBinderOutput = twoRoundStructuredBinderOutput
+        }
+
+        public init(from decoder: any Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            self.streamsResponses = try container.decodeIfPresent(
+                Bool.self,
+                forKey: .streamsResponses
+            ) ?? true
+            self.maxIterations = try container.decodeIfPresent(
+                Int.self,
+                forKey: .maxIterations
+            ) ?? 8
+            self.maxTurnDuration = try container.decodeIfPresent(
+                TimeInterval.self,
+                forKey: .maxTurnDuration
+            )
+            self.toolCallFallback = try container.decodeIfPresent(
+                ToolCallFallbackMode.self,
+                forKey: .toolCallFallback
+            ) ?? .automatic
+            self.workflowPlanning = try container.decodeIfPresent(
+                Bool.self,
+                forKey: .workflowPlanning
+            ) ?? true
+            self.leanWorkflowSchema = try container.decodeIfPresent(
+                Bool.self,
+                forKey: .leanWorkflowSchema
+            ) ?? true
+            self.twoRoundAutoBind = try container.decodeIfPresent(
+                Bool.self,
+                forKey: .twoRoundAutoBind
+            ) ?? true
+            self.twoRoundStructuredPlannerOutput = try container.decodeIfPresent(
+                Bool.self,
+                forKey: .twoRoundStructuredPlannerOutput
+            ) ?? false
+            self.twoRoundStructuredBinderOutput = try container.decodeIfPresent(
+                Bool.self,
+                forKey: .twoRoundStructuredBinderOutput
+            ) ?? false
+        }
+
+        public func encode(to encoder: any Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(streamsResponses, forKey: .streamsResponses)
+            try container.encode(maxIterations, forKey: .maxIterations)
+            try container.encodeIfPresent(maxTurnDuration, forKey: .maxTurnDuration)
+            try container.encode(toolCallFallback, forKey: .toolCallFallback)
+            try container.encode(workflowPlanning, forKey: .workflowPlanning)
+            try container.encode(leanWorkflowSchema, forKey: .leanWorkflowSchema)
+            try container.encode(twoRoundAutoBind, forKey: .twoRoundAutoBind)
+            try container.encode(
+                twoRoundStructuredPlannerOutput,
+                forKey: .twoRoundStructuredPlannerOutput
+            )
+            try container.encode(
+                twoRoundStructuredBinderOutput,
+                forKey: .twoRoundStructuredBinderOutput
+            )
         }
     }
 
@@ -566,6 +652,16 @@ extension AIKitConfiguration {
             runtime.maxTurnDuration = try value.optionalDouble(section: .runtime, key: originalKey)
         case "toolfallback", "toolcallfallback":
             runtime.toolCallFallback = try value.toolCallFallbackMode(section: .runtime, key: originalKey)
+        case "workflow", "workflowplanning":
+            runtime.workflowPlanning = try value.bool(section: .runtime, key: originalKey)
+        case "leanworkflow", "leanworkflowschema":
+            runtime.leanWorkflowSchema = try value.bool(section: .runtime, key: originalKey)
+        case "tworoundautobind", "autobind":
+            runtime.twoRoundAutoBind = try value.bool(section: .runtime, key: originalKey)
+        case "tworoundstructuredplanner", "tworoundstructuredplanneroutput", "structuredplanneroutput":
+            runtime.twoRoundStructuredPlannerOutput = try value.bool(section: .runtime, key: originalKey)
+        case "tworoundstructuredbinder", "tworoundstructuredbinderoutput", "structuredbinderoutput":
+            runtime.twoRoundStructuredBinderOutput = try value.bool(section: .runtime, key: originalKey)
         default:
             throw AIKitConfigurationError.unknownKey(section: .runtime, key: originalKey)
         }

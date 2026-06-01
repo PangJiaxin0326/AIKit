@@ -450,6 +450,17 @@ public struct AIKitView: View {
                 }
             }
             .pickerStyle(.segmented)
+            Toggle("Workflow planning", isOn: binding(\.runtime.workflowPlanning))
+            Toggle("Lean workflow schema", isOn: binding(\.runtime.leanWorkflowSchema))
+            Toggle("Two-round auto-bind", isOn: binding(\.runtime.twoRoundAutoBind))
+            Toggle(
+                "Structured planner output",
+                isOn: binding(\.runtime.twoRoundStructuredPlannerOutput)
+            )
+            Toggle(
+                "Structured binder output",
+                isOn: binding(\.runtime.twoRoundStructuredBinderOutput)
+            )
         }
     }
 

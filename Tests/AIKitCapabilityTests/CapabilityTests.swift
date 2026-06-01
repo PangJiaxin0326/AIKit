@@ -290,6 +290,56 @@ private struct EchoTool: Tool {
         #expect(snapshot.capability.enabledToolNames == ["navigate", "searchMemory"])
     }
 
+    @Test func runtimeDefaultsFollowWorkflowGuidance() {
+        let configuration = AIKitConfiguration.standard
+
+        #expect(configuration.core.temperature == 0.2)
+        #expect(configuration.runtime.workflowPlanning)
+        #expect(configuration.runtime.leanWorkflowSchema)
+        #expect(configuration.runtime.twoRoundAutoBind)
+        #expect(configuration.runtime.twoRoundStructuredPlannerOutput == false)
+        #expect(configuration.runtime.twoRoundStructuredBinderOutput == false)
+    }
+
+    @Test func runtimeDecodesLegacyConfigurationWithWorkflowDefaults() throws {
+        let data = """
+        {
+          "streamsResponses": false,
+          "maxIterations": 3,
+          "toolCallFallback": "automatic"
+        }
+        """.data(using: .utf8)!
+
+        let runtime = try JSONDecoder().decode(AIKitConfiguration.Runtime.self, from: data)
+
+        #expect(runtime.streamsResponses == false)
+        #expect(runtime.maxIterations == 3)
+        #expect(runtime.workflowPlanning)
+        #expect(runtime.leanWorkflowSchema)
+        #expect(runtime.twoRoundAutoBind)
+        #expect(runtime.twoRoundStructuredPlannerOutput == false)
+        #expect(runtime.twoRoundStructuredBinderOutput == false)
+    }
+
+    @Test func configurationStoreAcceptsWorkflowRuntimeUpdates() async throws {
+        let store = AIKitConfigurationStore()
+
+        _ = try await store.set(
+            section: .runtime,
+            key: "leanWorkflowSchema",
+            value: .bool(false)
+        )
+        _ = try await store.set(
+            section: .runtime,
+            key: "twoRoundStructuredPlannerOutput",
+            value: .bool(true)
+        )
+
+        let snapshot = await store.snapshot()
+        #expect(snapshot.runtime.leanWorkflowSchema == false)
+        #expect(snapshot.runtime.twoRoundStructuredPlannerOutput)
+    }
+
     @Test func coreStoresProviderConfigurationsIndependently() {
         var core = AIKitConfiguration.Core(activeProvider: .ollama)
         core.model = "llama3.1"

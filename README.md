@@ -168,8 +168,16 @@ For low-latency mobile agents, AIKit also supports AIToolKit `WorkflowSpec`:
 the model can emit one topological JSON DAG containing multiple ordered or
 dependent tool nodes, and the device executes those nodes locally without a
 second LLM pass. In workflow-planning mode, providers see only the synthetic
-`workflow_run` tool; app tools are supplied as catalog context. See
-`AI_Agent_DAG_Workflow_Schema_Design.md` for the schema guidance.
+`workflow_run` tool; app tools are supplied as catalog context. AIKit defaults
+this path to AIToolKit's lean schema, fixed worked example, and temperature
+0.2 guidance to reduce output tokens while keeping graph structure reliable.
+
+For local/private context tasks, use `runWorkflowTask(...)` or
+`WorkflowTwoRoundRunner`: the planner can declare context slots, AIKit harvests
+trusted local candidates, auto-bind skips the binder when the result is
+unambiguous, and `WorkflowPlanCache` can skip repeated planner calls. Weak or
+mid planners can enable structured output for the planner round only; the
+binder stays freeform by default.
 
 ## Testing
 

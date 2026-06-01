@@ -19,6 +19,14 @@ private struct StubHarvester: ContextHarvesting {
     }
 }
 
+private struct FixedHarvester: ContextHarvesting {
+    var packet: ContextPacket
+
+    func harvest(_ slots: [WorkflowContextSlot]) async -> ContextPacket {
+        packet
+    }
+}
+
 @Suite struct PromptBuilderTests {
     @Test func systemPromptIncludesPreambleFragmentAndMemory() {
         let context = ResolvedContext(
@@ -60,6 +68,37 @@ private struct StubHarvester: ContextHarvesting {
         )
         #expect(request.tools.isEmpty)
         #expect(request.system?.contains(PromptBuilder.toolFallbackInstruction) == false)
+    }
+
+    @Test func workflowPlanningDefaultsToLeanSchemaWithExample() throws {
+        let context = ResolvedContext(
+            stack: [.init("home")],
+            systemPromptFragment: "",
+            toolNames: ["navigate"],
+            metadata: [:]
+        )
+        let request = PromptBuilder.build(
+            instruction: "Open settings",
+            context: context,
+            memory: [],
+            transcript: [],
+            toolManifest: [
+                ToolDescriptor(name: "navigate", description: "nav", inputSchema: .object([:])),
+            ],
+            model: "test-model",
+            workflowPlanningHint: true
+        )
+
+        #expect(request.system?.contains("Emit only") == true)
+        #expect(request.system?.contains("Example WorkflowSpec") == true)
+        #expect(request.tools.map(\.name) == [WorkflowSpec.toolName])
+
+        let schemaObject = try #require(request.tools.first?.inputSchema.objectValue)
+        let required = try #require(schemaObject["required"]?.arrayValue)
+        #expect(required == [.string("schema_version"), .string("nodes")])
+        let properties = try #require(schemaObject["properties"]?.objectValue)
+        #expect(properties["final"] == nil)
+        #expect(properties["limits"] == nil)
     }
 }
 
@@ -287,6 +326,190 @@ private struct StubHarvester: ContextHarvesting {
         #expect(request.system?.contains("Input schema:") == true)
         #expect(request.system?.contains("- setProfile: profile") == true)
         #expect(request.tools.map { $0.name } == [WorkflowSpec.toolName])
+    }
+}
+
+@Suite struct WorkflowTwoRoundRunnerTests {
+    @Test func legacyStructuredOutputSwitchStillEnablesBothRounds() {
+        let options = WorkflowTwoRoundRunner.Options(
+            model: "test",
+            sources: [],
+            useStructuredOutput: true
+        )
+
+        #expect(options.useStructuredPlannerOutput)
+        #expect(options.useStructuredBinderOutput)
+        #expect(options.useStructuredOutput)
+    }
+
+    private func destinationPacket(
+        candidates: [HarvestedCandidate]
+    ) -> ContextPacket {
+        ContextPacket(slots: [
+            HarvestedSlot(
+                slotID: "destination",
+                source: "current_destination",
+                status: .resolved,
+                candidates: candidates,
+                required: true
+            ),
+        ])
+    }
+
+    private func runner(
+        provider: MockProvider,
+        registry: ToolRegistry,
+        packet: ContextPacket,
+        options: WorkflowTwoRoundRunner.Options,
+        planCache: WorkflowPlanCache? = nil
+    ) -> WorkflowTwoRoundRunner {
+        WorkflowTwoRoundRunner(
+            llm: LLMClient(provider: provider),
+            tools: registry,
+            harvester: FixedHarvester(packet: packet),
+            plannerToolNames: ["navigate"],
+            options: options,
+            planCache: planCache
+        )
+    }
+
+    @Test func structuredOutputCanBePlannerOnly() async throws {
+        let registry = ToolRegistry()
+        await registry.register(NavigateTool { input, _ in
+            .init(navigated: input.destination == "settings")
+        })
+        let plan = """
+        {"outcome":"requires_binding","intent_summary":"open destination",
+         "nodes":[{"id":"go","tool":"navigate","input":{"destination":{"$slot":"destination"}}}],
+         "context_slots":[{"slot_id":"destination","source":"current_destination","reason":"target screen","required":true}],
+         "message":null}
+        """
+        let binding = """
+        {"binding_status":"complete",
+         "nodes":[{"id":"go","tool":"navigate","input":{"destination":{"$bind":"dest_1"}}}],
+         "missing_slots":[],"message":null}
+        """
+        let provider = MockProvider(responses: [
+            LLMResponse(content: [.text(plan)], stopReason: .endTurn),
+            LLMResponse(content: [.text(binding)], stopReason: .endTurn),
+        ])
+        let packet = destinationPacket(candidates: [
+            HarvestedCandidate(
+                candidateID: "dest_1",
+                label: "Settings",
+                kind: "screen",
+                value: .string("settings"),
+                isCurrent: false
+            ),
+            HarvestedCandidate(
+                candidateID: "dest_2",
+                label: "Home",
+                kind: "screen",
+                value: .string("home"),
+                isCurrent: false
+            ),
+        ])
+        let subject = runner(
+            provider: provider,
+            registry: registry,
+            packet: packet,
+            options: .init(
+                model: "test",
+                sources: ["current_destination"],
+                useStructuredPlannerOutput: true,
+                useStructuredBinderOutput: false
+            )
+        )
+
+        let result = await subject.run(intent: "open it")
+        guard case .executed = result.outcome else {
+            Issue.record("expected execution, got \(result.outcome)")
+            return
+        }
+
+        let requests = provider.receivedRequests
+        #expect(requests.count == 2)
+        #expect(requests[0].extraBody["response_format"] != nil)
+        #expect(requests[1].extraBody["response_format"] == nil)
+    }
+
+    @Test func planCacheAndAutoBindSkipPlannerOnRepeat() async throws {
+        let invocations = ToolInvocationRecorder()
+        let registry = ToolRegistry()
+        await registry.register(NavigateTool { input, _ in
+            await invocations.record(input.destination)
+            return .init(navigated: true)
+        })
+        let plan = """
+        {"outcome":"requires_binding","intent_summary":"open current destination",
+         "nodes":[{"id":"go","tool":"navigate","input":{"destination":{"$slot":"destination"}}}],
+         "context_slots":[{"slot_id":"destination","source":"current_destination","reason":"target screen","required":true}],
+         "message":null}
+        """
+        let provider = MockProvider(responses: [
+            LLMResponse(content: [.text(plan)], stopReason: .endTurn),
+        ])
+        let packet = destinationPacket(candidates: [
+            HarvestedCandidate(
+                candidateID: "dest_1",
+                label: "Settings",
+                kind: "screen",
+                value: .string("settings"),
+                isCurrent: true
+            ),
+        ])
+        let cache = WorkflowPlanCache()
+        let subject = runner(
+            provider: provider,
+            registry: registry,
+            packet: packet,
+            options: .init(model: "test", sources: ["current_destination"]),
+            planCache: cache
+        )
+
+        let first = await subject.run(intent: "open this")
+        let second = await subject.run(intent: "  Open   This  ")
+
+        guard case .executed = first.outcome else {
+            Issue.record("expected first execution")
+            return
+        }
+        guard case .executed = second.outcome else {
+            Issue.record("expected second execution")
+            return
+        }
+        #expect(provider.receivedRequests.count == 1)
+        #expect(await cache.hits == 1)
+        #expect(await invocations.destinations == ["settings", "settings"])
+    }
+
+    @Test func approvalRequiredToolsAreRejectedByDefault() async throws {
+        let flag = InvocationFlag()
+        let registry = ToolRegistry()
+        await registry.register(ApprovalRequiredTool(flag: flag))
+        let plan = """
+        {"outcome":"self_contained","intent_summary":"dangerous action",
+         "nodes":[{"id":"act","tool":"approvalRequired","input":{}}],
+         "context_slots":[],"message":null}
+        """
+        let provider = MockProvider(responses: [
+            LLMResponse(content: [.text(plan)], stopReason: .endTurn),
+        ])
+        let subject = WorkflowTwoRoundRunner(
+            llm: LLMClient(provider: provider),
+            tools: registry,
+            harvester: StubHarvester(),
+            plannerToolNames: ["approvalRequired"],
+            options: .init(model: "test", sources: [])
+        )
+
+        let result = await subject.run(intent: "do it")
+        guard case .failed(let reason) = result.outcome else {
+            Issue.record("expected failure")
+            return
+        }
+        #expect(reason.contains("unavailableTool") || reason.contains("unavailable"))
+        #expect(await flag.didInvoke == false)
     }
 }
 
@@ -1187,6 +1410,28 @@ private struct EmptyInputTool: Tool {
 
     func call(_ input: Input, in context: ToolContext) async throws -> Output {
         await handler()
+        return Output(ok: true)
+    }
+}
+
+private struct ApprovalRequiredTool: Tool {
+    struct Input: Codable, Sendable {}
+    struct Output: Codable, Sendable {
+        let ok: Bool
+    }
+
+    static let name = "approvalRequired"
+    static let description = "A side-effecting tool that requires approval."
+    static let inputSchema = ToolSchema.object(properties: [:])
+    static let annotations = ToolAnnotations(
+        sideEffect: .destructive,
+        requiresUserApproval: true
+    )
+
+    let flag: InvocationFlag
+
+    func call(_ input: Input, in context: ToolContext) async throws -> Output {
+        await flag.mark()
         return Output(ok: true)
     }
 }

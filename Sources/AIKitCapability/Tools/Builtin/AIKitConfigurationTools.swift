@@ -100,8 +100,9 @@ public struct SetAIKitConfigurationTool: Tool {
     runtime, and safety. Useful keys include model, activeProvider (OpenAI, \
     Anthropic, Ollama, Apple Intelligence, or Ark), availableModels, \
     endpointURL, enabledToolNames, systemPromptFragment, maxIterations, \
-    streamsResponses, toolCallFallback, enabledGuardrailIDs, and \
-    outputLengthLimit.
+    streamsResponses, toolCallFallback, workflowPlanning, leanWorkflowSchema, \
+    twoRoundAutoBind, twoRoundStructuredPlannerOutput, \
+    twoRoundStructuredBinderOutput, enabledGuardrailIDs, and outputLengthLimit.
     """
     public static let inputSchema = ToolSchema(json: .object([
         "type": .string("object"),

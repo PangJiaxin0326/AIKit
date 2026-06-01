@@ -34,7 +34,7 @@ public enum PromptBuilder {
         extraBody: [String: JSONValue] = [:],
         toolCallFallbackHint: Bool = false,
         workflowPlanningHint: Bool = false,
-        leanWorkflowSchemaHint: Bool = false
+        leanWorkflowSchemaHint: Bool = true
     ) -> LLMRequest {
         var systemParts = [basePreamble]
         if !context.systemPromptFragment.isEmpty {
@@ -54,7 +54,9 @@ public enum PromptBuilder {
 
         if workflowPlanningHint, !tools.isEmpty {
             systemParts.append(WorkflowPromptBuilder.planningInstruction(
-                toolManifest: tools, minimal: leanWorkflowSchemaHint
+                toolManifest: tools,
+                minimal: leanWorkflowSchemaHint,
+                includeExample: true
             ))
             tools = [WorkflowSchema.descriptor(
                 availableTools: tools, minimal: leanWorkflowSchemaHint
