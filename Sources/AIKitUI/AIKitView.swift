@@ -747,22 +747,23 @@ struct AssistantChatbotOverlay: View {
                         } action: { newSize in
                             capsuleSize = newSize
                         }
+                        // The failure note floats clear above the bar, anchored
+                        // to the capsule's top edge — so however tall it grows,
+                        // its base always sits a fixed gap above the bar instead
+                        // of overlapping it. It opens from the docked edge toward
+                        // the screen interior.
+                        .overlay(alignment: petEdge == .leading ? .topLeading : .topTrailing) {
+                            if isExpanded, activity.hasFailed, let reason = activity.failureReason {
+                                reasonPanel(reason)
+                                    .alignmentGuide(.top) { $0.height + 10 }
+                                    .transition(.opacity)
+                            }
+                        }
                         .position(floatingCenter(
                             in: size,
                             keyboardOverlap: keyboardOverlap,
                             keyboardVisible: keyboardVisible
                         ))
-                        .overlay {
-                            if isExpanded, activity.hasFailed, let reason = activity.failureReason {
-                                reasonPanel(reason)
-                                    .position(floatingCenter(
-                                        in: size,
-                                        keyboardOverlap: keyboardOverlap,
-                                        keyboardVisible: keyboardVisible
-                                    ))
-                                    .offset(y: -50)
-                            }
-                        }
                 }
             }
             .animation(.spring(duration: 0.24), value: isExpanded)
@@ -1812,9 +1813,9 @@ private struct VoiceWaveformView: View {
 }
 
 /// One entry in the detail panel's menus: a prominent title tightly paired
-/// with its secondary detail lines. The clear type contrast — bold primary
-/// title over light secondary detail — is what makes each entry read as a
-/// heading with its data, rather than a stack of look-alike lines.
+/// with its softened detail lines. The clear type contrast — bold primary
+/// title over a lighter detail — is what makes each entry read as a heading
+/// with its data, rather than a stack of look-alike lines.
 private struct OverlayDetailRow<Detail: View>: View {
     let title: String
     @ViewBuilder var detail: Detail
@@ -1827,8 +1828,15 @@ private struct OverlayDetailRow<Detail: View>: View {
             VStack(alignment: .leading, spacing: 2) {
                 detail
             }
-            .font(.caption)
-            .foregroundStyle(.secondary)
+            .font(.footnote)
+            // Opaque primary, softened with a flat alpha — *not* the
+            // hierarchical `.secondary` tier, whose vibrant blend over the
+            // panel's translucent material can wash out to invisibility. This
+            // keeps the detail clearly legible while staying subordinate to
+            // the title.
+            .foregroundStyle(.primary)
+            .opacity(0.75)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
