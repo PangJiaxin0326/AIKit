@@ -611,6 +611,43 @@ private struct FixedHarvester: ContextHarvesting {
         #expect(finalAnswer == "You're on settings now.")
     }
 
+    @Test func snapshotGroupsActivityByTaskWithUsageAndDuration() async throws {
+        let provider = MockProvider(responses: [
+            LLMResponse(
+                content: [.toolUse(
+                    id: "t1", name: "navigate",
+                    input: .object(["destination": .string("settings")])
+                )],
+                stopReason: .toolUse,
+                usage: TokenUsage(inputTokens: 10, outputTokens: 2)
+            ),
+            LLMResponse(
+                content: [.text("You're on settings now.")],
+                stopReason: .endTurn,
+                usage: TokenUsage(inputTokens: 5, outputTokens: 7)
+            ),
+        ])
+        let orchestrator = await makeOrchestrator(provider: provider)
+
+        for try await event in await orchestrator.run("Go to settings") {
+            if case .error(let error) = event {
+                Issue.record("unexpected error: \(error)")
+            }
+        }
+
+        let snapshot = await orchestrator.snapshot(recentActivityLimit: 20)
+        let task = try #require(snapshot.recentTasks.first)
+        #expect(task.instruction == "Go to settings")
+        #expect(task.isRunning == false)
+        #expect(task.duration() >= 0)
+        #expect(task.usage.inputTokens == 15)
+        #expect(task.usage.outputTokens == 9)
+        #expect(task.activities.contains { $0.kind == .userInstruction })
+        #expect(task.activities.contains { $0.kind == .toolInvoked })
+        #expect(task.activities.contains { $0.kind == .toolResult })
+        #expect(task.activities.contains { $0.kind == .llmResponse })
+    }
+
     @Test func runWorkflowTaskHostsTwoRoundAsTrackedTurn() async throws {
         let registry = ToolRegistry()
         await registry.register(NavigateTool { input, _ in

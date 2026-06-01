@@ -791,6 +791,9 @@ struct AssistantChatbotOverlay: View {
             // When a turn finishes (busy → idle, not a failure), drop the
             // stale draft so a completed turn can't be re-sent.
             if !busy && !activity.hasFailed { capsuleDraft = "" }
+            if !busy {
+                Task { await refreshSnapshot() }
+            }
         }
         .onChange(of: activity.hasFailed) { _, failed in
             // Surface a failure immediately so the reason panel is visible.
@@ -1518,28 +1521,45 @@ struct AssistantChatbotOverlay: View {
     }
 
     private var activityContent: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            let activity = snapshot?.recentActivities ?? []
-            if activity.isEmpty && session.lines.isEmpty {
-                OverlayEmptyState(
-                    systemImage: "clock",
-                    message: "No recent activity"
-                )
-            }
-            ForEach(activity) { event in
-                OverlayDetailRow(title: event.kind.rawValue) {
-                    Text(event.payloadText)
-                        .lineLimit(3)
+        TimelineView(.periodic(from: Date(), by: 1)) { timeline in
+            VStack(alignment: .leading, spacing: 14) {
+                let tasks = activityTaskGroups
+                if tasks.isEmpty && session.lines.isEmpty {
+                    OverlayEmptyState(
+                        systemImage: "clock",
+                        message: "No recent activity"
+                    )
                 }
-            }
-            ForEach(session.lines.suffix(8)) { line in
-                OverlayDetailRow(title: line.role.capitalized) {
-                    Text(line.text)
-                        .lineLimit(4)
-                        .textSelection(.enabled)
+                ForEach(tasks) { task in
+                    OverlayActivityTaskRow(task: task, now: timeline.date)
+                }
+                if tasks.isEmpty {
+                    ForEach(session.lines.suffix(8)) { line in
+                        OverlayDetailRow(title: line.role.capitalized) {
+                            Text(line.text)
+                                .lineLimit(4)
+                                .textSelection(.enabled)
+                        }
+                    }
                 }
             }
         }
+    }
+
+    private var activityTaskGroups: [OrchestratorTaskSnapshot] {
+        var seen = Set<Int>()
+        var groups: [OrchestratorTaskSnapshot] = []
+        for task in activity.activeTasks.sorted(by: { $0.startedAt > $1.startedAt }) {
+            if seen.insert(task.id).inserted {
+                groups.append(task)
+            }
+        }
+        for task in snapshot?.recentTasks ?? [] {
+            if seen.insert(task.id).inserted {
+                groups.append(task)
+            }
+        }
+        return groups
     }
 
     private func submit() {
@@ -1552,7 +1572,7 @@ struct AssistantChatbotOverlay: View {
     }
 
     private func refreshSnapshot() async {
-        snapshot = await orchestrator.snapshot(recentActivityLimit: 12)
+        snapshot = await orchestrator.snapshot(recentActivityLimit: 24, recentTaskLimit: 8)
     }
 }
 
@@ -1853,6 +1873,115 @@ private struct OverlayDetailRow<Detail: View>: View {
     }
 }
 
+private struct OverlayActivityTaskRow: View {
+    let task: OrchestratorTaskSnapshot
+    let now: Date
+
+    private var visibleActivities: [UsageEvent] {
+        Array(task.activities.filter { $0.kind != .userInstruction }.suffix(6))
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(task.instruction)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.primary)
+                    .lineLimit(2)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                if task.isRunning {
+                    Label("Running", systemImage: "dot.radiowaves.left.and.right")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(Color.accentColor)
+                }
+            }
+
+            HStack(spacing: 10) {
+                OverlayActivityStat(
+                    systemImage: "arrow.down.to.line.compact",
+                    title: "In",
+                    value: "\(task.usage.inputTokens)"
+                )
+                OverlayActivityStat(
+                    systemImage: "arrow.up.to.line.compact",
+                    title: "Out",
+                    value: "\(task.usage.outputTokens)"
+                )
+                OverlayActivityStat(
+                    systemImage: "timer",
+                    title: "Time",
+                    value: formattedDuration(task.duration(at: now))
+                )
+            }
+
+            if let failure = task.failureReason {
+                Label(failure, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .lineLimit(2)
+            } else if task.isRunning {
+                Text(task.phase.activityLabel)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            if !visibleActivities.isEmpty {
+                VStack(alignment: .leading, spacing: 5) {
+                    ForEach(visibleActivities) { event in
+                        HStack(alignment: .firstTextBaseline, spacing: 6) {
+                            Text(event.kind.activityLabel)
+                                .font(.caption2.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                                .frame(width: 58, alignment: .leading)
+                            Text(event.payloadText)
+                                .font(.caption)
+                                .foregroundStyle(.primary)
+                                .opacity(0.78)
+                                .lineLimit(2)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .textSelection(.enabled)
+                        }
+                    }
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func formattedDuration(_ interval: TimeInterval) -> String {
+        let totalSeconds = max(0, Int(interval.rounded()))
+        let hours = totalSeconds / 3600
+        let minutes = (totalSeconds % 3600) / 60
+        let seconds = totalSeconds % 60
+        if hours > 0 {
+            return "\(hours)h \(minutes)m"
+        }
+        if minutes > 0 {
+            return "\(minutes)m \(seconds)s"
+        }
+        return "\(seconds)s"
+    }
+}
+
+private struct OverlayActivityStat: View {
+    let systemImage: String
+    let title: String
+    let value: String
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Image(systemName: systemImage)
+                .font(.caption2.weight(.semibold))
+            Text(title)
+                .font(.caption2.weight(.semibold))
+            Text(value)
+                .font(.caption.monospacedDigit())
+        }
+        .foregroundStyle(.secondary)
+        .lineLimit(1)
+    }
+}
+
 /// A quiet, centered placeholder for the detail panel's empty menus — a soft
 /// glyph over a single line, so an empty state still feels considered.
 private struct OverlayEmptyState: View {
@@ -1879,6 +2008,30 @@ private enum ChatbotMenu: String, CaseIterable, Identifiable {
     case activity = "Activity"
 
     var id: String { rawValue }
+}
+
+private extension OrchestratorPhase {
+    var activityLabel: String {
+        switch self {
+        case .idle: return "Idle"
+        case .preparing: return "Preparing"
+        case .thinking: return "Thinking"
+        case .callingTool(let name): return "Calling \(name)"
+        case .verifying: return "Checking result"
+        }
+    }
+}
+
+private extension UsageEvent.Kind {
+    var activityLabel: String {
+        switch self {
+        case .userInstruction: return "Task"
+        case .toolInvoked: return "Tool"
+        case .toolResult: return "Result"
+        case .llmResponse: return "Answer"
+        case .error: return "Error"
+        }
+    }
 }
 
 private extension AIKitConfiguration.ToolCallFallbackMode {

@@ -38,23 +38,26 @@ public struct OrchestratorSnapshot: Sendable, Hashable {
     public var resolvedContext: ResolvedContext
     public var availableTools: [ToolDescriptor]
     public var recentActivities: [UsageEvent]
+    public var recentTasks: [OrchestratorTaskSnapshot]
 
     public init(
         contexts: [ViewContext],
         resolvedContext: ResolvedContext,
         availableTools: [ToolDescriptor],
-        recentActivities: [UsageEvent]
+        recentActivities: [UsageEvent],
+        recentTasks: [OrchestratorTaskSnapshot] = []
     ) {
         self.contexts = contexts
         self.resolvedContext = resolvedContext
         self.availableTools = availableTools
         self.recentActivities = recentActivities
+        self.recentTasks = recentTasks
     }
 }
 
 /// What the orchestrator is doing right now, for a single turn. Aggregated
 /// across all in-flight turns by `OrchestratorActivity`.
-public enum OrchestratorPhase: Sendable, Equatable {
+public enum OrchestratorPhase: Sendable, Equatable, Hashable {
     /// No turn is using this slot.
     case idle
     /// Building the prompt / running pre-prompt guardrails.
@@ -65,6 +68,46 @@ public enum OrchestratorPhase: Sendable, Equatable {
     case callingTool(String)
     /// Running a verification (guardrail) stage on a result.
     case verifying
+}
+
+/// A single user task as seen by the orchestrator, with its grouped activity
+/// events and model usage. Active snapshots have `endedAt == nil`; call
+/// `duration(at:)` with the current clock tick to display a live elapsed time.
+public struct OrchestratorTaskSnapshot: Sendable, Identifiable, Hashable {
+    public let id: Int
+    public let instruction: String
+    public let startedAt: Date
+    public let endedAt: Date?
+    public let phase: OrchestratorPhase
+    public let failureReason: String?
+    public let usage: TokenUsage
+    public let activities: [UsageEvent]
+
+    public var isRunning: Bool { endedAt == nil }
+
+    public init(
+        id: Int,
+        instruction: String,
+        startedAt: Date,
+        endedAt: Date? = nil,
+        phase: OrchestratorPhase,
+        failureReason: String? = nil,
+        usage: TokenUsage = .zero,
+        activities: [UsageEvent] = []
+    ) {
+        self.id = id
+        self.instruction = instruction
+        self.startedAt = startedAt
+        self.endedAt = endedAt
+        self.phase = phase
+        self.failureReason = failureReason
+        self.usage = usage
+        self.activities = activities
+    }
+
+    public func duration(at date: Date = Date()) -> TimeInterval {
+        max(0, (endedAt ?? date).timeIntervalSince(startedAt))
+    }
 }
 
 /// A `Sendable` snapshot of what an `Orchestrator` is doing. Delivered live
@@ -81,6 +124,10 @@ public struct OrchestratorActivity: Sendable, Equatable {
     /// after the turn ends until a new `run` starts or `cancelActiveTurns()`
     /// is called, so UI can surface it.
     public let failureReason: String?
+    /// Per-turn live task snapshots, including elapsed-time anchors and usage
+    /// accumulated so far. Kept separate from the aggregate `phase` so UI can
+    /// render overlapping tasks individually.
+    public let activeTasks: [OrchestratorTaskSnapshot]
 
     public var isBusy: Bool { activeTurns > 0 }
     public var hasFailed: Bool { failureReason != nil }
@@ -100,7 +147,7 @@ public struct OrchestratorActivity: Sendable, Equatable {
     }
 
     public static let idle = OrchestratorActivity(
-        activeTurns: 0, phase: .idle, failureReason: nil
+        activeTurns: 0, phase: .idle, failureReason: nil, activeTasks: []
     )
 
     /// Higher rank wins when aggregating concurrent turns into one `phase`.
@@ -112,6 +159,31 @@ public struct OrchestratorActivity: Sendable, Equatable {
         case .thinking: 3
         case .callingTool: 4
         }
+    }
+}
+
+private struct OrchestratorTaskRecord: Sendable {
+    let id: Int
+    let instruction: String
+    let startedAt: Date
+    var viewID: ViewContext.ID?
+    var endedAt: Date?
+    var phase: OrchestratorPhase
+    var failureReason: String?
+    var usage = TokenUsage.zero
+    var activities: [UsageEvent] = []
+
+    var snapshot: OrchestratorTaskSnapshot {
+        OrchestratorTaskSnapshot(
+            id: id,
+            instruction: instruction,
+            startedAt: startedAt,
+            endedAt: endedAt,
+            phase: phase,
+            failureReason: failureReason,
+            usage: usage,
+            activities: activities
+        )
     }
 }
 
@@ -208,6 +280,9 @@ public actor Orchestrator {
     private var turnPhases: [Int: OrchestratorPhase] = [:]
     /// The in-flight `loop` task per turn id, so a turn can be cancelled.
     private var turnTasks: [Int: Task<Void, Never>] = [:]
+    /// Per-turn activity ledgers backing the overlay's task-grouped history.
+    private var taskRecords: [Int: OrchestratorTaskRecord] = [:]
+    private let maxTrackedCompletedTasks = 24
     /// Sticky reason from the last failed turn; cleared when a new turn
     /// starts or `cancelActiveTurns()` is called.
     private var lastFailureReason: String?
@@ -221,10 +296,101 @@ public actor Orchestrator {
         return turnCounter
     }
 
+    private func startTask(_ instruction: String, turn: Int) {
+        taskRecords[turn] = OrchestratorTaskRecord(
+            id: turn,
+            instruction: instruction,
+            startedAt: Date(),
+            viewID: nil,
+            endedAt: nil,
+            phase: .preparing,
+            failureReason: nil
+        )
+    }
+
+    private func setTaskViewID(_ viewID: ViewContext.ID, turn: Int) {
+        guard var record = taskRecords[turn] else { return }
+        record.viewID = viewID
+        taskRecords[turn] = record
+    }
+
+    private func finishTask(_ turn: Int, failureReason: String? = nil) {
+        guard var record = taskRecords[turn] else { return }
+        if record.endedAt == nil {
+            record.endedAt = Date()
+        }
+        if let failureReason {
+            record.failureReason = failureReason
+        }
+        record.phase = .idle
+        taskRecords[turn] = record
+        trimCompletedTaskRecords()
+    }
+
+    private func trimCompletedTaskRecords() {
+        let completed = taskRecords.values
+            .filter { $0.endedAt != nil }
+            .sorted { $0.startedAt > $1.startedAt }
+        for record in completed.dropFirst(maxTrackedCompletedTasks) {
+            taskRecords[record.id] = nil
+        }
+    }
+
+    private func taskSnapshots(
+        matching viewID: ViewContext.ID? = nil,
+        activeOnly: Bool = false,
+        limit: Int? = nil
+    ) -> [OrchestratorTaskSnapshot] {
+        var records = taskRecords.values.filter { record in
+            if activeOnly, record.endedAt != nil { return false }
+            guard let viewID else { return true }
+            return record.viewID == nil || record.viewID == viewID
+        }
+        records.sort { lhs, rhs in
+            if lhs.endedAt == nil, rhs.endedAt != nil { return true }
+            if lhs.endedAt != nil, rhs.endedAt == nil { return false }
+            return lhs.startedAt > rhs.startedAt
+        }
+        let snapshots = records.map(\.snapshot)
+        guard let limit else { return snapshots }
+        return Array(snapshots.prefix(max(0, limit)))
+    }
+
+    private func addUsage(_ usage: TokenUsage, turn: Int) {
+        guard var record = taskRecords[turn] else { return }
+        record.usage = TokenUsage(
+            inputTokens: record.usage.inputTokens + usage.inputTokens,
+            outputTokens: record.usage.outputTokens + usage.outputTokens
+        )
+        taskRecords[turn] = record
+        broadcast()
+    }
+
+    private func appendTaskActivity(_ event: UsageEvent, turn: Int?) {
+        guard let turn, var record = taskRecords[turn] else { return }
+        record.activities.append(event)
+        taskRecords[turn] = record
+        broadcast()
+    }
+
+    private func recordActivity(
+        viewID: ViewContext.ID,
+        kind: UsageEvent.Kind,
+        text: String,
+        turn: Int? = nil
+    ) async {
+        let event = UsageEvent(viewID: viewID, kind: kind, text: text)
+        appendTaskActivity(event, turn: turn)
+        try? await memory.append(event)
+    }
+
     /// Cancels every in-flight turn and clears any sticky failure, returning
     /// the orchestrator to idle. Safe to call from UI (e.g. a Cancel button).
     public func cancelActiveTurns() {
         for task in turnTasks.values { task.cancel() }
+        for turn in turnTasks.keys {
+            finishTask(turn)
+        }
         turnTasks.removeAll()
         turnPhases.removeAll()
         lastFailureReason = nil
@@ -267,7 +433,8 @@ public actor Orchestrator {
             phase: turnPhases.values.max {
                 OrchestratorActivity.rank($0) < OrchestratorActivity.rank($1)
             } ?? .idle,
-            failureReason: lastFailureReason
+            failureReason: lastFailureReason,
+            activeTasks: taskSnapshots(activeOnly: true)
         )
     }
 
@@ -282,12 +449,17 @@ public actor Orchestrator {
     /// Sets (or, with `nil`, clears) a turn's phase and broadcasts.
     private func setPhase(_ phase: OrchestratorPhase?, turn: Int) {
         turnPhases[turn] = phase
+        if var record = taskRecords[turn] {
+            record.phase = phase ?? .idle
+            taskRecords[turn] = record
+        }
         broadcast()
     }
 
     /// Ends a turn: drops its phase and task handle, keeping any sticky
     /// failure so UI can still show it.
     private func finishTurn(_ turn: Int) {
+        finishTask(turn)
         turnPhases[turn] = nil
         turnTasks[turn] = nil
         broadcast()
@@ -296,6 +468,7 @@ public actor Orchestrator {
     /// Records a sticky failure reason for a turn and ends it.
     private func recordFailure(_ reason: String, turn: Int) {
         lastFailureReason = reason
+        finishTask(turn, failureReason: reason)
         turnPhases[turn] = nil
         turnTasks[turn] = nil
         broadcast()
@@ -353,6 +526,7 @@ public actor Orchestrator {
 
     public func run(_ instruction: String) -> AsyncThrowingStream<OrchestratorEvent, any Error> {
         let turnID = nextTurnID()
+        startTask(instruction, turn: turnID)
         // A new turn supersedes any prior failure.
         lastFailureReason = nil
         setPhase(.preparing, turn: turnID)
@@ -406,6 +580,7 @@ public actor Orchestrator {
         planCache: WorkflowPlanCache? = nil
     ) -> AsyncThrowingStream<OrchestratorEvent, any Error> {
         let turnID = nextTurnID()
+        startTask(intent, turn: turnID)
         // A new turn supersedes any prior failure.
         lastFailureReason = nil
         setPhase(.preparing, turn: turnID)
@@ -448,9 +623,10 @@ public actor Orchestrator {
 
         let context = await contextResolver.merged()
         let viewID = context.leafID
-        try? await memory.append(UsageEvent(
-            viewID: viewID, kind: .userInstruction, text: intent
-        ))
+        setTaskViewID(viewID, turn: turnID)
+        await recordActivity(
+            viewID: viewID, kind: .userInstruction, text: intent, turn: turnID
+        )
 
         guard let selectedModel = (options.model ?? llm.defaultModel)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -491,23 +667,22 @@ public actor Orchestrator {
 
         let result = await runner.run(intent: intent)
         for call in result.calls {
+            addUsage(call.usage, turn: turnID)
             emit(.usage(call.usage))
         }
 
         switch result.outcome {
         case .executed(let workflow):
-            await recordWorkflowNodes(workflow, viewID: viewID, emit: emit)
+            await recordWorkflowNodes(workflow, viewID: viewID, turnID: turnID, emit: emit)
             let finalText = workflow.finalText ?? ""
             if !finalText.isEmpty {
-                try? await memory.append(UsageEvent(
-                    viewID: viewID, kind: .llmResponse, text: finalText
-                ))
+                await recordActivity(
+                    viewID: viewID, kind: .llmResponse, text: finalText, turn: turnID
+                )
             }
             emit(.finalAnswer(finalText))
         case .refused(let reason), .failed(let reason):
-            try? await memory.append(UsageEvent(
-                viewID: viewID, kind: .error, text: reason
-            ))
+            await recordActivity(viewID: viewID, kind: .error, text: reason, turn: turnID)
             recordFailure(reason, turn: turnID)
             emit(.failure(reason: reason))
         }
@@ -519,6 +694,7 @@ public actor Orchestrator {
     private func recordWorkflowNodes(
         _ workflow: WorkflowResult,
         viewID: ViewContext.ID,
+        turnID: Int,
         emit: @escaping @Sendable (OrchestratorEvent) -> Void
     ) async {
         for node in workflow.trace.nodes {
@@ -534,16 +710,20 @@ public actor Orchestrator {
             }
             emit(.toolCall(name: tool, input: Data("{}".utf8)))
             emit(.toolResult(name: tool, output: Data(outputText.utf8)))
-            try? await memory.append(UsageEvent(
-                viewID: viewID, kind: .toolInvoked, text: tool
-            ))
-            try? await memory.append(UsageEvent(
-                viewID: viewID, kind: .toolResult, text: "\(tool) -> \(outputText)"
-            ))
+            await recordActivity(
+                viewID: viewID, kind: .toolInvoked, text: tool, turn: turnID
+            )
+            await recordActivity(
+                viewID: viewID, kind: .toolResult,
+                text: "\(tool) -> \(outputText)", turn: turnID
+            )
         }
     }
 
-    public func snapshot(recentActivityLimit: Int = 10) async -> OrchestratorSnapshot {
+    public func snapshot(
+        recentActivityLimit: Int = 10,
+        recentTaskLimit: Int = 8
+    ) async -> OrchestratorSnapshot {
         let contexts = await contextResolver.current()
         let resolved = await contextResolver.merged()
         let manifest = await tools.manifest(for: resolved.toolNames)
@@ -556,7 +736,8 @@ public actor Orchestrator {
             contexts: contexts,
             resolvedContext: resolved,
             availableTools: manifest,
-            recentActivities: recent
+            recentActivities: recent,
+            recentTasks: taskSnapshots(matching: viewID, limit: recentTaskLimit)
         )
     }
 
@@ -569,9 +750,10 @@ public actor Orchestrator {
     ) async {
         let context = await contextResolver.merged()
         let viewID = context.leafID
-        try? await memory.append(UsageEvent(
-            viewID: viewID, kind: .userInstruction, text: instruction
-        ))
+        setTaskViewID(viewID, turn: turnID)
+        await recordActivity(
+            viewID: viewID, kind: .userInstruction, text: instruction, turn: turnID
+        )
 
         // Resolve the fenced-tool fallback once per turn: an explicit option
         // wins; otherwise enable it only for providers without native tools.
@@ -642,6 +824,7 @@ public actor Orchestrator {
                 let response = try await withTurnDeadline(deadline) {
                     try await self.callLLM(request, emit: emit)
                 }
+                addUsage(response.usage, turn: turnID)
                 emit(.usage(response.usage))
                 // Streaming already emitted reasoning incrementally inside
                 // `callLLM`; for one-shot calls surface it once here.
@@ -674,9 +857,9 @@ public actor Orchestrator {
                         )
                     }
                     emit(.verification(stage: .finalResult, outcome: .pass))
-                    try? await memory.append(UsageEvent(
-                        viewID: viewID, kind: .llmResponse, text: text
-                    ))
+                    await recordActivity(
+                        viewID: viewID, kind: .llmResponse, text: text, turn: turnID
+                    )
                     emit(.finalAnswer(text))
                     return
 
@@ -744,9 +927,9 @@ public actor Orchestrator {
                 let decision = await errorHandler.handle(
                     error, attempt: attempt, policy: options.retry
                 )
-                try? await memory.append(UsageEvent(
-                    viewID: viewID, kind: .error, text: "\(error)"
-                ))
+                await recordActivity(
+                    viewID: viewID, kind: .error, text: "\(error)", turn: turnID
+                )
                 switch decision {
                 case .abort(let cause):
                     recordFailure(errorMessage(cause), turn: turnID)
@@ -853,7 +1036,6 @@ public actor Orchestrator {
         )
         let guardrails = self.guardrails
         let tools = self.tools
-        let memory = self.memory
         let logger = self.logger
         let descriptorsByName = Dictionary(uniqueKeysWithValues: manifest.map { ($0.name, $0) })
         let toolContext = ToolContext(
@@ -886,10 +1068,12 @@ public actor Orchestrator {
 
             let inputData = (try? effectiveCall.input.data()) ?? Data("{}".utf8)
             emit(.toolCall(name: effectiveCall.name, input: inputData))
-            try? await memory.append(UsageEvent(
-                viewID: viewID, kind: .toolInvoked,
-                text: "\(effectiveCall.name) \(String(decoding: inputData, as: UTF8.self))"
-            ))
+            await self.recordActivity(
+                viewID: viewID,
+                kind: .toolInvoked,
+                text: "\(effectiveCall.name) \(String(decoding: inputData, as: UTF8.self))",
+                turn: turnID
+            )
 
             let outputValue: JSONValue
             do {
@@ -925,10 +1109,12 @@ public actor Orchestrator {
             )
             emit(.verification(stage: .postToolUse, outcome: .pass))
             emit(.toolResult(name: effectiveCall.name, output: diagnosticOutput))
-            try? await memory.append(UsageEvent(
-                viewID: viewID, kind: .toolResult,
-                text: "\(effectiveCall.name) -> \(String(decoding: diagnosticOutput, as: UTF8.self))"
-            ))
+            await self.recordActivity(
+                viewID: viewID,
+                kind: .toolResult,
+                text: "\(effectiveCall.name) -> \(String(decoding: diagnosticOutput, as: UTF8.self))",
+                turn: turnID
+            )
             return outputValue
         }
 
@@ -950,9 +1136,7 @@ public actor Orchestrator {
             )
         }
         emit(.verification(stage: .finalResult, outcome: .pass))
-        try? await memory.append(UsageEvent(
-            viewID: viewID, kind: .llmResponse, text: final
-        ))
+        await recordActivity(viewID: viewID, kind: .llmResponse, text: final, turn: turnID)
         emit(.finalAnswer(final))
     }
 
@@ -999,10 +1183,12 @@ public actor Orchestrator {
         let inputData = (try? effectiveCall.input.data()) ?? Data("{}".utf8)
         setPhase(.callingTool(effectiveCall.name), turn: turnID)
         emit(.toolCall(name: effectiveCall.name, input: inputData))
-        try? await memory.append(UsageEvent(
-            viewID: viewID, kind: .toolInvoked,
-            text: "\(effectiveCall.name) \(String(decoding: inputData, as: UTF8.self))"
-        ))
+        await recordActivity(
+            viewID: viewID,
+            kind: .toolInvoked,
+            text: "\(effectiveCall.name) \(String(decoding: inputData, as: UTF8.self))",
+            turn: turnID
+        )
 
         let context = ToolContext(
             viewID: viewID.rawValue,
@@ -1034,10 +1220,12 @@ public actor Orchestrator {
             emit(.verification(stage: .postToolUse, outcome: .pass))
             emit(.toolResult(name: effectiveCall.name, output: output))
             let outputText = String(decoding: output, as: UTF8.self)
-            try? await memory.append(UsageEvent(
-                viewID: viewID, kind: .toolResult,
-                text: "\(effectiveCall.name) -> \(outputText)"
-            ))
+            await recordActivity(
+                viewID: viewID,
+                kind: .toolResult,
+                text: "\(effectiveCall.name) -> \(outputText)",
+                turn: turnID
+            )
             transcript.append(.toolResult(
                 id: effectiveCall.id ?? effectiveCall.name,
                 name: effectiveCall.name,
@@ -1057,10 +1245,12 @@ public actor Orchestrator {
         }
         emit(.verification(stage: .postToolUse, outcome: .pass))
         emit(.toolResult(name: effectiveCall.name, output: output))
-        try? await memory.append(UsageEvent(
-            viewID: viewID, kind: .toolResult,
-            text: "\(effectiveCall.name) -> \(String(decoding: output, as: UTF8.self))"
-        ))
+        await recordActivity(
+            viewID: viewID,
+            kind: .toolResult,
+            text: "\(effectiveCall.name) -> \(String(decoding: output, as: UTF8.self))",
+            turn: turnID
+        )
 
         transcript.append(.toolResult(
             id: effectiveCall.id ?? effectiveCall.name,
