@@ -691,7 +691,7 @@ struct AssistantChatbotOverlay: View {
     /// to the pet. Toggled by a tap.
     @State private var isExpanded = false
     @State private var selectedMenu = ChatbotMenu.context
-    @State private var activityPath: [OverlayActivityRoute] = []
+    @State private var activityDisplay: OverlayActivityDisplay = .tasks
     @State private var draft = ""
     @State private var capsuleDraft = ""
     @State private var isVoiceTranscribing = false
@@ -801,7 +801,7 @@ struct AssistantChatbotOverlay: View {
             if failed { withAnimation(.spring(duration: 0.28)) { isExpanded = true } }
         }
         .onChange(of: selectedMenu) { _, menu in
-            if menu != .activity { activityPath.removeAll() }
+            if menu != .activity { activityDisplay = .tasks }
         }
         .onDisappear { cancelVoiceInput() }
         #if os(iOS)
@@ -982,7 +982,7 @@ struct AssistantChatbotOverlay: View {
 
     private func openFullPanel() {
         fieldFocused = false
-        activityPath.removeAll()
+        activityDisplay = .tasks
         withAnimation(.spring(duration: 0.24)) {
             isExpanded = false
             isDialogPresented = true
@@ -1537,124 +1537,130 @@ struct AssistantChatbotOverlay: View {
 
     private var activityContent: some View {
         TimelineView(.periodic(from: Date(), by: 1)) { timeline in
-            NavigationStack(path: $activityPath) {
-                activityTaskList(now: timeline.date)
-                    .navigationDestination(for: OverlayActivityRoute.self) { route in
-                        switch route {
-                        case .task(let id):
-                            if let task = activityTask(id: id) {
-                                activityTaskDetail(task, now: timeline.date)
-                            } else {
-                                OverlayEmptyState(
-                                    systemImage: "clock.arrow.circlepath",
-                                    message: "Activity no longer available"
-                                )
-                            }
-                        case .rawEvent(let taskID, let eventID):
-                            if let event = activityEvent(taskID: taskID, eventID: eventID) {
-                                activityRawEventDetail(event)
-                            } else {
-                                OverlayEmptyState(
-                                    systemImage: "doc.text.magnifyingglass",
-                                    message: "Raw payload no longer available"
-                                )
-                            }
-                        }
-                    }
+            VStack(alignment: .leading, spacing: 10) {
+                activityHeader
+                OverlayActivityStatsRow(metrics: activityMetrics(now: timeline.date))
+                ScrollView {
+                    activityRows(now: timeline.date)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.vertical, 2)
+                }
+                .scrollIndicators(.hidden)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .animation(.snappy(duration: 0.18), value: activityDisplay)
         }
     }
 
-    private func activityTaskList(now: Date) -> some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 14) {
-                let tasks = activityTaskGroups
-                if tasks.isEmpty {
-                    OverlayEmptyState(systemImage: "clock", message: "No recent activity")
+    @ViewBuilder
+    private var activityHeader: some View {
+        HStack(alignment: .top, spacing: 8) {
+            if let destination = activityBackDestination {
+                Button {
+                    activityDisplay = destination
+                } label: {
+                    Image(systemName: "chevron.left")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 24, height: 24)
+                        .contentShape(Rectangle())
                 }
-                ForEach(tasks) { task in
-                    NavigationLink(value: OverlayActivityRoute.task(task.id)) {
-                        OverlayActivityTaskRow(
-                            task: task,
-                            now: now,
-                            showsDisclosure: true
-                        )
+                .buttonStyle(.plain)
+                .accessibilityLabel("Back")
+            }
+
+            VStack(alignment: .leading, spacing: 3) {
+                switch activityDisplay {
+                case .tasks:
+                    Text("Tasks")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.primary)
+                    Text(activityTaskGroups.isEmpty ? "No recent activity" : "\(activityTaskGroups.count) recent")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                case .task(let id):
+                    if let task = activityTask(id: id) {
+                        Text(task.instruction)
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(.primary)
+                            .lineLimit(2)
+                        activityStatusText(for: task)
+                    } else {
+                        Text("Task unavailable")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(.primary)
                     }
-                    .buttonStyle(.plain)
+                case .event(let taskID, let eventID):
+                    if let event = activityEvent(taskID: taskID, eventID: eventID) {
+                        Text(event.kind.rawDetailTitle)
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(.primary)
+                        Text(event.kind.detailLabel)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Text("Detail unavailable")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(.primary)
+                    }
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.vertical, 2)
         }
-        .scrollIndicators(.hidden)
     }
 
-    private func activityTaskDetail(
-        _ task: OrchestratorTaskSnapshot,
-        now: Date
-    ) -> some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 14) {
-                OverlayActivityTaskRow(task: task, now: now)
-                if task.activities.isEmpty {
-                    OverlayEmptyState(
-                        systemImage: "list.bullet.rectangle",
-                        message: "No task details"
-                    )
+    @ViewBuilder
+    private func activityRows(now: Date) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            switch activityDisplay {
+            case .tasks:
+                let tasks = activityTaskGroups
+                if tasks.isEmpty {
+                    OverlayEmptyState(systemImage: "clock", message: "No recent activity")
                 } else {
-                    ForEach(task.activities) { event in
-                        NavigationLink(
-                            value: OverlayActivityRoute.rawEvent(
-                                taskID: task.id,
-                                eventID: event.id
-                            )
-                        ) {
-                            OverlayActivityEventRow(event: event)
+                    ForEach(tasks) { task in
+                        Button {
+                            activityDisplay = .task(task.id)
+                        } label: {
+                            OverlayActivityTaskRow(task: task)
                         }
                         .buttonStyle(.plain)
                     }
                 }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.vertical, 2)
-        }
-        .scrollIndicators(.hidden)
-    }
-
-    private func activityRawEventDetail(_ event: UsageEvent) -> some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 10) {
-                OverlayDetailRow(title: event.kind.rawDetailTitle) {
-                    Text(event.kind.detailLabel)
-                    Text(event.timestamp.formatted(date: .abbreviated, time: .standard))
-                        .font(.caption2.monospacedDigit())
-                }
-
-                Text(event.payloadText.isEmpty ? "Empty payload" : event.payloadText)
-                    .font(.caption.monospaced())
-                    .foregroundStyle(.primary)
-                    .textSelection(.enabled)
-                    .padding(10)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(
-                        .background.secondary,
-                        in: RoundedRectangle(
-                            cornerRadius: AIKitMetrics.controlRadius,
-                            style: .continuous
+            case .task(let id):
+                if let task = activityTask(id: id) {
+                    if task.activities.isEmpty {
+                        OverlayEmptyState(
+                            systemImage: "list.bullet.rectangle",
+                            message: "No task details"
                         )
-                    )
-                    .overlay {
-                        RoundedRectangle(
-                            cornerRadius: AIKitMetrics.controlRadius,
-                            style: .continuous
-                        )
-                        .strokeBorder(.separator.opacity(0.45), lineWidth: 0.5)
+                    } else {
+                        ForEach(task.activities) { event in
+                            Button {
+                                activityDisplay = .event(taskID: task.id, eventID: event.id)
+                            } label: {
+                                OverlayActivityEventRow(event: event)
+                            }
+                            .buttonStyle(.plain)
+                        }
                     }
+                } else {
+                    OverlayEmptyState(
+                        systemImage: "clock.arrow.circlepath",
+                        message: "Activity no longer available"
+                    )
+                }
+            case .event(let taskID, let eventID):
+                if let event = activityEvent(taskID: taskID, eventID: eventID) {
+                    OverlayActivityRawPayload(event: event)
+                } else {
+                    OverlayEmptyState(
+                        systemImage: "doc.text.magnifyingglass",
+                        message: "Raw payload no longer available"
+                    )
+                }
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.vertical, 2)
         }
-        .scrollIndicators(.hidden)
     }
 
     private var activityTaskGroups: [OrchestratorTaskSnapshot] {
@@ -1679,6 +1685,56 @@ struct AssistantChatbotOverlay: View {
 
     private func activityEvent(taskID: Int, eventID: UUID) -> UsageEvent? {
         activityTask(id: taskID)?.activities.first { $0.id == eventID }
+    }
+
+    private var activityBackDestination: OverlayActivityDisplay? {
+        switch activityDisplay {
+        case .tasks:
+            return nil
+        case .task:
+            return .tasks
+        case .event(let taskID, _):
+            return .task(taskID)
+        }
+    }
+
+    private func activityMetrics(now: Date) -> OverlayActivityMetrics {
+        switch activityDisplay {
+        case .tasks:
+            return activityTaskGroups.reduce(.zero) { partial, task in
+                OverlayActivityMetrics(
+                    inputTokens: partial.inputTokens + task.usage.inputTokens,
+                    outputTokens: partial.outputTokens + task.usage.outputTokens,
+                    duration: partial.duration + task.duration(at: now)
+                )
+            }
+        case .task(let id), .event(let id, _):
+            guard let task = activityTask(id: id) else { return .zero }
+            return OverlayActivityMetrics(
+                inputTokens: task.usage.inputTokens,
+                outputTokens: task.usage.outputTokens,
+                duration: task.duration(at: now)
+            )
+        }
+    }
+
+    @ViewBuilder
+    private func activityStatusText(for task: OrchestratorTaskSnapshot) -> some View {
+        if let failure = task.failureReason {
+            Label(failure, systemImage: "exclamationmark.triangle.fill")
+                .font(.caption)
+                .foregroundStyle(.red)
+                .lineLimit(2)
+        } else if task.isRunning {
+            Label(task.phase.activityLabel, systemImage: "dot.radiowaves.left.and.right")
+                .font(.caption)
+                .foregroundStyle(Color.accentColor)
+                .lineLimit(1)
+        } else {
+            Text(task.startedAt.formatted(date: .omitted, time: .shortened))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
     }
 
     private func submit() {
@@ -1994,76 +2050,27 @@ private struct OverlayDetailRow<Detail: View>: View {
 
 private struct OverlayActivityTaskRow: View {
     let task: OrchestratorTaskSnapshot
-    let now: Date
-    var showsDisclosure = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 7) {
-            HStack(alignment: .top, spacing: 8) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(task.instruction)
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(.primary)
-                        .lineLimit(2)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    if let failure = task.failureReason {
-                        Label(failure, systemImage: "exclamationmark.triangle.fill")
-                            .font(.caption)
-                            .foregroundStyle(.red)
-                            .lineLimit(2)
-                    } else if task.isRunning {
-                        Label(
-                            task.phase.activityLabel,
-                            systemImage: "dot.radiowaves.left.and.right"
-                        )
-                        .font(.caption)
-                        .foregroundStyle(Color.accentColor)
-                        .lineLimit(1)
-                    }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-
-                if showsDisclosure {
-                    Image(systemName: "chevron.right")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.tertiary)
-                        .padding(.top, 2)
-                }
+        HStack(alignment: .top, spacing: 8) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(task.instruction)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.primary)
+                    .lineLimit(2)
+                Text(task.isRunning ? task.phase.activityLabel : "Completed")
+                    .font(.caption)
+                    .foregroundStyle(task.isRunning ? Color.accentColor : .secondary)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
 
-            HStack(spacing: 10) {
-                OverlayActivityStat(
-                    systemImage: "arrow.down.to.line.compact",
-                    title: "In",
-                    value: "\(task.usage.inputTokens)"
-                )
-                OverlayActivityStat(
-                    systemImage: "arrow.up.to.line.compact",
-                    title: "Out",
-                    value: "\(task.usage.outputTokens)"
-                )
-                OverlayActivityStat(
-                    systemImage: "timer",
-                    title: "Time",
-                    value: formattedDuration(task.duration(at: now))
-                )
-            }
+            Image(systemName: "chevron.right")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.tertiary)
+                .padding(.top, 3)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private func formattedDuration(_ interval: TimeInterval) -> String {
-        let totalSeconds = max(0, Int(interval.rounded()))
-        let hours = totalSeconds / 3600
-        let minutes = (totalSeconds % 3600) / 60
-        let seconds = totalSeconds % 60
-        if hours > 0 {
-            return "\(hours)h \(minutes)m"
-        }
-        if minutes > 0 {
-            return "\(minutes)m \(seconds)s"
-        }
-        return "\(seconds)s"
+        .contentShape(Rectangle())
     }
 }
 
@@ -2094,6 +2101,50 @@ private struct OverlayActivityEventRow: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityLabel(event.kind.detailLabel)
+    }
+}
+
+private struct OverlayActivityRawPayload: View {
+    let event: UsageEvent
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(event.timestamp.formatted(date: .abbreviated, time: .standard))
+                .font(.caption2.monospacedDigit())
+                .foregroundStyle(.secondary)
+            Text(event.payloadText.isEmpty ? "Empty payload" : event.payloadText)
+                .font(.caption.monospaced())
+                .foregroundStyle(.primary)
+                .textSelection(.enabled)
+                .padding(.vertical, 6)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+private struct OverlayActivityStatsRow: View {
+    let metrics: OverlayActivityMetrics
+
+    var body: some View {
+        HStack(spacing: 12) {
+            OverlayActivityStat(
+                systemImage: "arrow.down.to.line.compact",
+                title: "In",
+                value: "\(metrics.inputTokens)"
+            )
+            OverlayActivityStat(
+                systemImage: "arrow.up.to.line.compact",
+                title: "Out",
+                value: "\(metrics.outputTokens)"
+            )
+            OverlayActivityStat(
+                systemImage: "timer",
+                title: "Time",
+                value: formattedActivityDuration(metrics.duration)
+            )
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -2144,9 +2195,34 @@ private enum ChatbotMenu: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
-private enum OverlayActivityRoute: Hashable {
+private enum OverlayActivityDisplay: Hashable {
+    case tasks
     case task(Int)
-    case rawEvent(taskID: Int, eventID: UUID)
+    case event(taskID: Int, eventID: UUID)
+}
+
+private struct OverlayActivityMetrics: Equatable {
+    var inputTokens: Int
+    var outputTokens: Int
+    var duration: TimeInterval
+
+    static let zero = OverlayActivityMetrics(
+        inputTokens: 0, outputTokens: 0, duration: 0
+    )
+}
+
+private func formattedActivityDuration(_ interval: TimeInterval) -> String {
+    let totalSeconds = max(0, Int(interval.rounded()))
+    let hours = totalSeconds / 3600
+    let minutes = (totalSeconds % 3600) / 60
+    let seconds = totalSeconds % 60
+    if hours > 0 {
+        return "\(hours)h \(minutes)m"
+    }
+    if minutes > 0 {
+        return "\(minutes)m \(seconds)s"
+    }
+    return "\(seconds)s"
 }
 
 private extension OrchestratorPhase {
