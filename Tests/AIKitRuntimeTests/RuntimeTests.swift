@@ -6,6 +6,19 @@ import AIKitCapability
 import AIKitSafety
 import AIKitTestSupport
 
+/// A `ContextHarvesting` that resolves nothing — sufficient for self-contained
+/// workflow plans, which never trigger a harvest.
+private struct StubHarvester: ContextHarvesting {
+    func harvest(_ slots: [WorkflowContextSlot]) async -> ContextPacket {
+        ContextPacket(slots: slots.map {
+            HarvestedSlot(
+                slotID: $0.slotID, source: $0.source,
+                status: .missing, candidates: [], required: $0.required
+            )
+        })
+    }
+}
+
 @Suite struct PromptBuilderTests {
     @Test func systemPromptIncludesPreambleFragmentAndMemory() {
         let context = ResolvedContext(
@@ -373,6 +386,67 @@ import AIKitTestSupport
         }
         #expect(toolCalled)
         #expect(finalAnswer == "You're on settings now.")
+    }
+
+    @Test func runWorkflowTaskHostsTwoRoundAsTrackedTurn() async throws {
+        let registry = ToolRegistry()
+        await registry.register(NavigateTool { input, _ in
+            .init(navigated: input.destination == "settings")
+        })
+        let resolver = ContextResolver()
+        await resolver.push(ViewContext(
+            id: .init("home"),
+            displayName: "Home",
+            systemPromptFragment: "You can navigate.",
+            toolNames: ["navigate"]
+        ))
+        let memory = InMemoryMemoryStore()
+        // A self-contained plan: the runner executes the DAG locally without a
+        // binder round, so one scripted planner response is enough.
+        let planJSON = """
+        {"outcome":"self_contained","intent_summary":"open settings",
+         "nodes":[{"id":"go","tool":"navigate","input":{"destination":"settings"}}]}
+        """
+        let provider = MockProvider(responses: [
+            LLMResponse(content: [.text(planJSON)], stopReason: .endTurn),
+        ])
+        let orchestrator = Orchestrator(
+            llm: LLMClient(provider: provider),
+            tools: registry,
+            memory: memory,
+            contextResolver: resolver,
+            guardrails: PolicyEngine(),
+            options: .init(model: "test", stream: false, workflowPlanning: false)
+        )
+
+        var toolNames: [String] = []
+        var sawFinal = false
+        for try await event in await orchestrator.runWorkflowTask(
+            intent: "open settings",
+            harvester: StubHarvester(),
+            plannerToolNames: ["navigate"],
+            sources: []
+        ) {
+            switch event {
+            case .toolCall(let name, _): toolNames.append(name)
+            case .finalAnswer: sawFinal = true
+            case .error(let error): Issue.record("unexpected error: \(error)")
+            default: break
+            }
+        }
+        #expect(toolNames.contains("navigate"))
+        #expect(sawFinal)
+
+        // The hosted workflow's node is recorded under the leaf view, so it
+        // lands in the activity history scoped to that view — the whole point
+        // of hosting it on the orchestrator instead of a side-run runner.
+        let recent = try await memory.recent(limit: 20, view: .init("home"))
+        #expect(recent.contains { $0.kind == .toolInvoked && $0.payloadText.contains("navigate") })
+        #expect(recent.contains { $0.kind == .toolResult && $0.payloadText.contains("navigate") })
+
+        // The turn finished, so the orchestrator is idle again (no leaked turn).
+        let activity = await orchestrator.snapshot()
+        #expect(activity.recentActivities.isEmpty == false)
     }
 
     @Test func workflowPlanningRejectsDirectToolCallsWithoutInvokingTool() async throws {

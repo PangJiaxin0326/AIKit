@@ -378,6 +378,163 @@ public actor Orchestrator {
         finishTurn(turnID)
     }
 
+    // MARK: - Workflow turns
+
+    /// Drives a two-round-trip workflow (plan → harvest → bind → execute) as a
+    /// tracked turn, so DAG tasks light up the same activity stream, busy
+    /// state, and failure surface as `run` — and the executed nodes are
+    /// recorded to memory under the current leaf view, exactly like a
+    /// sequential turn's tool calls.
+    ///
+    /// Hosts should prefer this over driving a `WorkflowTwoRoundRunner` off to
+    /// the side: a side-run workflow is invisible to `activityUpdates()` (so a
+    /// floating assistant button never reflects it) and never lands in the
+    /// activity history (so it can't be scoped to the active view). The
+    /// `harvester`, planner tool subset, and harvest `sources` are the same
+    /// ones you would hand the runner; `model`, temperature, and the tool
+    /// `viewID` are taken from this orchestrator's own configuration and the
+    /// resolver's current leaf.
+    public func runWorkflowTask(
+        intent: String,
+        harvester: any ContextHarvesting,
+        plannerToolNames: Set<String>,
+        sources: [String],
+        useStructuredOutput: Bool = false,
+        autoBind: Bool = true,
+        planCache: WorkflowPlanCache? = nil
+    ) -> AsyncThrowingStream<OrchestratorEvent, any Error> {
+        let turnID = nextTurnID()
+        // A new turn supersedes any prior failure.
+        lastFailureReason = nil
+        setPhase(.preparing, turn: turnID)
+        return AsyncThrowingStream { continuation in
+            let task = Task {
+                await self.runWorkflowTurn(
+                    intent: intent,
+                    harvester: harvester,
+                    plannerToolNames: plannerToolNames,
+                    sources: sources,
+                    useStructuredOutput: useStructuredOutput,
+                    autoBind: autoBind,
+                    planCache: planCache,
+                    turnID: turnID,
+                    emit: { continuation.yield($0) }
+                )
+                continuation.finish()
+            }
+            registerTask(task, turn: turnID)
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
+    private func runWorkflowTurn(
+        intent: String,
+        harvester: any ContextHarvesting,
+        plannerToolNames: Set<String>,
+        sources: [String],
+        useStructuredOutput: Bool,
+        autoBind: Bool,
+        planCache: WorkflowPlanCache?,
+        turnID: Int,
+        emit: @escaping @Sendable (OrchestratorEvent) -> Void
+    ) async {
+        defer { finishTurn(turnID) }
+
+        let context = await contextResolver.merged()
+        let viewID = context.leafID
+        try? await memory.append(UsageEvent(
+            viewID: viewID, kind: .userInstruction, text: intent
+        ))
+
+        guard let selectedModel = (options.model ?? llm.defaultModel)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .emptyAsNil else {
+            let error = LLMError.missingModel
+            recordFailure(errorMessage(error), turn: turnID)
+            emit(.error(error))
+            return
+        }
+
+        // The plan and bind rounds are model calls; surface them as "thinking"
+        // so the pet pulses for the whole turn. (The runner executes the DAG
+        // locally, so there's no per-node phase to forward.)
+        setPhase(.thinking, turn: turnID)
+        if Task.isCancelled { return }
+
+        let runner = WorkflowTwoRoundRunner(
+            llm: llm,
+            tools: tools,
+            harvester: harvester,
+            plannerToolNames: plannerToolNames,
+            options: .init(
+                model: selectedModel,
+                sources: sources,
+                temperature: options.temperature,
+                useStructuredOutput: useStructuredOutput,
+                autoBind: autoBind,
+                toolContext: ToolContext(
+                    viewID: viewID.rawValue,
+                    metadata: ["leafViewID": viewID.rawValue],
+                    logger: logger
+                )
+            ),
+            planCache: planCache
+        )
+
+        let result = await runner.run(intent: intent)
+        for call in result.calls {
+            emit(.usage(call.usage))
+        }
+
+        switch result.outcome {
+        case .executed(let workflow):
+            await recordWorkflowNodes(workflow, viewID: viewID, emit: emit)
+            let finalText = workflow.finalText ?? ""
+            if !finalText.isEmpty {
+                try? await memory.append(UsageEvent(
+                    viewID: viewID, kind: .llmResponse, text: finalText
+                ))
+            }
+            emit(.finalAnswer(finalText))
+        case .refused(let reason), .failed(let reason):
+            try? await memory.append(UsageEvent(
+                viewID: viewID, kind: .error, text: reason
+            ))
+            recordFailure(reason, turn: turnID)
+            emit(.failure(reason: reason))
+        }
+    }
+
+    /// Records each executed workflow node to memory (and the event stream) as
+    /// a tool invocation + result, so a hosted workflow's steps appear in the
+    /// activity history just like a sequential turn's tool calls.
+    private func recordWorkflowNodes(
+        _ workflow: WorkflowResult,
+        viewID: ViewContext.ID,
+        emit: @escaping @Sendable (OrchestratorEvent) -> Void
+    ) async {
+        for node in workflow.trace.nodes {
+            guard let tool = node.tool else { continue }
+            let outputText: String
+            if let output = workflow.nodeOutputs[node.nodeID],
+               let data = try? output.data() {
+                outputText = String(decoding: data, as: UTF8.self)
+            } else if let error = node.error {
+                outputText = error
+            } else {
+                outputText = node.status.rawValue
+            }
+            emit(.toolCall(name: tool, input: Data("{}".utf8)))
+            emit(.toolResult(name: tool, output: Data(outputText.utf8)))
+            try? await memory.append(UsageEvent(
+                viewID: viewID, kind: .toolInvoked, text: tool
+            ))
+            try? await memory.append(UsageEvent(
+                viewID: viewID, kind: .toolResult, text: "\(tool) -> \(outputText)"
+            ))
+        }
+    }
+
     public func snapshot(recentActivityLimit: Int = 10) async -> OrchestratorSnapshot {
         let contexts = await contextResolver.current()
         let resolved = await contextResolver.merged()
