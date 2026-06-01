@@ -27,6 +27,7 @@ let package = Package(
         // AIToolKit MultiModalKit pulls in (no "conflicting identity" warning).
         .package(url: "https://github.com/PangJiaxin0326/AIToolKit.git", branch: "main"),
         .package(url: "https://github.com/PangJiaxin0326/MultiModalKit.git", branch: "main"),
+        .package(url: "https://github.com/PangJiaxin0326/UICollection.git", branch: "main"),
     ],
     targets: [
         .target(
@@ -60,6 +61,11 @@ let package = Package(
                 "AIKitRuntime",
                 "AIKitSafety",
                 .product(name: "MultiModalKit", package: "MultiModalKit"),
+                .product(
+                    name: "UICollection",
+                    package: "UICollection",
+                    condition: .when(platforms: [.iOS])
+                )
             ],
             swiftSettings: swiftSettings
         ),

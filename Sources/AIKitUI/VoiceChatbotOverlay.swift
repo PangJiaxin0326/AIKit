@@ -19,18 +19,34 @@ public struct AIKitChatbotOverlay: View {
 
     private let orchestrator: Orchestrator
     private let mode: Mode
+    private let detailContent: @MainActor (AIKitOverlayContext) -> AnyView
 
     @MainActor
     public init(orchestrator: Orchestrator, mode: Mode = .assistant) {
         self.orchestrator = orchestrator
         self.mode = mode
+        self.detailContent = { _ in AnyView(EmptyView()) }
+    }
+
+    @MainActor
+    public init<DetailContent: View>(
+        orchestrator: Orchestrator,
+        mode: Mode = .assistant,
+        @ViewBuilder detailContent: @escaping @MainActor (AIKitOverlayContext) -> DetailContent
+    ) {
+        self.orchestrator = orchestrator
+        self.mode = mode
+        self.detailContent = { context in AnyView(detailContent(context)) }
     }
 
     @ViewBuilder
     public var body: some View {
         switch mode {
         case .assistant:
-            AssistantChatbotOverlay(orchestrator: orchestrator)
+            AssistantChatbotOverlay(
+                orchestrator: orchestrator,
+                detailContent: detailContent
+            )
         case .voice:
             VoiceChatbotOverlay(orchestrator: orchestrator)
         }

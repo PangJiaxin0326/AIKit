@@ -4,6 +4,9 @@ import Observation
 #if canImport(UIKit)
 import UIKit
 #endif
+#if os(iOS)
+import UICollection
+#endif
 import AIKitCore
 import AIKitCapability
 import AIKitRuntime
@@ -155,6 +158,155 @@ enum AIKitMetrics {
     /// failure-reason note — sized to sit concentrically within the panel.
     static let controlRadius: CGFloat = 14
 }
+
+/// Current UI context passed into custom AIKit overlay and tab-FAB content.
+public struct AIKitOverlayContext: Sendable, Hashable {
+    /// The deepest visible view context, either from the orchestrator snapshot
+    /// or provided by a tab integration.
+    public let currentViewContext: ViewContext?
+    public let resolvedContext: ResolvedContext
+    public let snapshot: OrchestratorSnapshot?
+
+    public init(
+        currentViewContext: ViewContext? = nil,
+        resolvedContext: ResolvedContext = .empty,
+        snapshot: OrchestratorSnapshot? = nil
+    ) {
+        self.currentViewContext = currentViewContext ?? snapshot?.contexts.last
+        self.resolvedContext = snapshot?.resolvedContext ?? resolvedContext
+        self.snapshot = snapshot
+    }
+}
+
+#if os(iOS)
+/// A tab item that can participate in AIKit's tab-bar assistant entry.
+public protocol AIKitChatbotTab: Hashable, CaseIterable, Identifiable, CustomStringConvertible, Sendable {
+    static var `default`: Self { get }
+    var symbol: String { get }
+}
+
+/// TabView wrapper with an AI assistant bottom accessory and a FAB panel.
+///
+/// The bottom accessory mirrors the expanded pet input surface: text entry,
+/// voice recording, live busy state, cancellation, and failure follow-up all
+/// use the same controls. The FAB panel shows app-provided content for the
+/// selected tab, plus a button that switches to AIKit's memory/tools/activity
+/// detail surface without a prompt field.
+public struct AIKitChatbotTabBar<Item: AIKitChatbotTab, TabContent: View, TabFabContent: View>: View {
+    @Binding private var activeTab: Item?
+    @State private var isFABExpanded = false
+    @State private var showsRuntimeDetails = false
+    @State private var selectedMenu = ChatbotMenu.context
+    @State private var activityDisplay: OverlayActivityDisplay = .tasks
+    @State private var snapshot: OrchestratorSnapshot?
+    @State private var activity: OrchestratorActivity = .idle
+
+    private let orchestrator: Orchestrator
+    private let viewContext: @Sendable (Item) -> ViewContext
+    private let tabContent: @MainActor (Item) -> TabContent
+    private let tabFabContent: @MainActor (AIKitOverlayContext, Item) -> TabFabContent
+
+    @MainActor
+    public init(
+        selection activeTab: Binding<Item?>,
+        orchestrator: Orchestrator,
+        viewContext: @escaping @Sendable (Item) -> ViewContext,
+        @ViewBuilder tabContent: @escaping @MainActor (Item) -> TabContent,
+        @ViewBuilder tabFabContent: @escaping @MainActor (AIKitOverlayContext, Item) -> TabFabContent
+    ) {
+        self._activeTab = activeTab
+        self.orchestrator = orchestrator
+        self.viewContext = viewContext
+        self.tabContent = tabContent
+        self.tabFabContent = tabFabContent
+    }
+
+    public var body: some View {
+        TabView(selection: $activeTab) {
+            ForEach(Array(Item.allCases), id: \.description) { tab in
+                Tab(tab.description, systemImage: tab.symbol, value: tab) {
+                    tabContent(tab)
+                        .aiKitActiveContext(activeTab == tab ? viewContext(tab) : nil)
+                        .aiKitTabFabOverlay(isPresented: isFABExpanded) {
+                            AIKitTabFabPanel(
+                                context: overlayContext(for: tab),
+                                snapshot: snapshot,
+                                activity: activity,
+                                selectedMenu: $selectedMenu,
+                                activityDisplay: $activityDisplay,
+                                showsRuntimeDetails: $showsRuntimeDetails
+                            ) {
+                                tabFabContent(overlayContext(for: tab), tab)
+                            }
+                        } onDismiss: {
+                            dismissFAB()
+                        }
+                }
+            }
+
+            Tab(value: .none, role: .search) {
+                EmptyView()
+            } label: {
+                Image(systemName: "sparkles")
+            }
+        }
+        .tabViewBottomAccessory {
+            AssistantTabBottomAccessory(orchestrator: orchestrator)
+        }
+        .tabBarMinimizeBehavior(.onScrollDown)
+        .onChange(of: activeTab) { oldValue, newValue in
+            handleActiveTabChange(oldValue: oldValue, newValue: newValue)
+        }
+        .onChange(of: selectedMenu) { _, menu in
+            if menu != .activity { activityDisplay = .tasks }
+        }
+        .task {
+            if activeTab == nil {
+                activeTab = Item.default
+            }
+            await refreshSnapshot()
+        }
+        .task {
+            for await update in orchestrator.activityUpdates() {
+                activity = update
+            }
+        }
+        .onChange(of: activity.isBusy) { _, busy in
+            if !busy {
+                Task { await refreshSnapshot() }
+            }
+        }
+    }
+
+    private func handleActiveTabChange(oldValue: Item?, newValue: Item?) {
+        guard newValue == nil else {
+            showsRuntimeDetails = false
+            return
+        }
+        activeTab = oldValue ?? Item.default
+        withAnimation(.spring(duration: 0.24)) {
+            showsRuntimeDetails = false
+            isFABExpanded.toggle()
+        }
+        Task { await refreshSnapshot() }
+    }
+
+    private func dismissFAB() {
+        withAnimation(.spring(duration: 0.24)) {
+            showsRuntimeDetails = false
+            isFABExpanded = false
+        }
+    }
+
+    private func overlayContext(for tab: Item) -> AIKitOverlayContext {
+        AIKitOverlayContext(currentViewContext: viewContext(tab), snapshot: snapshot)
+    }
+
+    private func refreshSnapshot() async {
+        snapshot = await orchestrator.snapshot(recentActivityLimit: 24, recentTaskLimit: 8)
+    }
+}
+#endif
 
 /// A SwiftUI state-management surface for AIKit's Core, Capability, Runtime,
 /// and Safety configuration.
@@ -724,13 +876,20 @@ struct AssistantChatbotOverlay: View {
     @GestureState private var isInteracting = false
 
     private let orchestrator: Orchestrator
+    private let detailContent: @MainActor (AIKitOverlayContext) -> AnyView
 
     private let petDiameter = AIKitMetrics.petDiameter
     private let edgeInset = AIKitMetrics.edgeInset
 
     @MainActor
-    init(orchestrator: Orchestrator) {
+    init(
+        orchestrator: Orchestrator,
+        detailContent: @escaping @MainActor (AIKitOverlayContext) -> AnyView = { _ in
+            AnyView(EmptyView())
+        }
+    ) {
         self.orchestrator = orchestrator
+        self.detailContent = detailContent
         _session = State(initialValue: AIKitSession(orchestrator: orchestrator))
     }
 
@@ -999,6 +1158,10 @@ struct AssistantChatbotOverlay: View {
         max(voiceRecorder.averagePowerLevel, voiceRecorder.peakPowerLevel * 0.85)
     }
 
+    private var overlayContext: AIKitOverlayContext {
+        AIKitOverlayContext(snapshot: snapshot)
+    }
+
     private func startVoiceRecording() {
         guard !activity.isBusy, !isVoiceTranscribing else { return }
         fieldFocused = false
@@ -1064,6 +1227,11 @@ struct AssistantChatbotOverlay: View {
             voiceRecorder.cancelRecording()
         }
         isVoiceTranscribing = false
+    }
+
+    private func clearVoiceError() {
+        voiceError = nil
+        fieldFocused = true
     }
 
     private func contextualFollowUp(
@@ -1150,116 +1318,24 @@ struct AssistantChatbotOverlay: View {
     }
 
     private func capsuleContent(in size: CGSize) -> some View {
-        HStack(spacing: 8) {
-            statusField
-                .padding(.leading, capsuleContentPadding)
-            capsuleActionButton
-                .padding(.trailing, capsuleContentPadding)
-        }
+        AssistantInputBar(
+            text: $capsuleDraft,
+            focused: $fieldFocused,
+            activity: activity,
+            voiceLevel: voiceLevel,
+            isRecording: voiceRecorder.isRecording,
+            isVoiceTranscribing: isVoiceTranscribing,
+            voiceError: voiceError,
+            horizontalPadding: capsuleContentPadding,
+            onSubmit: sendCapsule,
+            onStartVoiceRecording: startVoiceRecording,
+            onFinishVoiceRecording: finishVoiceRecording,
+            onCancelCurrentWork: cancelCurrentWork,
+            onDismissFailure: dismissFailure,
+            onTextChanged: { voiceError = nil },
+            onClearVoiceError: clearVoiceError
+        )
         .frame(width: capsuleContentWidth(in: size))
-    }
-
-    @ViewBuilder
-    private var statusField: some View {
-        if voiceRecorder.isRecording {
-            VoiceWaveformView(level: voiceLevel)
-                .frame(maxWidth: .infinity, alignment: .leading)
-        } else if isVoiceTranscribing {
-            HStack(spacing: 6) {
-                ProgressView().controlSize(.small)
-                Text("Transcribing")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-        } else if activity.isBusy {
-            HStack(spacing: 6) {
-                ProgressView().controlSize(.small)
-                Text(activity.statusText)
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-        } else if let voiceError {
-            HStack(spacing: 6) {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .foregroundStyle(.red)
-                Text(voiceError)
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .onTapGesture {
-                self.voiceError = nil
-                fieldFocused = true
-            }
-        } else {
-            TextField(
-                activity.hasFailed ? "Add a clarification…" : "Ask the assistant…",
-                text: $capsuleDraft,
-                axis: .vertical
-            )
-            .textFieldStyle(.plain)
-            .lineLimit(1...3)
-            .focused($fieldFocused)
-            .multilineTextAlignment(.leading)
-            .submitLabel(.send)
-            .onSubmit(sendCapsule)
-            .onChange(of: capsuleDraft) { _, _ in voiceError = nil }
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
-    }
-
-    @ViewBuilder
-    private var capsuleActionButton: some View {
-        let trimmedEmpty = capsuleDraft
-            .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        if voiceRecorder.isRecording {
-            Button(action: finishVoiceRecording) {
-                Image(systemName: "stop.fill")
-            }
-            .tint(.red)
-            .buttonStyle(.borderedProminent)
-            .buttonBorderShape(.circle)
-            .accessibilityLabel("Stop recording")
-        } else if isVoiceTranscribing {
-            EmptyView()
-        } else if activity.isBusy {
-            Button(action: cancelCurrentWork) {
-                Image(systemName: "stop.fill")
-            }
-            .tint(.red)
-            .buttonStyle(.borderedProminent)
-            .buttonBorderShape(.circle)
-            .accessibilityLabel("Cancel")
-        } else if activity.hasFailed && trimmedEmpty {
-            Button(action: dismissFailure) {
-                Image(systemName: "xmark")
-            }
-            .buttonStyle(.bordered)
-            .buttonBorderShape(.circle)
-            .accessibilityLabel("Dismiss")
-        } else if trimmedEmpty {
-            Button(action: startVoiceRecording) {
-                Image(systemName: "mic.fill")
-                    .symbolRenderingMode(.monochrome)
-            }
-            .buttonStyle(.borderedProminent)
-            .buttonBorderShape(.circle)
-            .tint(.accentColor)
-            .disabled(activity.isBusy || isVoiceTranscribing)
-            .accessibilityLabel("Start recording")
-        } else {
-            Button(action: sendCapsule) {
-                Image(systemName: "paperplane.fill")
-            }
-            .buttonStyle(.borderedProminent)
-            .buttonBorderShape(.circle)
-            .accessibilityLabel("Send")
-        }
     }
 
     private func reasonPanel(_ reason: String) -> some View {
@@ -1377,15 +1453,15 @@ struct AssistantChatbotOverlay: View {
     private var dialog: some View {
         VStack(alignment: .leading, spacing: 12) {
             dialogHeader
-
-            Picker("Menu", selection: $selectedMenu) {
-                ForEach(ChatbotMenu.allCases) { menu in
-                    Text(menu.rawValue).tag(menu)
-                }
-            }
-            .pickerStyle(.segmented)
-
-            dialogMenuContent
+            detailContent(overlayContext)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            AssistantRuntimeDetailContent(
+                snapshot: snapshot,
+                activity: activity,
+                selectedMenu: $selectedMenu,
+                activityDisplay: $activityDisplay,
+                maxContentHeight: 260
+            )
 
             dialogTranscript
             dialogInput
@@ -1443,22 +1519,6 @@ struct AssistantChatbotOverlay: View {
     }
 
     @ViewBuilder
-    private var dialogMenuContent: some View {
-        if selectedMenu == .activity {
-            activityContent
-                .frame(maxHeight: 260)
-        } else {
-            ScrollView {
-                menuContent
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.vertical, 2)
-            }
-            .scrollIndicators(.hidden)
-            .frame(maxHeight: 260)
-        }
-    }
-
-    @ViewBuilder
     private var dialogTranscript: some View {
         if !session.reasoningText.isEmpty {
             Text(session.reasoningText)
@@ -1504,264 +1564,6 @@ struct AssistantChatbotOverlay: View {
         }
     }
 
-    @ViewBuilder
-    private var menuContent: some View {
-        switch selectedMenu {
-        case .context:
-            contextContent
-        case .tools:
-            toolsContent
-        case .activity:
-            activityContent
-        }
-    }
-
-    private var contextContent: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            if let snapshot, !snapshot.contexts.isEmpty {
-                ForEach(snapshot.contexts) { context in
-                    OverlayDetailRow(title: context.displayName) {
-                        Text(context.id.rawValue)
-                            .monospaced()
-                        if !context.systemPromptFragment.isEmpty {
-                            Text(context.systemPromptFragment)
-                                .lineLimit(3)
-                        }
-                        if !context.toolNames.isEmpty {
-                            Text(context.toolNames.sorted().joined(separator: ", "))
-                                .lineLimit(2)
-                        }
-                    }
-                }
-            } else {
-                OverlayEmptyState(
-                    systemImage: "questionmark.bubble",
-                    message: "No active context"
-                )
-            }
-        }
-    }
-
-    private var toolsContent: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            if let snapshot, !snapshot.availableTools.isEmpty {
-                ForEach(snapshot.availableTools) { tool in
-                    OverlayDetailRow(title: tool.name) {
-                        Text(tool.description)
-                            .lineLimit(3)
-                    }
-                }
-            } else {
-                OverlayEmptyState(
-                    systemImage: "wrench.and.screwdriver",
-                    message: "No tools available"
-                )
-            }
-        }
-    }
-
-    private var activityContent: some View {
-        TimelineView(.periodic(from: Date(), by: 1)) { timeline in
-            VStack(alignment: .leading, spacing: 10) {
-                activityHeader
-                OverlayActivityStatsRow(metrics: activityMetrics(now: timeline.date))
-                ScrollView {
-                    activityRows(now: timeline.date)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.vertical, 2)
-                }
-                .scrollIndicators(.hidden)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .animation(.snappy(duration: 0.18), value: activityDisplay)
-        }
-    }
-
-    @ViewBuilder
-    private var activityHeader: some View {
-        HStack(alignment: .top, spacing: 8) {
-            if let destination = activityBackDestination {
-                Button {
-                    activityDisplay = destination
-                } label: {
-                    Image(systemName: "chevron.left")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 24, height: 24)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Back")
-            }
-
-            VStack(alignment: .leading, spacing: 3) {
-                switch activityDisplay {
-                case .tasks:
-                    Text("Tasks")
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(.primary)
-                    Text(activityTaskGroups.isEmpty ? "No recent activity" : "\(activityTaskGroups.count) recent")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                case .task(let id):
-                    if let task = activityTask(id: id) {
-                        Text(task.instruction)
-                            .font(.subheadline.weight(.semibold))
-                            .foregroundStyle(.primary)
-                            .lineLimit(2)
-                        activityStatusText(for: task)
-                    } else {
-                        Text("Task unavailable")
-                            .font(.subheadline.weight(.semibold))
-                            .foregroundStyle(.primary)
-                    }
-                case .event(let taskID, let eventID):
-                    if let event = activityEvent(taskID: taskID, eventID: eventID) {
-                        Text(event.kind.rawDetailTitle)
-                            .font(.subheadline.weight(.semibold))
-                            .foregroundStyle(.primary)
-                        Text(event.kind.detailLabel)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    } else {
-                        Text("Detail unavailable")
-                            .font(.subheadline.weight(.semibold))
-                            .foregroundStyle(.primary)
-                    }
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
-    }
-
-    @ViewBuilder
-    private func activityRows(now: Date) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            switch activityDisplay {
-            case .tasks:
-                let tasks = activityTaskGroups
-                if tasks.isEmpty {
-                    OverlayEmptyState(systemImage: "clock", message: "No recent activity")
-                } else {
-                    ForEach(tasks) { task in
-                        Button {
-                            activityDisplay = .task(task.id)
-                        } label: {
-                            OverlayActivityTaskRow(task: task)
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-            case .task(let id):
-                if let task = activityTask(id: id) {
-                    if task.activities.isEmpty {
-                        OverlayEmptyState(
-                            systemImage: "list.bullet.rectangle",
-                            message: "No task details"
-                        )
-                    } else {
-                        ForEach(task.activities) { event in
-                            Button {
-                                activityDisplay = .event(taskID: task.id, eventID: event.id)
-                            } label: {
-                                OverlayActivityEventRow(event: event)
-                            }
-                            .buttonStyle(.plain)
-                        }
-                    }
-                } else {
-                    OverlayEmptyState(
-                        systemImage: "clock.arrow.circlepath",
-                        message: "Activity no longer available"
-                    )
-                }
-            case .event(let taskID, let eventID):
-                if let event = activityEvent(taskID: taskID, eventID: eventID) {
-                    OverlayActivityRawPayload(event: event)
-                } else {
-                    OverlayEmptyState(
-                        systemImage: "doc.text.magnifyingglass",
-                        message: "Raw payload no longer available"
-                    )
-                }
-            }
-        }
-    }
-
-    private var activityTaskGroups: [OrchestratorTaskSnapshot] {
-        var seen = Set<Int>()
-        var groups: [OrchestratorTaskSnapshot] = []
-        for task in activity.activeTasks.sorted(by: { $0.startedAt > $1.startedAt }) {
-            if seen.insert(task.id).inserted {
-                groups.append(task)
-            }
-        }
-        for task in snapshot?.recentTasks ?? [] {
-            if seen.insert(task.id).inserted {
-                groups.append(task)
-            }
-        }
-        return groups
-    }
-
-    private func activityTask(id: Int) -> OrchestratorTaskSnapshot? {
-        activityTaskGroups.first { $0.id == id }
-    }
-
-    private func activityEvent(taskID: Int, eventID: UUID) -> UsageEvent? {
-        activityTask(id: taskID)?.activities.first { $0.id == eventID }
-    }
-
-    private var activityBackDestination: OverlayActivityDisplay? {
-        switch activityDisplay {
-        case .tasks:
-            return nil
-        case .task:
-            return .tasks
-        case .event(let taskID, _):
-            return .task(taskID)
-        }
-    }
-
-    private func activityMetrics(now: Date) -> OverlayActivityMetrics {
-        switch activityDisplay {
-        case .tasks:
-            return activityTaskGroups.reduce(.zero) { partial, task in
-                OverlayActivityMetrics(
-                    inputTokens: partial.inputTokens + task.usage.inputTokens,
-                    outputTokens: partial.outputTokens + task.usage.outputTokens,
-                    duration: partial.duration + task.duration(at: now)
-                )
-            }
-        case .task(let id), .event(let id, _):
-            guard let task = activityTask(id: id) else { return .zero }
-            return OverlayActivityMetrics(
-                inputTokens: task.usage.inputTokens,
-                outputTokens: task.usage.outputTokens,
-                duration: task.duration(at: now)
-            )
-        }
-    }
-
-    @ViewBuilder
-    private func activityStatusText(for task: OrchestratorTaskSnapshot) -> some View {
-        if let failure = task.failureReason {
-            Label(failure, systemImage: "exclamationmark.triangle.fill")
-                .font(.caption)
-                .foregroundStyle(.red)
-                .lineLimit(2)
-        } else if task.isRunning {
-            Label(task.phase.activityLabel, systemImage: "dot.radiowaves.left.and.right")
-                .font(.caption)
-                .foregroundStyle(Color.accentColor)
-                .lineLimit(1)
-        } else {
-            Text(task.startedAt.formatted(date: .omitted, time: .shortened))
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        }
-    }
-
     private func submit() {
         let instruction = draft
         draft = ""
@@ -1785,6 +1587,20 @@ public extension View {
     ) -> some View {
         overlay {
             AIKitChatbotOverlay(orchestrator: orchestrator, mode: mode)
+        }
+    }
+
+    func aiChatbotOverlay<DetailContent: View>(
+        orchestrator: Orchestrator,
+        mode: AIKitChatbotOverlay.Mode = .assistant,
+        @ViewBuilder detailContent: @escaping @MainActor (AIKitOverlayContext) -> DetailContent
+    ) -> some View {
+        overlay {
+            AIKitChatbotOverlay(
+                orchestrator: orchestrator,
+                mode: mode,
+                detailContent: detailContent
+            )
         }
     }
 }
@@ -2001,6 +1817,737 @@ private struct AIKitConfigurationSection<Content: View>: View {
     }
 }
 
+#if os(iOS)
+private struct AIKitTabFabPanel<CustomContent: View>: View {
+    let context: AIKitOverlayContext
+    let snapshot: OrchestratorSnapshot?
+    let activity: OrchestratorActivity
+    @Binding var selectedMenu: ChatbotMenu
+    @Binding var activityDisplay: OverlayActivityDisplay
+    @Binding var showsRuntimeDetails: Bool
+
+    private let customContent: () -> CustomContent
+
+    init(
+        context: AIKitOverlayContext,
+        snapshot: OrchestratorSnapshot?,
+        activity: OrchestratorActivity,
+        selectedMenu: Binding<ChatbotMenu>,
+        activityDisplay: Binding<OverlayActivityDisplay>,
+        showsRuntimeDetails: Binding<Bool>,
+        @ViewBuilder customContent: @escaping () -> CustomContent
+    ) {
+        self.context = context
+        self.snapshot = snapshot
+        self.activity = activity
+        self._selectedMenu = selectedMenu
+        self._activityDisplay = activityDisplay
+        self._showsRuntimeDetails = showsRuntimeDetails
+        self.customContent = customContent
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if showsRuntimeDetails {
+                runtimeDetailHeader
+                AssistantRuntimeDetailContent(
+                    snapshot: snapshot,
+                    activity: activity,
+                    selectedMenu: $selectedMenu,
+                    activityDisplay: $activityDisplay,
+                    maxContentHeight: 158
+                )
+            } else {
+                customContent()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+
+                Button {
+                    withAnimation(.spring(duration: 0.24)) {
+                        showsRuntimeDetails = true
+                    }
+                } label: {
+                    Label("AI details", systemImage: "sparkles")
+                }
+                .buttonStyle(.bordered)
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private var runtimeDetailHeader: some View {
+        HStack(spacing: 8) {
+            Button {
+                withAnimation(.spring(duration: 0.24)) {
+                    showsRuntimeDetails = false
+                    activityDisplay = .tasks
+                }
+            } label: {
+                Image(systemName: "chevron.left")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 26, height: 26)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Back")
+
+            Text(context.currentViewContext?.displayName ?? "AI Details")
+                .font(.subheadline.weight(.semibold))
+                .lineLimit(1)
+            Spacer(minLength: 0)
+        }
+    }
+}
+
+private struct AssistantTabBottomAccessory: View {
+    @State private var session: AIKitSession
+    @StateObject private var voiceRecorder = AudioRecorder()
+    @State private var draft = ""
+    @State private var isVoiceTranscribing = false
+    @State private var voiceError: String?
+    @State private var voiceTask: Task<Void, Never>?
+    @State private var lastInstruction = ""
+    @State private var activity: OrchestratorActivity = .idle
+    @FocusState private var fieldFocused: Bool
+
+    private let orchestrator: Orchestrator
+
+    @MainActor
+    init(orchestrator: Orchestrator) {
+        self.orchestrator = orchestrator
+        _session = State(initialValue: AIKitSession(orchestrator: orchestrator))
+    }
+
+    var body: some View {
+        AssistantInputBar(
+            text: $draft,
+            focused: $fieldFocused,
+            activity: activity,
+            voiceLevel: voiceLevel,
+            isRecording: voiceRecorder.isRecording,
+            isVoiceTranscribing: isVoiceTranscribing,
+            voiceError: voiceError,
+            horizontalPadding: 12,
+            onSubmit: sendDraft,
+            onStartVoiceRecording: startVoiceRecording,
+            onFinishVoiceRecording: finishVoiceRecording,
+            onCancelCurrentWork: cancelCurrentWork,
+            onDismissFailure: dismissFailure,
+            onTextChanged: { voiceError = nil },
+            onClearVoiceError: clearVoiceError
+        )
+        .frame(maxWidth: .infinity)
+        .frame(minHeight: 44)
+        .chatbotCapsuleStyle(tint: tint)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .task {
+            for await update in orchestrator.activityUpdates() {
+                activity = update
+            }
+        }
+        .onChange(of: activity.isBusy) { _, busy in
+            if !busy && !activity.hasFailed { draft = "" }
+        }
+        .onDisappear { cancelVoiceInput() }
+    }
+
+    private var tint: Color {
+        if activity.hasFailed { return .red }
+        if activity.isBusy { return .yellow }
+        return .accentColor
+    }
+
+    private var voiceLevel: Double {
+        max(voiceRecorder.averagePowerLevel, voiceRecorder.peakPowerLevel * 0.85)
+    }
+
+    private func sendDraft() {
+        sendText(draft)
+    }
+
+    private func sendText(_ rawText: String) {
+        let text = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty, !activity.isBusy else { return }
+        draft = ""
+        let instruction = activity.hasFailed
+            ? contextualFollowUp(
+                previous: lastInstruction,
+                reason: activity.failureReason,
+                followUp: text
+              )
+            : text
+        lastInstruction = text
+        Task { await session.send(instruction) }
+    }
+
+    private func startVoiceRecording() {
+        guard !activity.isBusy, !isVoiceTranscribing else { return }
+        fieldFocused = false
+        draft = ""
+        voiceError = nil
+        voiceTask?.cancel()
+        voiceTask = Task { @MainActor in
+            do {
+                try await PermissionCenter.require(.speechRecognition)
+                try Task.checkCancellation()
+                _ = try await voiceRecorder.startRecordingWithPermission(
+                    configuration: AudioRecordingConfiguration(format: .wav)
+                )
+            } catch is CancellationError {
+                voiceRecorder.cancelRecording()
+            } catch {
+                voiceError = error.localizedDescription
+                voiceRecorder.cancelRecording()
+            }
+        }
+    }
+
+    private func finishVoiceRecording() {
+        guard let url = voiceRecorder.stopRecording() else { return }
+        transcribeVoiceRecording(at: url)
+    }
+
+    private func transcribeVoiceRecording(at url: URL) {
+        isVoiceTranscribing = true
+        voiceError = nil
+        voiceTask?.cancel()
+        voiceTask = Task { @MainActor [url] in
+            defer {
+                isVoiceTranscribing = false
+                voiceTask = nil
+                try? FileManager.default.removeItem(at: url)
+            }
+
+            do {
+                let result = try await SpeechTranscriptionService()
+                    .transcribeAudioFile(at: url)
+                try Task.checkCancellation()
+
+                let text = result.plainText
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !text.isEmpty else {
+                    voiceError = "No speech detected."
+                    return
+                }
+                sendText(text)
+            } catch is CancellationError {
+                voiceRecorder.cancelRecording()
+            } catch {
+                voiceError = error.localizedDescription
+            }
+        }
+    }
+
+    private func cancelVoiceInput() {
+        voiceTask?.cancel()
+        voiceTask = nil
+        if voiceRecorder.isRecording {
+            voiceRecorder.cancelRecording()
+        }
+        isVoiceTranscribing = false
+    }
+
+    private func clearVoiceError() {
+        voiceError = nil
+        fieldFocused = true
+    }
+
+    private func contextualFollowUp(
+        previous: String,
+        reason: String?,
+        followUp: String
+    ) -> String {
+        var parts = ["This is a follow-up to a request you could not complete."]
+        if !previous.isEmpty {
+            parts.append("Your earlier request was: \"\(previous)\"")
+        }
+        if let reason, !reason.isEmpty {
+            parts.append("It could not be completed because: \(reason)")
+        }
+        parts.append("Clarification / new instruction: \(followUp)")
+        parts.append(
+            "Treat the earlier request and this clarification as one request."
+        )
+        return parts.joined(separator: "\n")
+    }
+
+    private func cancelCurrentWork() {
+        Task { await orchestrator.cancelActiveTurns() }
+    }
+
+    private func dismissFailure() {
+        fieldFocused = false
+        Task { await orchestrator.cancelActiveTurns() }
+    }
+}
+
+private struct AIKitTabFabOverlayModifier<ViewContent: View>: ViewModifier {
+    var isPresented: Bool
+    let viewContent: () -> ViewContent
+    let onDismiss: () -> Void
+
+    func body(content: Content) -> some View {
+        content
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .overlay {
+                GlassEffectContainer {
+                    if isPresented {
+                        Rectangle()
+                            .fill(.black.opacity(0.25))
+                            .contentShape(.rect)
+                            .onTapGesture(perform: onDismiss)
+                            .ignoresSafeArea()
+                            .transition(.opacity)
+                    }
+                    if isPresented {
+                        viewContent()
+                            .clipShape(.rect(cornerRadius: 30))
+                            .glassEffect(.regular.interactive(), in: .rect(cornerRadius: 30))
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 220)
+                            .frame(maxHeight: .infinity, alignment: .bottom)
+                            .padding(.horizontal, 15)
+                            .padding(.bottom, 10)
+                    }
+                }
+                .allowsHitTesting(isPresented)
+                .animation(
+                    .interpolatingSpring(duration: 0.3, bounce: 0, initialVelocity: 0),
+                    value: isPresented
+                )
+            }
+    }
+}
+#endif
+
+private struct AssistantRuntimeDetailContent: View {
+    let snapshot: OrchestratorSnapshot?
+    let activity: OrchestratorActivity
+    @Binding var selectedMenu: ChatbotMenu
+    @Binding var activityDisplay: OverlayActivityDisplay
+    let maxContentHeight: CGFloat
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Picker("Menu", selection: $selectedMenu) {
+                ForEach(ChatbotMenu.allCases) { menu in
+                    Text(menu.rawValue).tag(menu)
+                }
+            }
+            .pickerStyle(.segmented)
+
+            menuContent
+        }
+        .animation(.snappy(duration: 0.2), value: selectedMenu)
+        .animation(.snappy(duration: 0.18), value: activityDisplay)
+    }
+
+    @ViewBuilder
+    private var menuContent: some View {
+        if selectedMenu == .activity {
+            activityContent
+                .frame(maxHeight: maxContentHeight)
+        } else {
+            ScrollView {
+                switch selectedMenu {
+                case .context:
+                    memoryContent
+                case .tools:
+                    toolsContent
+                case .activity:
+                    activityContent
+                }
+            }
+            .scrollIndicators(.hidden)
+            .frame(maxHeight: maxContentHeight)
+        }
+    }
+
+    private var memoryContent: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            if let snapshot, !snapshot.contexts.isEmpty {
+                ForEach(snapshot.contexts) { context in
+                    OverlayDetailRow(title: context.displayName) {
+                        Text(context.id.rawValue)
+                            .monospaced()
+                        if !context.systemPromptFragment.isEmpty {
+                            Text(context.systemPromptFragment)
+                                .lineLimit(3)
+                        }
+                        if !context.toolNames.isEmpty {
+                            Text(context.toolNames.sorted().joined(separator: ", "))
+                                .lineLimit(2)
+                        }
+                    }
+                }
+            } else {
+                OverlayEmptyState(
+                    systemImage: "questionmark.bubble",
+                    message: "No active memory"
+                )
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, 2)
+    }
+
+    private var toolsContent: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            if let snapshot, !snapshot.availableTools.isEmpty {
+                ForEach(snapshot.availableTools) { tool in
+                    OverlayDetailRow(title: tool.name) {
+                        Text(tool.description)
+                            .lineLimit(3)
+                    }
+                }
+            } else {
+                OverlayEmptyState(
+                    systemImage: "wrench.and.screwdriver",
+                    message: "No tools available"
+                )
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, 2)
+    }
+
+    private var activityContent: some View {
+        TimelineView(.periodic(from: Date(), by: 1)) { timeline in
+            VStack(alignment: .leading, spacing: 10) {
+                activityHeader
+                OverlayActivityStatsRow(metrics: activityMetrics(now: timeline.date))
+                ScrollView {
+                    activityRows(now: timeline.date)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.vertical, 2)
+                }
+                .scrollIndicators(.hidden)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    @ViewBuilder
+    private var activityHeader: some View {
+        HStack(alignment: .top, spacing: 8) {
+            if let destination = activityBackDestination {
+                Button {
+                    activityDisplay = destination
+                } label: {
+                    Image(systemName: "chevron.left")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 24, height: 24)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Back")
+            }
+
+            VStack(alignment: .leading, spacing: 3) {
+                switch activityDisplay {
+                case .tasks:
+                    Text("Tasks")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.primary)
+                    Text(activityTaskGroups.isEmpty ? "No recent activity" : "\(activityTaskGroups.count) recent")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                case .task(let id):
+                    if let task = activityTask(id: id) {
+                        Text(task.instruction)
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(.primary)
+                            .lineLimit(2)
+                        activityStatusText(for: task)
+                    } else {
+                        Text("Task unavailable")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(.primary)
+                    }
+                case .event(let taskID, let eventID):
+                    if let event = activityEvent(taskID: taskID, eventID: eventID) {
+                        Text(event.kind.rawDetailTitle)
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(.primary)
+                        Text(event.kind.detailLabel)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Text("Detail unavailable")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(.primary)
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    @ViewBuilder
+    private func activityRows(now: Date) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            switch activityDisplay {
+            case .tasks:
+                let tasks = activityTaskGroups
+                if tasks.isEmpty {
+                    OverlayEmptyState(systemImage: "clock", message: "No recent activity")
+                } else {
+                    ForEach(tasks) { task in
+                        Button {
+                            activityDisplay = .task(task.id)
+                        } label: {
+                            OverlayActivityTaskRow(task: task)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            case .task(let id):
+                if let task = activityTask(id: id) {
+                    if task.activities.isEmpty {
+                        OverlayEmptyState(
+                            systemImage: "list.bullet.rectangle",
+                            message: "No task details"
+                        )
+                    } else {
+                        ForEach(task.activities) { event in
+                            Button {
+                                activityDisplay = .event(taskID: task.id, eventID: event.id)
+                            } label: {
+                                OverlayActivityEventRow(event: event)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                } else {
+                    OverlayEmptyState(
+                        systemImage: "clock.arrow.circlepath",
+                        message: "Activity no longer available"
+                    )
+                }
+            case .event(let taskID, let eventID):
+                if let event = activityEvent(taskID: taskID, eventID: eventID) {
+                    OverlayActivityRawPayload(event: event)
+                } else {
+                    OverlayEmptyState(
+                        systemImage: "doc.text.magnifyingglass",
+                        message: "Raw payload no longer available"
+                    )
+                }
+            }
+        }
+    }
+
+    private var activityTaskGroups: [OrchestratorTaskSnapshot] {
+        var seen = Set<Int>()
+        var groups: [OrchestratorTaskSnapshot] = []
+        for task in activity.activeTasks.sorted(by: { $0.startedAt > $1.startedAt }) {
+            if seen.insert(task.id).inserted {
+                groups.append(task)
+            }
+        }
+        for task in snapshot?.recentTasks ?? [] {
+            if seen.insert(task.id).inserted {
+                groups.append(task)
+            }
+        }
+        return groups
+    }
+
+    private func activityTask(id: Int) -> OrchestratorTaskSnapshot? {
+        activityTaskGroups.first { $0.id == id }
+    }
+
+    private func activityEvent(taskID: Int, eventID: UUID) -> UsageEvent? {
+        activityTask(id: taskID)?.activities.first { $0.id == eventID }
+    }
+
+    private var activityBackDestination: OverlayActivityDisplay? {
+        switch activityDisplay {
+        case .tasks:
+            return nil
+        case .task:
+            return .tasks
+        case .event(let taskID, _):
+            return .task(taskID)
+        }
+    }
+
+    private func activityMetrics(now: Date) -> OverlayActivityMetrics {
+        switch activityDisplay {
+        case .tasks:
+            return activityTaskGroups.reduce(.zero) { partial, task in
+                OverlayActivityMetrics(
+                    inputTokens: partial.inputTokens + task.usage.inputTokens,
+                    outputTokens: partial.outputTokens + task.usage.outputTokens,
+                    duration: partial.duration + task.duration(at: now)
+                )
+            }
+        case .task(let id), .event(let id, _):
+            guard let task = activityTask(id: id) else { return .zero }
+            return OverlayActivityMetrics(
+                inputTokens: task.usage.inputTokens,
+                outputTokens: task.usage.outputTokens,
+                duration: task.duration(at: now)
+            )
+        }
+    }
+
+    @ViewBuilder
+    private func activityStatusText(for task: OrchestratorTaskSnapshot) -> some View {
+        if let failure = task.failureReason {
+            Label(failure, systemImage: "exclamationmark.triangle.fill")
+                .font(.caption)
+                .foregroundStyle(.red)
+                .lineLimit(2)
+        } else if task.isRunning {
+            Label(task.phase.activityLabel, systemImage: "dot.radiowaves.left.and.right")
+                .font(.caption)
+                .foregroundStyle(Color.accentColor)
+                .lineLimit(1)
+        } else {
+            Text(task.startedAt.formatted(date: .omitted, time: .shortened))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+}
+
+private struct AssistantInputBar: View {
+    @Binding var text: String
+
+    let focused: FocusState<Bool>.Binding
+    let activity: OrchestratorActivity
+    let voiceLevel: Double
+    let isRecording: Bool
+    let isVoiceTranscribing: Bool
+    let voiceError: String?
+    let horizontalPadding: CGFloat
+    let onSubmit: () -> Void
+    let onStartVoiceRecording: () -> Void
+    let onFinishVoiceRecording: () -> Void
+    let onCancelCurrentWork: () -> Void
+    let onDismissFailure: () -> Void
+    let onTextChanged: () -> Void
+    let onClearVoiceError: () -> Void
+
+    private var trimmedTextIsEmpty: Bool {
+        text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            statusField
+                .padding(.leading, horizontalPadding)
+            actionButton
+                .padding(.trailing, horizontalPadding)
+        }
+    }
+
+    @ViewBuilder
+    private var statusField: some View {
+        if isRecording {
+            VoiceWaveformView(level: voiceLevel)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        } else if isVoiceTranscribing {
+            statusRow(systemImage: nil, text: "Transcribing", showsProgress: true)
+        } else if activity.isBusy {
+            statusRow(systemImage: nil, text: activity.statusText, showsProgress: true)
+        } else if let voiceError {
+            statusRow(
+                systemImage: "exclamationmark.triangle.fill",
+                text: voiceError,
+                showsProgress: false
+            )
+            .onTapGesture(perform: onClearVoiceError)
+        } else {
+            TextField(
+                activity.hasFailed ? "Add a clarification…" : "Ask the assistant…",
+                text: $text,
+                axis: .vertical
+            )
+            .textFieldStyle(.plain)
+            .lineLimit(1...3)
+            .focused(focused)
+            .multilineTextAlignment(.leading)
+            .submitLabel(.send)
+            .onSubmit(onSubmit)
+            .onChange(of: text) { _, _ in onTextChanged() }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private func statusRow(
+        systemImage: String?,
+        text: String,
+        showsProgress: Bool
+    ) -> some View {
+        HStack(spacing: 6) {
+            if showsProgress {
+                ProgressView().controlSize(.small)
+            }
+            if let systemImage {
+                Image(systemName: systemImage)
+                    .foregroundStyle(.red)
+            }
+            Text(text)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    @ViewBuilder
+    private var actionButton: some View {
+        if isRecording {
+            Button(action: onFinishVoiceRecording) {
+                Image(systemName: "stop.fill")
+            }
+            .tint(.red)
+            .buttonStyle(.borderedProminent)
+            .buttonBorderShape(.circle)
+            .accessibilityLabel("Stop recording")
+        } else if isVoiceTranscribing {
+            EmptyView()
+        } else if activity.isBusy {
+            Button(action: onCancelCurrentWork) {
+                Image(systemName: "stop.fill")
+            }
+            .tint(.red)
+            .buttonStyle(.borderedProminent)
+            .buttonBorderShape(.circle)
+            .accessibilityLabel("Cancel")
+        } else if activity.hasFailed && trimmedTextIsEmpty {
+            Button(action: onDismissFailure) {
+                Image(systemName: "xmark")
+            }
+            .buttonStyle(.bordered)
+            .buttonBorderShape(.circle)
+            .accessibilityLabel("Dismiss")
+        } else if trimmedTextIsEmpty {
+            Button(action: onStartVoiceRecording) {
+                Image(systemName: "mic.fill")
+                    .symbolRenderingMode(.monochrome)
+            }
+            .buttonStyle(.borderedProminent)
+            .buttonBorderShape(.circle)
+            .tint(.accentColor)
+            .disabled(activity.isBusy || isVoiceTranscribing)
+            .accessibilityLabel("Start recording")
+        } else {
+            Button(action: onSubmit) {
+                Image(systemName: "paperplane.fill")
+            }
+            .buttonStyle(.borderedProminent)
+            .buttonBorderShape(.circle)
+            .accessibilityLabel("Send")
+        }
+    }
+}
+
 private struct VoiceWaveformView: View {
     let level: Double
 
@@ -2213,7 +2760,7 @@ private struct OverlayEmptyState: View {
 }
 
 private enum ChatbotMenu: String, CaseIterable, Identifiable {
-    case context = "Context"
+    case context = "Memory"
     case tools = "Tools"
     case activity = "Activity"
 
@@ -2322,6 +2869,26 @@ private extension Comparable {
     }
 }
 
+private struct AIKitActiveContextModifier: ViewModifier {
+    @Environment(\.aiContextResolver) private var resolver
+    let context: ViewContext?
+
+    func body(content: Content) -> some View {
+        content
+            .task(id: context) {
+                guard let context else { return }
+                let token = await resolver.push(context)
+                do {
+                    while true {
+                        try await Task.sleep(nanoseconds: 3_600_000_000_000)
+                    }
+                } catch {
+                    await resolver.pop(token)
+                }
+            }
+    }
+}
+
 private extension View {
     /// The one inset-container treatment — a soft filled surface inside a
     /// single hairline and one continuous curve — shared by every editable
@@ -2363,6 +2930,24 @@ private extension View {
                 .shadow(color: tint.opacity(0.25), radius: 10, y: 4)
         }
     }
+
+    #if os(iOS)
+    func aiKitActiveContext(_ context: ViewContext?) -> some View {
+        modifier(AIKitActiveContextModifier(context: context))
+    }
+
+    func aiKitTabFabOverlay<Content: View>(
+        isPresented: Bool,
+        @ViewBuilder content: @escaping () -> Content,
+        onDismiss: @escaping () -> Void
+    ) -> some View {
+        modifier(AIKitTabFabOverlayModifier(
+            isPresented: isPresented,
+            viewContent: content,
+            onDismiss: onDismiss
+        ))
+    }
+    #endif
 }
 
 private extension String {
