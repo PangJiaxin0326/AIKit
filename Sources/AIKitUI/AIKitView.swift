@@ -691,6 +691,7 @@ struct AssistantChatbotOverlay: View {
     /// to the pet. Toggled by a tap.
     @State private var isExpanded = false
     @State private var selectedMenu = ChatbotMenu.context
+    @State private var activityPath: [OverlayActivityRoute] = []
     @State private var draft = ""
     @State private var capsuleDraft = ""
     @State private var isVoiceTranscribing = false
@@ -798,6 +799,9 @@ struct AssistantChatbotOverlay: View {
         .onChange(of: activity.hasFailed) { _, failed in
             // Surface a failure immediately so the reason panel is visible.
             if failed { withAnimation(.spring(duration: 0.28)) { isExpanded = true } }
+        }
+        .onChange(of: selectedMenu) { _, menu in
+            if menu != .activity { activityPath.removeAll() }
         }
         .onDisappear { cancelVoiceInput() }
         #if os(iOS)
@@ -978,6 +982,7 @@ struct AssistantChatbotOverlay: View {
 
     private func openFullPanel() {
         fieldFocused = false
+        activityPath.removeAll()
         withAnimation(.spring(duration: 0.24)) {
             isExpanded = false
             isDialogPresented = true
@@ -1355,13 +1360,7 @@ struct AssistantChatbotOverlay: View {
             }
             .pickerStyle(.segmented)
 
-            ScrollView {
-                menuContent
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.vertical, 2)
-            }
-            .scrollIndicators(.hidden)
-            .frame(maxHeight: 260)
+            dialogMenuContent
 
             dialogTranscript
             dialogInput
@@ -1415,6 +1414,22 @@ struct AssistantChatbotOverlay: View {
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Close")
+        }
+    }
+
+    @ViewBuilder
+    private var dialogMenuContent: some View {
+        if selectedMenu == .activity {
+            activityContent
+                .frame(maxHeight: 260)
+        } else {
+            ScrollView {
+                menuContent
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.vertical, 2)
+            }
+            .scrollIndicators(.hidden)
+            .frame(maxHeight: 260)
         }
     }
 
@@ -1522,28 +1537,124 @@ struct AssistantChatbotOverlay: View {
 
     private var activityContent: some View {
         TimelineView(.periodic(from: Date(), by: 1)) { timeline in
+            NavigationStack(path: $activityPath) {
+                activityTaskList(now: timeline.date)
+                    .navigationDestination(for: OverlayActivityRoute.self) { route in
+                        switch route {
+                        case .task(let id):
+                            if let task = activityTask(id: id) {
+                                activityTaskDetail(task, now: timeline.date)
+                            } else {
+                                OverlayEmptyState(
+                                    systemImage: "clock.arrow.circlepath",
+                                    message: "Activity no longer available"
+                                )
+                            }
+                        case .rawEvent(let taskID, let eventID):
+                            if let event = activityEvent(taskID: taskID, eventID: eventID) {
+                                activityRawEventDetail(event)
+                            } else {
+                                OverlayEmptyState(
+                                    systemImage: "doc.text.magnifyingglass",
+                                    message: "Raw payload no longer available"
+                                )
+                            }
+                        }
+                    }
+            }
+        }
+    }
+
+    private func activityTaskList(now: Date) -> some View {
+        ScrollView {
             VStack(alignment: .leading, spacing: 14) {
                 let tasks = activityTaskGroups
-                if tasks.isEmpty && session.lines.isEmpty {
-                    OverlayEmptyState(
-                        systemImage: "clock",
-                        message: "No recent activity"
-                    )
+                if tasks.isEmpty {
+                    OverlayEmptyState(systemImage: "clock", message: "No recent activity")
                 }
                 ForEach(tasks) { task in
-                    OverlayActivityTaskRow(task: task, now: timeline.date)
+                    NavigationLink(value: OverlayActivityRoute.task(task.id)) {
+                        OverlayActivityTaskRow(
+                            task: task,
+                            now: now,
+                            showsDisclosure: true
+                        )
+                    }
+                    .buttonStyle(.plain)
                 }
-                if tasks.isEmpty {
-                    ForEach(session.lines.suffix(8)) { line in
-                        OverlayDetailRow(title: line.role.capitalized) {
-                            Text(line.text)
-                                .lineLimit(4)
-                                .textSelection(.enabled)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.vertical, 2)
+        }
+        .scrollIndicators(.hidden)
+    }
+
+    private func activityTaskDetail(
+        _ task: OrchestratorTaskSnapshot,
+        now: Date
+    ) -> some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                OverlayActivityTaskRow(task: task, now: now)
+                if task.activities.isEmpty {
+                    OverlayEmptyState(
+                        systemImage: "list.bullet.rectangle",
+                        message: "No task details"
+                    )
+                } else {
+                    ForEach(task.activities) { event in
+                        NavigationLink(
+                            value: OverlayActivityRoute.rawEvent(
+                                taskID: task.id,
+                                eventID: event.id
+                            )
+                        ) {
+                            OverlayActivityEventRow(event: event)
                         }
+                        .buttonStyle(.plain)
                     }
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.vertical, 2)
         }
+        .scrollIndicators(.hidden)
+    }
+
+    private func activityRawEventDetail(_ event: UsageEvent) -> some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 10) {
+                OverlayDetailRow(title: event.kind.rawDetailTitle) {
+                    Text(event.kind.detailLabel)
+                    Text(event.timestamp.formatted(date: .abbreviated, time: .standard))
+                        .font(.caption2.monospacedDigit())
+                }
+
+                Text(event.payloadText.isEmpty ? "Empty payload" : event.payloadText)
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.primary)
+                    .textSelection(.enabled)
+                    .padding(10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(
+                        .background.secondary,
+                        in: RoundedRectangle(
+                            cornerRadius: AIKitMetrics.controlRadius,
+                            style: .continuous
+                        )
+                    )
+                    .overlay {
+                        RoundedRectangle(
+                            cornerRadius: AIKitMetrics.controlRadius,
+                            style: .continuous
+                        )
+                        .strokeBorder(.separator.opacity(0.45), lineWidth: 0.5)
+                    }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.vertical, 2)
+        }
+        .scrollIndicators(.hidden)
     }
 
     private var activityTaskGroups: [OrchestratorTaskSnapshot] {
@@ -1560,6 +1671,14 @@ struct AssistantChatbotOverlay: View {
             }
         }
         return groups
+    }
+
+    private func activityTask(id: Int) -> OrchestratorTaskSnapshot? {
+        activityTaskGroups.first { $0.id == id }
+    }
+
+    private func activityEvent(taskID: Int, eventID: UUID) -> UsageEvent? {
+        activityTask(id: taskID)?.activities.first { $0.id == eventID }
     }
 
     private func submit() {
@@ -1876,23 +1995,39 @@ private struct OverlayDetailRow<Detail: View>: View {
 private struct OverlayActivityTaskRow: View {
     let task: OrchestratorTaskSnapshot
     let now: Date
-
-    private var visibleActivities: [UsageEvent] {
-        Array(task.activities.filter { $0.kind != .userInstruction }.suffix(6))
-    }
+    var showsDisclosure = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Text(task.instruction)
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(.primary)
-                    .lineLimit(2)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                if task.isRunning {
-                    Label("Running", systemImage: "dot.radiowaves.left.and.right")
-                        .font(.caption2.weight(.semibold))
+            HStack(alignment: .top, spacing: 8) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(task.instruction)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.primary)
+                        .lineLimit(2)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    if let failure = task.failureReason {
+                        Label(failure, systemImage: "exclamationmark.triangle.fill")
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                            .lineLimit(2)
+                    } else if task.isRunning {
+                        Label(
+                            task.phase.activityLabel,
+                            systemImage: "dot.radiowaves.left.and.right"
+                        )
+                        .font(.caption)
                         .foregroundStyle(Color.accentColor)
+                        .lineLimit(1)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+                if showsDisclosure {
+                    Image(systemName: "chevron.right")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.tertiary)
+                        .padding(.top, 2)
                 }
             }
 
@@ -1913,37 +2048,6 @@ private struct OverlayActivityTaskRow: View {
                     value: formattedDuration(task.duration(at: now))
                 )
             }
-
-            if let failure = task.failureReason {
-                Label(failure, systemImage: "exclamationmark.triangle.fill")
-                    .font(.caption)
-                    .foregroundStyle(.red)
-                    .lineLimit(2)
-            } else if task.isRunning {
-                Text(task.phase.activityLabel)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
-            if !visibleActivities.isEmpty {
-                VStack(alignment: .leading, spacing: 5) {
-                    ForEach(visibleActivities) { event in
-                        HStack(alignment: .firstTextBaseline, spacing: 6) {
-                            Text(event.kind.activityLabel)
-                                .font(.caption2.weight(.semibold))
-                                .foregroundStyle(.secondary)
-                                .frame(width: 58, alignment: .leading)
-                            Text(event.payloadText)
-                                .font(.caption)
-                                .foregroundStyle(.primary)
-                                .opacity(0.78)
-                                .lineLimit(2)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .textSelection(.enabled)
-                        }
-                    }
-                }
-            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -1960,6 +2064,36 @@ private struct OverlayActivityTaskRow: View {
             return "\(minutes)m \(seconds)s"
         }
         return "\(seconds)s"
+    }
+}
+
+private struct OverlayActivityEventRow: View {
+    let event: UsageEvent
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: event.kind.detailSystemImage)
+                .font(.callout.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .frame(width: 20, height: 20)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(event.kind.detailLabel)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.primary)
+                Text(event.payloadText)
+                    .font(.footnote)
+                    .foregroundStyle(.primary)
+                    .opacity(0.75)
+                    .lineLimit(2)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            Image(systemName: "chevron.right")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.tertiary)
+                .padding(.top, 3)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityLabel(event.kind.detailLabel)
     }
 }
 
@@ -2010,6 +2144,11 @@ private enum ChatbotMenu: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
+private enum OverlayActivityRoute: Hashable {
+    case task(Int)
+    case rawEvent(taskID: Int, eventID: UUID)
+}
+
 private extension OrchestratorPhase {
     var activityLabel: String {
         switch self {
@@ -2023,13 +2162,33 @@ private extension OrchestratorPhase {
 }
 
 private extension UsageEvent.Kind {
-    var activityLabel: String {
+    var detailLabel: String {
         switch self {
-        case .userInstruction: return "Task"
-        case .toolInvoked: return "Tool"
-        case .toolResult: return "Result"
-        case .llmResponse: return "Answer"
-        case .error: return "Error"
+        case .userInstruction: return "userIntent"
+        case .toolInvoked: return "toolCalling"
+        case .toolResult: return "toolResult"
+        case .llmResponse: return "llmResponse"
+        case .error: return "error"
+        }
+    }
+
+    var rawDetailTitle: String {
+        switch self {
+        case .llmResponse: return "Raw LLM Response"
+        case .toolInvoked: return "Raw Tool Call"
+        case .toolResult: return "Raw Tool Result"
+        case .userInstruction: return "Raw User Intent"
+        case .error: return "Raw Error"
+        }
+    }
+
+    var detailSystemImage: String {
+        switch self {
+        case .userInstruction: return "text.bubble"
+        case .toolInvoked: return "wrench.and.screwdriver"
+        case .toolResult: return "checkmark.rectangle"
+        case .llmResponse: return "sparkles"
+        case .error: return "exclamationmark.triangle"
         }
     }
 }
