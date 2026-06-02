@@ -2173,14 +2173,23 @@ private struct AIKitTabFabOverlayModifier<ViewContent: View>: ViewModifier {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .overlay {
                 GlassEffectContainer {
-                    if isPresented {
-                        Rectangle()
-                            .fill(.black.opacity(0.25))
-                            .contentShape(.rect)
-                            .onTapGesture(perform: onDismiss)
-                            .ignoresSafeArea()
-                            .transition(.opacity)
-                    }
+                    // The dimming layer stays in the tree at all times and is
+                    // shown/hidden via opacity. Conditionally inserting or
+                    // removing a `.ignoresSafeArea()` view inside an overlay
+                    // layered over a host `NavigationStack` forces that stack to
+                    // renegotiate its safe area mid-life, which SwiftUI
+                    // mishandles: the nav bar, `.searchable`, large-title
+                    // collapse, push animation, and any pushed destination's
+                    // safe area stay corrupted until the tab is rebuilt. Keeping
+                    // the only safe-area-ignoring view stable avoids that — the
+                    // conditionally shown panel respects the safe area, so its
+                    // insertion is harmless.
+                    Rectangle()
+                        .fill(.black.opacity(isPresented ? 0.25 : 0))
+                        .contentShape(.rect)
+                        .onTapGesture(perform: onDismiss)
+                        .ignoresSafeArea()
+
                     if isPresented {
                         viewContent()
                             .clipShape(.rect(cornerRadius: 30))
@@ -2189,6 +2198,7 @@ private struct AIKitTabFabOverlayModifier<ViewContent: View>: ViewModifier {
                             .frame(maxHeight: .infinity, alignment: .bottom)
                             .padding(.horizontal, 15)
                             .padding(.bottom, 10)
+                            .transition(.move(edge: .bottom).combined(with: .opacity))
                     }
                 }
                 .allowsHitTesting(isPresented)
