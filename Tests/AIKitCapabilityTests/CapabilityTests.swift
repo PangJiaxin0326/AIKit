@@ -98,13 +98,13 @@ private struct EchoTool: Tool {
 @Suite struct ContextResolverTests {
     @Test func pushPopMerge() async {
         let resolver = ContextResolver()
-        await resolver.push(ViewContext(
+        _ = await resolver.push(ViewContext(
             id: .init("root"),
             displayName: "Root",
             systemPromptFragment: "You are root.",
             toolNames: ["navigate"]
         ))
-        await resolver.push(ViewContext(
+        let settings = await resolver.push(ViewContext(
             id: .init("settings"),
             displayName: "Settings",
             systemPromptFragment: "You can change settings.",
@@ -116,7 +116,7 @@ private struct EchoTool: Tool {
         #expect(merged.systemPromptFragment.contains("settings"))
         #expect(merged.leafID == ViewContext.ID("settings"))
 
-        await resolver.pop(.init("settings"))
+        await resolver.pop(settings)
         let after = await resolver.merged()
         #expect(after.toolNames == ["navigate"])
     }
@@ -301,7 +301,7 @@ private struct EchoTool: Tool {
         #expect(configuration.runtime.twoRoundStructuredBinderOutput == false)
     }
 
-    @Test func runtimeDecodesLegacyConfigurationWithWorkflowDefaults() throws {
+    @Test func runtimeDecodesMissingWorkflowFieldsWithDefaults() throws {
         let data = """
         {
           "streamsResponses": false,
@@ -342,11 +342,15 @@ private struct EchoTool: Tool {
 
     @Test func coreStoresProviderConfigurationsIndependently() {
         var core = AIKitConfiguration.Core(activeProvider: .ollama)
-        core.model = "llama3.1"
-        core.endpointURL = "http://localhost:11434/api/chat"
+        var ollama = core.activeProviderConfiguration
+        ollama.defaultModel = "llama3.1"
+        ollama.endpointURL = "http://localhost:11434/api/chat"
+        core.activeProviderConfiguration = ollama
 
         core.activeProvider = .openAI
-        core.model = "gpt-5"
+        var openAI = core.activeProviderConfiguration
+        openAI.defaultModel = "gpt-5"
+        core.activeProviderConfiguration = openAI
 
         #expect(core.providerConfiguration(for: .ollama).defaultModel == "llama3.1")
         #expect(core.providerConfiguration(for: .ollama).endpointURL == "http://localhost:11434/api/chat")
@@ -432,40 +436,4 @@ private struct EchoTool: Tool {
         ])
     }
 
-    @Test func coreDecodesLegacyActiveProviderFields() throws {
-        let data = """
-        {
-          "providerName": "Ollama",
-          "model": "llama3.1",
-          "baseURL": "http://localhost:11434"
-        }
-        """.data(using: .utf8)!
-
-        let decoded = try JSONDecoder().decode(AIKitConfiguration.Core.self, from: data)
-
-        #expect(decoded.activeProvider == .ollama)
-        #expect(decoded.providerConfiguration(for: .ollama).defaultModel == "llama3.1")
-        #expect(decoded.providerConfiguration(for: .ollama).endpointURL == "http://localhost:11434")
-    }
-
-    @Test func coreDecodesLegacyOtherProviderAsArk() throws {
-        let data = """
-        {
-          "activeProvider": "Other",
-          "other": {
-            "defaultModel": "legacy-model",
-            "baseURL": "https://ark.cn-beijing.volces.com/api/v3/chat/completions"
-          }
-        }
-        """.data(using: .utf8)!
-
-        let decoded = try JSONDecoder().decode(AIKitConfiguration.Core.self, from: data)
-
-        #expect(decoded.activeProvider == .ark)
-        #expect(decoded.providerConfiguration(for: .ark).defaultModel == "legacy-model")
-        #expect(
-            decoded.providerConfiguration(for: .ark).endpointURL ==
-            "https://ark.cn-beijing.volces.com/api/v3/chat/completions"
-        )
-    }
 }

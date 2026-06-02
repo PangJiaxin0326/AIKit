@@ -30,19 +30,17 @@ public struct AIKitConfiguration: Codable, Sendable, Hashable {
             public init(
                 defaultModel: String? = nil,
                 availableModels: [String] = [],
-                endpointURL: String? = nil,
-                baseURL: String? = nil
+                endpointURL: String? = nil
             ) {
                 self.defaultModel = defaultModel?.emptyAsNil
                 self.availableModels = Self.normalizedModels(availableModels)
-                self.endpointURL = (endpointURL ?? baseURL)?.emptyAsNil
+                self.endpointURL = endpointURL?.emptyAsNil
             }
 
             private enum CodingKeys: String, CodingKey {
                 case defaultModel
                 case availableModels
                 case endpointURL
-                case baseURL
             }
 
             public init(from decoder: any Decoder) throws {
@@ -59,11 +57,7 @@ public struct AIKitConfiguration: Codable, Sendable, Hashable {
                     String.self,
                     forKey: .endpointURL
                 )?.emptyAsNil
-                let legacyBaseURL = try container.decodeIfPresent(
-                    String.self,
-                    forKey: .baseURL
-                )?.emptyAsNil
-                self.endpointURL = endpointURL ?? legacyBaseURL
+                self.endpointURL = endpointURL
             }
 
             public func encode(to encoder: any Encoder) throws {
@@ -71,11 +65,6 @@ public struct AIKitConfiguration: Codable, Sendable, Hashable {
                 try container.encodeIfPresent(defaultModel, forKey: .defaultModel)
                 try container.encode(availableModels, forKey: .availableModels)
                 try container.encodeIfPresent(endpointURL, forKey: .endpointURL)
-            }
-
-            public var baseURL: String? {
-                get { endpointURL }
-                set { endpointURL = newValue?.emptyAsNil }
             }
 
             public mutating func replaceAvailableModels(_ models: [String]) {
@@ -116,7 +105,6 @@ public struct AIKitConfiguration: Codable, Sendable, Hashable {
             ollama: ProviderConfiguration = ProviderConfiguration(),
             appleIntelligence: ProviderConfiguration = ProviderConfiguration(),
             ark: ProviderConfiguration = ProviderConfiguration(),
-            other: ProviderConfiguration? = nil,
             timeout: TimeInterval? = nil,
             temperature: Double? = 0.2,
             maxTokens: Int? = nil
@@ -126,7 +114,7 @@ public struct AIKitConfiguration: Codable, Sendable, Hashable {
             self.anthropic = anthropic
             self.ollama = ollama
             self.appleIntelligence = appleIntelligence
-            self.ark = other ?? ark
+            self.ark = ark
             self.timeout = timeout
             self.temperature = temperature
             self.maxTokens = maxTokens
@@ -139,29 +127,17 @@ public struct AIKitConfiguration: Codable, Sendable, Hashable {
             case ollama
             case appleIntelligence
             case ark
-            case other
             case timeout
             case temperature
             case maxTokens
-            case providerName
-            case model
-            case endpointURL
-            case baseURL
         }
 
         public init(from decoder: any Decoder) throws {
             let container = try decoder.container(keyedBy: CodingKeys.self)
-            let legacyProviderName = try container.decodeIfPresent(
-                String.self,
-                forKey: .providerName
-            )
-            let decodedActiveProvider = try container.decodeIfPresent(
+            let activeProvider = try container.decodeIfPresent(
                 AIKitProviderKind.self,
                 forKey: .activeProvider
-            )
-            let activeProvider = decodedActiveProvider
-                ?? legacyProviderName.flatMap(AIKitProviderKind.init(providerName:))
-                ?? .ollama
+            ) ?? .ollama
 
             self.activeProvider = activeProvider
             self.openAI = try container.decodeIfPresent(
@@ -183,33 +159,10 @@ public struct AIKitConfiguration: Codable, Sendable, Hashable {
             self.ark = try container.decodeIfPresent(
                 ProviderConfiguration.self,
                 forKey: .ark
-            ) ?? container.decodeIfPresent(
-                ProviderConfiguration.self,
-                forKey: .other
             ) ?? ProviderConfiguration()
             self.timeout = try container.decodeIfPresent(TimeInterval.self, forKey: .timeout)
             self.temperature = try container.decodeIfPresent(Double.self, forKey: .temperature) ?? 0.2
             self.maxTokens = try container.decodeIfPresent(Int.self, forKey: .maxTokens)
-
-            if container.contains(.model) ||
-                container.contains(.endpointURL) ||
-                container.contains(.baseURL) {
-                var legacyConfiguration = providerConfiguration(for: activeProvider)
-                legacyConfiguration.defaultModel = try container.decodeIfPresent(
-                    String.self,
-                    forKey: .model
-                )?.emptyAsNil
-                let endpointURL = try container.decodeIfPresent(
-                    String.self,
-                    forKey: .endpointURL
-                )?.emptyAsNil
-                let legacyBaseURL = try container.decodeIfPresent(
-                    String.self,
-                    forKey: .baseURL
-                )?.emptyAsNil
-                legacyConfiguration.endpointURL = endpointURL ?? legacyBaseURL
-                setProviderConfiguration(legacyConfiguration, for: activeProvider)
-            }
         }
 
         public func encode(to encoder: any Encoder) throws {
@@ -223,41 +176,6 @@ public struct AIKitConfiguration: Codable, Sendable, Hashable {
             try container.encodeIfPresent(timeout, forKey: .timeout)
             try container.encodeIfPresent(temperature, forKey: .temperature)
             try container.encodeIfPresent(maxTokens, forKey: .maxTokens)
-        }
-
-        public var providerName: String {
-            get { activeProvider.rawValue }
-            set {
-                activeProvider = AIKitProviderKind(providerName: newValue) ?? .ark
-            }
-        }
-
-        public var model: String? {
-            get { activeProviderConfiguration.defaultModel }
-            set {
-                var providerConfiguration = activeProviderConfiguration
-                providerConfiguration.defaultModel = newValue?.emptyAsNil
-                setProviderConfiguration(providerConfiguration, for: activeProvider)
-            }
-        }
-
-        public var endpointURL: String? {
-            get { activeProviderConfiguration.endpointURL }
-            set {
-                var providerConfiguration = activeProviderConfiguration
-                providerConfiguration.endpointURL = newValue?.emptyAsNil
-                setProviderConfiguration(providerConfiguration, for: activeProvider)
-            }
-        }
-
-        public var baseURL: String? {
-            get { endpointURL }
-            set { endpointURL = newValue }
-        }
-
-        public var other: ProviderConfiguration {
-            get { ark }
-            set { ark = newValue }
         }
 
         public var activeProviderConfiguration: ProviderConfiguration {
@@ -596,12 +514,26 @@ extension AIKitConfiguration {
         value: JSONValue
     ) throws {
         switch key {
-        case "provider", "providername", "activeprovider":
-            core.providerName = try value.string(section: .core, key: originalKey)
+        case "provider", "activeprovider":
+            let providerName = try value.string(section: .core, key: originalKey)
+            guard let provider = AIKitProviderKind(providerName: providerName) else {
+                throw AIKitConfigurationError.invalidValue(
+                    section: .core,
+                    key: originalKey,
+                    expected: "OpenAI, Anthropic, Ollama, Apple Intelligence, or Ark"
+                )
+            }
+            core.activeProvider = provider
         case "model":
-            core.model = try value.optionalString(section: .core, key: originalKey)
-        case "endpoint", "endpointurl", "llmendpoint", "streamingendpoint", "baseurl":
-            core.endpointURL = try value.optionalString(section: .core, key: originalKey)
+            var providerConfiguration = core.activeProviderConfiguration
+            providerConfiguration.defaultModel = try value
+                .optionalString(section: .core, key: originalKey)
+            core.activeProviderConfiguration = providerConfiguration
+        case "endpoint", "endpointurl", "llmendpoint", "streamingendpoint":
+            var providerConfiguration = core.activeProviderConfiguration
+            providerConfiguration.endpointURL = try value
+                .optionalString(section: .core, key: originalKey)
+            core.activeProviderConfiguration = providerConfiguration
         case "models", "availablemodels", "availablemodel":
             var providerConfiguration = core.activeProviderConfiguration
             providerConfiguration.replaceAvailableModels(

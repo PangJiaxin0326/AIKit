@@ -785,15 +785,6 @@ public struct AIKitView: View {
         )
     }
 
-    private func optionalStringBinding(
-        _ keyPath: WritableKeyPath<AIKitConfiguration, String?>
-    ) -> Binding<String> {
-        Binding(
-            get: { model.configuration[keyPath: keyPath] ?? "" },
-            set: { model.update(keyPath, to: $0.emptyAsNil) }
-        )
-    }
-
     private func optionalDoubleBinding(
         _ keyPath: WritableKeyPath<AIKitConfiguration, Double?>
     ) -> Binding<String> {

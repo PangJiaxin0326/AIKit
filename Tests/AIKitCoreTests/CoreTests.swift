@@ -137,7 +137,7 @@ import AIKitTestSupport
         )
         #expect(AIKitProviderDefinition.ollama.allowsStreamingEndpointOverride)
         #expect(!AIKitProviderDefinition.openAI.allowsStreamingEndpointOverride)
-        #expect(AIKitProviderKind(providerName: "Other") == .ark)
+        #expect(AIKitProviderKind(providerName: "Other") == nil)
         #expect(AIKitProviderKind(providerName: "Apple Intelligence") == .appleIntelligence)
     }
 

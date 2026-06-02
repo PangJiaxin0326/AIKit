@@ -19,7 +19,7 @@ public enum AIKitProviderKind: String, CaseIterable, Codable, Sendable, Hashable
             self = .ollama
         case "appleintelligence", "applefoundationmodels", "foundationmodels", "foundationmodel":
             self = .appleIntelligence
-        case "ark", "volcengine", "volcengineark", "doubao", "other", "custom":
+        case "ark", "volcengine", "volcengineark", "doubao":
             self = .ark
         default:
             return nil

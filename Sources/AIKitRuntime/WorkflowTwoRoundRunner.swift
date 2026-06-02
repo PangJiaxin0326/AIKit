@@ -24,14 +24,6 @@ public struct WorkflowTwoRoundRunner: Sendable {
         /// json_schema. Keep this off by default: a strong binder usually does
         /// better with the validated plan plus packet as freeform JSON.
         public var useStructuredBinderOutput: Bool
-        /// Backward-compatible all-round switch. Prefer the per-round knobs.
-        public var useStructuredOutput: Bool {
-            get { useStructuredPlannerOutput && useStructuredBinderOutput }
-            set {
-                useStructuredPlannerOutput = newValue
-                useStructuredBinderOutput = newValue
-            }
-        }
         /// Skip Round 2 when the harvest is unambiguous (deterministic binding).
         public var autoBind: Bool
         /// The recognized local-context source names the planner may declare.
@@ -50,9 +42,8 @@ public struct WorkflowTwoRoundRunner: Sendable {
             sources: [String],
             temperature: Double? = 0.2,
             extraBody: [String: JSONValue] = [:],
-            useStructuredOutput: Bool = false,
-            useStructuredPlannerOutput: Bool? = nil,
-            useStructuredBinderOutput: Bool? = nil,
+            useStructuredPlannerOutput: Bool = false,
+            useStructuredBinderOutput: Bool = false,
             autoBind: Bool = true,
             attemptsPerRound: Int = 2,
             toolContext: ToolContext = ToolContext(),
@@ -62,8 +53,8 @@ public struct WorkflowTwoRoundRunner: Sendable {
             self.sources = sources
             self.temperature = temperature
             self.extraBody = extraBody
-            self.useStructuredPlannerOutput = useStructuredPlannerOutput ?? useStructuredOutput
-            self.useStructuredBinderOutput = useStructuredBinderOutput ?? useStructuredOutput
+            self.useStructuredPlannerOutput = useStructuredPlannerOutput
+            self.useStructuredBinderOutput = useStructuredBinderOutput
             self.autoBind = autoBind
             self.attemptsPerRound = max(1, attemptsPerRound)
             self.toolContext = toolContext

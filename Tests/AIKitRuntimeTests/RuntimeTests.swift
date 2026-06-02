@@ -330,18 +330,6 @@ private struct FixedHarvester: ContextHarvesting {
 }
 
 @Suite struct WorkflowTwoRoundRunnerTests {
-    @Test func legacyStructuredOutputSwitchStillEnablesBothRounds() {
-        let options = WorkflowTwoRoundRunner.Options(
-            model: "test",
-            sources: [],
-            useStructuredOutput: true
-        )
-
-        #expect(options.useStructuredPlannerOutput)
-        #expect(options.useStructuredBinderOutput)
-        #expect(options.useStructuredOutput)
-    }
-
     private func destinationPacket(
         candidates: [HarvestedCandidate]
     ) -> ContextPacket {

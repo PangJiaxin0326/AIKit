@@ -36,17 +36,6 @@ public actor ContextResolver {
         frames.removeAll { $0.token == token.id }
     }
 
-    /// Removes the most recent frame with the given view id.
-    ///
-    /// Prefer the token-based `pop(_:)`; this id-based form cannot tell two
-    /// live frames with the same id apart and is kept for callers that don't
-    /// retain the token.
-    public func pop(_ id: ViewContext.ID) {
-        if let index = frames.lastIndex(where: { $0.context.id == id }) {
-            frames.remove(at: index)
-        }
-    }
-
     /// The current stack, deepest view last.
     public func current() -> [ViewContext] {
         frames.map(\.context)
