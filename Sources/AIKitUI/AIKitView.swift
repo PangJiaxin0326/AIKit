@@ -226,6 +226,9 @@ public struct AIKitChatbotTabBar<Item: AIKitChatbotTab, TabContent: View, TabFab
             ForEach(Array(Item.allCases), id: \.description) { tab in
                 Tab(tab.description, systemImage: tab.symbol, value: tab) {
                     tabContent(tab)
+                        // Tapping anywhere in the tab content resigns the
+                        // accessory text field so the keyboard drops away.
+                        .simultaneousGesture(TapGesture().onEnded { dismissKeyboard() })
                         .aiKitActiveContext(activeTab == tab ? viewContext(tab) : nil)
                         .aiKitTabFabOverlay(isPresented: isFABExpanded) {
                             AIKitTabFabPanel(
@@ -296,6 +299,15 @@ public struct AIKitChatbotTabBar<Item: AIKitChatbotTab, TabContent: View, TabFab
             showsRuntimeDetails = false
             isFABExpanded = false
         }
+    }
+
+    private func dismissKeyboard() {
+        UIApplication.shared.sendAction(
+            #selector(UIResponder.resignFirstResponder),
+            to: nil,
+            from: nil,
+            for: nil
+        )
     }
 
     private func overlayContext(for tab: Item) -> AIKitOverlayContext {
@@ -1910,6 +1922,15 @@ private struct AssistantTabBottomAccessory: View {
     @State private var lastInstruction = ""
     @State private var activity: OrchestratorActivity = .idle
     @FocusState private var fieldFocused: Bool
+    #if os(iOS)
+    /// On-screen keyboard frame; the accessory lifts above it while editing
+    /// so the text field stays visible instead of being covered.
+    @State private var keyboardFrame: CGRect?
+    /// The accessory's resting bottom edge in global space, captured only
+    /// while the keyboard is down so the lift offset can't feed back into
+    /// the measurement.
+    @State private var restingMaxY: CGFloat = 0
+    #endif
 
     private let orchestrator: Orchestrator
 
@@ -1937,11 +1958,34 @@ private struct AssistantTabBottomAccessory: View {
             onTextChanged: { voiceError = nil },
             onClearVoiceError: clearVoiceError
         )
-        .frame(maxWidth: .infinity)
-        .frame(minHeight: 44)
-        .chatbotCapsuleStyle(tint: tint)
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
+        // No background of our own: the system tab accessory already
+        // renders the row on its glass surface, so an extra tinted capsule
+        // only leaves uncovered gaps around the row.
+        .frame(maxWidth: .infinity, minHeight: 44)
+        #if os(iOS)
+        .background {
+            // Measure the row's resting bottom edge so we know how far the
+            // keyboard intrudes into it.
+            GeometryReader { proxy in
+                let maxY = proxy.frame(in: .global).maxY
+                Color.clear
+                    .onAppear { recordRestingMaxY(maxY) }
+                    .onChange(of: maxY) { _, newY in recordRestingMaxY(newY) }
+            }
+        }
+        .background {
+            // While lifted above the keyboard the row floats over app
+            // content, away from the system accessory glass, so it needs its
+            // own surface to stay legible. At rest this fades out and the
+            // accessory's glass shows through.
+            Capsule()
+                .fill(.regularMaterial)
+                .padding(.horizontal, 6)
+                .opacity(keyboardLift > 0 ? 1 : 0)
+        }
+        .offset(y: -keyboardLift)
+        .animation(.spring(duration: 0.25), value: keyboardLift)
+        #endif
         .task {
             for await update in orchestrator.activityUpdates() {
                 activity = update
@@ -1951,13 +1995,41 @@ private struct AssistantTabBottomAccessory: View {
             if !busy && !activity.hasFailed { draft = "" }
         }
         .onDisappear { cancelVoiceInput() }
+        #if os(iOS)
+        .onReceive(NotificationCenter.default.publisher(
+            for: UIResponder.keyboardWillChangeFrameNotification
+        )) { note in
+            if let frame = note.userInfo?[UIResponder.keyboardFrameEndUserInfoKey]
+                as? CGRect {
+                keyboardFrame = frame
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(
+            for: UIResponder.keyboardWillHideNotification
+        )) { _ in
+            keyboardFrame = nil
+        }
+        #endif
     }
 
-    private var tint: Color {
-        if activity.hasFailed { return .red }
-        if activity.isBusy { return .yellow }
-        return .accentColor
+    #if os(iOS)
+    /// How far to lift the accessory so its bottom edge clears the keyboard,
+    /// with a small gap above it. Zero when the keyboard is hidden or docked
+    /// off-screen (e.g. a hardware keyboard).
+    private var keyboardLift: CGFloat {
+        guard let keyboardFrame, !keyboardFrame.isEmpty, restingMaxY > 0 else {
+            return 0
+        }
+        let overlap = restingMaxY - keyboardFrame.minY
+        return overlap > 0 ? overlap + 8 : 0
     }
+
+    /// Capture the accessory's resting bottom edge only while the keyboard is
+    /// down, so the lift offset we apply can't feed back into the measurement.
+    private func recordRestingMaxY(_ maxY: CGFloat) {
+        if keyboardFrame == nil { restingMaxY = maxY }
+    }
+    #endif
 
     private var voiceLevel: Double {
         max(voiceRecorder.averagePowerLevel, voiceRecorder.peakPowerLevel * 0.85)
