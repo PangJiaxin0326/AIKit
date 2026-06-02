@@ -1830,8 +1830,17 @@ private struct AIKitTabFabPanel<CustomContent: View>: View {
     @Binding var showsRuntimeDetails: Bool
 
     private let customContent: () -> CustomContent
-    
-    @State private var panelHeight: CGFloat = 300
+
+    /// The two heights the panel toggles between when its free space is
+    /// tapped. It opens at the smaller size. (Computed rather than stored
+    /// because `AIKitTabFabPanel` is generic.)
+    private static var collapsedHeight: CGFloat { 300 }
+    private static var expandedHeight: CGFloat { 500 }
+
+    @State private var panelHeight: CGFloat = Self.collapsedHeight
+    /// Tracks the software keyboard so the first free-space tap dismisses it
+    /// rather than resizing the panel.
+    @State private var keyboardVisible = false
 
     init(
         context: AIKitOverlayContext,
@@ -1860,7 +1869,9 @@ private struct AIKitTabFabPanel<CustomContent: View>: View {
                     activity: activity,
                     selectedMenu: $selectedMenu,
                     activityDisplay: $activityDisplay,
-                    maxContentHeight: panelHeight
+                    // Leave room for the panel's padding, header, and the
+                    // detail picker so the scroll area fits inside the panel.
+                    maxContentHeight: max(0, panelHeight - 110)
                 )
             } else {
                 customContent()
@@ -1877,10 +1888,49 @@ private struct AIKitTabFabPanel<CustomContent: View>: View {
             }
         }
         .padding(14)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .frame(height: panelHeight, alignment: .top)
         .contentShape(.rect)
-        .onTapGesture { panelHeight = 800 - panelHeight }
-        .animation(.smooth, value: panelHeight)
+        .onTapGesture { handleFreeSpaceTap() }
+        .onReceive(NotificationCenter.default.publisher(
+            for: UIResponder.keyboardWillShowNotification
+        )) { _ in
+            keyboardVisible = true
+        }
+        .onReceive(NotificationCenter.default.publisher(
+            for: UIResponder.keyboardWillHideNotification
+        )) { _ in
+            keyboardVisible = false
+        }
+    }
+
+    /// A tap on the panel's free space toggles its height — but while the
+    /// keyboard is up, the first tap only dismisses it, leaving the size
+    /// unchanged so the resize doesn't fight the keyboard animation.
+    ///
+    /// The resize is driven with an explicit `withAnimation` rather than an
+    /// `.animation(_:value:)` modifier so the whole transaction animates —
+    /// including the glass surface and bottom-pinned frame applied by the
+    /// parent overlay modifier, which sit outside this view's subtree.
+    private func handleFreeSpaceTap() {
+        if keyboardVisible {
+            dismissKeyboard()
+        } else {
+            withAnimation(.smooth) {
+                panelHeight = panelHeight == Self.collapsedHeight
+                    ? Self.expandedHeight
+                    : Self.collapsedHeight
+            }
+        }
+    }
+
+    private func dismissKeyboard() {
+        UIApplication.shared.sendAction(
+            #selector(UIResponder.resignFirstResponder),
+            to: nil,
+            from: nil,
+            for: nil
+        )
     }
 
     private var runtimeDetailHeader: some View {
@@ -2108,7 +2158,6 @@ private struct AIKitTabFabOverlayModifier<ViewContent: View>: ViewModifier {
                             .clipShape(.rect(cornerRadius: 30))
                             .glassEffect(.regular.interactive(), in: .rect(cornerRadius: 30))
                             .frame(maxWidth: .infinity)
-                            .frame(height: 220)
                             .frame(maxHeight: .infinity, alignment: .bottom)
                             .padding(.horizontal, 15)
                             .padding(.bottom, 10)
