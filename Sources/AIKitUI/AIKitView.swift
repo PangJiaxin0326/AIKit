@@ -200,6 +200,7 @@ public struct AIKitChatbotTabBar<Item: AIKitChatbotTab, TabContent: View, TabFab
     @State private var activityDisplay: OverlayActivityDisplay = .tasks
     @State private var snapshot: OrchestratorSnapshot?
     @State private var activity: OrchestratorActivity = .idle
+    @State private var lastActiveTab: Item = Item.default
 
     private let orchestrator: Orchestrator
     private let viewContext: @Sendable (Item) -> ViewContext
@@ -222,7 +223,7 @@ public struct AIKitChatbotTabBar<Item: AIKitChatbotTab, TabContent: View, TabFab
     }
 
     public var body: some View {
-        TabView(selection: $activeTab) {
+        TabView(selection: tabSelection) {
             ForEach(Array(Item.allCases), id: \.description) { tab in
                 Tab(tab.description, systemImage: tab.symbol, value: tab) {
                     tabContent(tab)
@@ -258,14 +259,23 @@ public struct AIKitChatbotTabBar<Item: AIKitChatbotTab, TabContent: View, TabFab
         }
         .tabBarMinimizeBehavior(.onScrollDown)
         .onChange(of: activeTab) { oldValue, newValue in
-            handleActiveTabChange(oldValue: oldValue, newValue: newValue)
+            if let newValue {
+                lastActiveTab = newValue
+                showsRuntimeDetails = false
+            } else {
+                let restoreTab = oldValue ?? lastActiveTab
+                lastActiveTab = restoreTab
+                Task { @MainActor in
+                    openAssistantPanel(restoring: restoreTab)
+                }
+            }
         }
         .onChange(of: selectedMenu) { _, menu in
             if menu != .activity { activityDisplay = .tasks }
         }
         .task {
             if activeTab == nil {
-                activeTab = Item.default
+                activeTab = lastActiveTab
             }
             await refreshSnapshot()
         }
@@ -281,12 +291,30 @@ public struct AIKitChatbotTabBar<Item: AIKitChatbotTab, TabContent: View, TabFab
         }
     }
 
-    private func handleActiveTabChange(oldValue: Item?, newValue: Item?) {
-        guard newValue == nil else {
-            showsRuntimeDetails = false
+    private var tabSelection: Binding<Item?> {
+        Binding(
+            get: { activeTab ?? lastActiveTab },
+            set: handleTabSelection(_:)
+        )
+    }
+
+    private func handleTabSelection(_ selection: Item?) {
+        guard let selection else {
+            openAssistantPanel()
             return
         }
-        activeTab = oldValue ?? Item.default
+
+        if activeTab != selection {
+            activeTab = selection
+        }
+        showsRuntimeDetails = false
+    }
+
+    private func openAssistantPanel(restoring restoreTab: Item? = nil) {
+        let restoreTab = restoreTab ?? lastActiveTab
+        if activeTab == nil {
+            activeTab = restoreTab
+        }
         withAnimation(.spring(duration: 0.24)) {
             showsRuntimeDetails = false
             isFABExpanded.toggle()
