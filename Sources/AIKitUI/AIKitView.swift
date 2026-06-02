@@ -1830,6 +1830,8 @@ private struct AIKitTabFabPanel<CustomContent: View>: View {
     @Binding var showsRuntimeDetails: Bool
 
     private let customContent: () -> CustomContent
+    
+    @State private var panelHeight: CGFloat = 300
 
     init(
         context: AIKitOverlayContext,
@@ -1858,7 +1860,7 @@ private struct AIKitTabFabPanel<CustomContent: View>: View {
                     activity: activity,
                     selectedMenu: $selectedMenu,
                     activityDisplay: $activityDisplay,
-                    maxContentHeight: 158
+                    maxContentHeight: panelHeight
                 )
             } else {
                 customContent()
@@ -1876,6 +1878,9 @@ private struct AIKitTabFabPanel<CustomContent: View>: View {
         }
         .padding(14)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .contentShape(.rect)
+        .onTapGesture { panelHeight = 800 - panelHeight }
+        .animation(.smooth, value: panelHeight)
     }
 
     private var runtimeDetailHeader: some View {
