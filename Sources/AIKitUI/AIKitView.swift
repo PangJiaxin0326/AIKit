@@ -201,6 +201,11 @@ public struct AIKitChatbotTabBar<Item: AIKitChatbotTab, TabContent: View, TabFab
     @State private var snapshot: OrchestratorSnapshot?
     @State private var activity: OrchestratorActivity = .idle
     @State private var lastActiveTab: Item = Item.default
+    /// Backs the TabView's selection and is never `.none`, so the TabView never
+    /// selects/restores the empty search tab — that empty-tab churn is what
+    /// corrupts the hosted NavigationStack on device. `activeTab` (the external
+    /// binding) is only updated for real tabs.
+    @State private var selectedTab: Item = Item.default
 
     private let orchestrator: Orchestrator
     private let viewContext: @Sendable (Item) -> ViewContext
@@ -223,14 +228,14 @@ public struct AIKitChatbotTabBar<Item: AIKitChatbotTab, TabContent: View, TabFab
     }
 
     public var body: some View {
-        TabView(selection: $activeTab) {
+        TabView(selection: tabSelection) {
             ForEach(Array(Item.allCases), id: \.description) { tab in
                 Tab(tab.description, systemImage: tab.symbol, value: tab) {
                     tabContent(tab)
                         // Tapping anywhere in the tab content resigns the
                         // accessory text field so the keyboard drops away.
                         .simultaneousGesture(TapGesture().onEnded { dismissKeyboard() })
-                        .aiKitActiveContext(activeTab == tab ? viewContext(tab) : nil)
+                        .aiKitActiveContext(selectedTab == tab ? viewContext(tab) : nil)
                         .aiKitTabFabOverlay(isPresented: isFABExpanded) {
                             AIKitTabFabPanel(
                                 context: overlayContext(for: tab),
@@ -261,36 +266,23 @@ public struct AIKitChatbotTabBar<Item: AIKitChatbotTab, TabContent: View, TabFab
         // Composite the tab content, FAB overlay, and bottom accessory as a
         // single layer before the glass effects resolve. Mirrors CXTabBar.
         .compositingGroup()
-        .onChange(of: activeTab) { oldValue, newValue in
-            guard newValue == nil else {
-                lastActiveTab = newValue ?? lastActiveTab
-                showsRuntimeDetails = false
-                return
-            }
-            // Selecting the search-role FAB tab drives the binding to nil.
-            // Restore the previous tab immediately — with tab-bar animations
-            // suppressed so the search tab never flashes — then toggle the
-            // assistant panel on the next runloop turn. Toggling synchronously
-            // inside the selection change (or letting the search-tab transition
-            // animate) corrupts the visible tab's NavigationStack chrome and
-            // safe area on device. Mirrors UICollection.CXTabBar.
-            let restoreTab = oldValue ?? lastActiveTab
-            lastActiveTab = restoreTab
-            activeTab = restoreTab
-            UITabBar.setAnimationsEnabled(false)
-            Task { @MainActor in
-                UITabBar.setAnimationsEnabled(true)
-                showsRuntimeDetails = false
-                isFABExpanded.toggle()
-                await refreshSnapshot()
+        // External (e.g. AI-driven) navigation sets `activeTab`; mirror it into
+        // the TabView's `selectedTab` storage. The reverse direction (user taps)
+        // flows through `tabSelection`'s setter.
+        .onChange(of: activeTab) { _, newValue in
+            if let newValue, newValue != selectedTab {
+                selectedTab = newValue
+                lastActiveTab = newValue
             }
         }
         .onChange(of: selectedMenu) { _, menu in
             if menu != .activity { activityDisplay = .tasks }
         }
         .task {
-            if activeTab == nil {
-                activeTab = lastActiveTab
+            if let tab = activeTab {
+                if tab != selectedTab { selectedTab = tab }
+            } else {
+                activeTab = selectedTab
             }
             await refreshSnapshot()
         }
@@ -304,6 +296,30 @@ public struct AIKitChatbotTabBar<Item: AIKitChatbotTab, TabContent: View, TabFab
                 Task { await refreshSnapshot() }
             }
         }
+    }
+
+    /// Wraps the TabView selection. The getter always returns a real tab
+    /// (`selectedTab`), so the TabView never selects the empty search tab. The
+    /// setter updates the selection for real tabs and intercepts the search
+    /// tab's `.none` value to toggle the assistant panel instead.
+    private var tabSelection: Binding<Item?> {
+        Binding(
+            get: { selectedTab },
+            set: { newValue in
+                guard let newValue else {
+                    Task { @MainActor in
+                        showsRuntimeDetails = false
+                        isFABExpanded.toggle()
+                        await refreshSnapshot()
+                    }
+                    return
+                }
+                selectedTab = newValue
+                lastActiveTab = newValue
+                if activeTab != newValue { activeTab = newValue }
+                showsRuntimeDetails = false
+            }
+        )
     }
 
     private func dismissFAB() {
