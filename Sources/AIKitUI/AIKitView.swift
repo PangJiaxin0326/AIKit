@@ -206,6 +206,11 @@ public struct AIKitChatbotTabBar<Item: AIKitChatbotTab, TabContent: View, TabFab
     /// corrupts the hosted NavigationStack on device. `activeTab` (the external
     /// binding) is only updated for real tabs.
     @State private var selectedTab: Item = Item.default
+    /// Blocks selection of the search-role FAB tab at the UIKit layer so the
+    /// tab bar never switches to its empty content (a one-frame flash) — the
+    /// SwiftUI selection binding can only refuse the change *after* UIKit has
+    /// already shown that frame.
+    @State private var fabCoordinator = FABTabBarCoordinator()
 
     private let orchestrator: Orchestrator
     private let viewContext: @Sendable (Item) -> ViewContext
@@ -266,6 +271,13 @@ public struct AIKitChatbotTabBar<Item: AIKitChatbotTab, TabContent: View, TabFab
         // Composite the tab content, FAB overlay, and bottom accessory as a
         // single layer before the glass effects resolve. Mirrors CXTabBar.
         .compositingGroup()
+        // Intercept the search-role FAB tab at the UIKit layer so its selection
+        // is blocked (no flash) and the panel is toggled instead.
+        .background(FABTabBarConfigurator(coordinator: fabCoordinator) {
+            showsRuntimeDetails = false
+            isFABExpanded.toggle()
+            Task { await refreshSnapshot() }
+        })
         // External (e.g. AI-driven) navigation sets `activeTab`; mirror it into
         // the TabView's `selectedTab` storage. The reverse direction (user taps)
         // flows through `tabSelection`'s setter.
@@ -349,6 +361,55 @@ public struct AIKitChatbotTabBar<Item: AIKitChatbotTab, TabContent: View, TabFab
 
     private func refreshSnapshot() async {
         snapshot = await orchestrator.snapshot(recentActivityLimit: 24, recentTaskLimit: 8)
+    }
+}
+
+/// `UITabBarController` delegate that blocks selection of the search-role FAB
+/// tab. SwiftUI's selection binding can only *refuse* the change after UIKit
+/// has already shown the tab's empty content for a frame (the flash); returning
+/// `false` from `shouldSelect` stops the switch from ever happening.
+private final class FABTabBarCoordinator: NSObject, UITabBarControllerDelegate {
+    var onSearchTap: () -> Void = {}
+
+    func tabBarController(
+        _ tabBarController: UITabBarController,
+        shouldSelect viewController: UIViewController
+    ) -> Bool {
+        if let tab = tabBarController.tabs.first(where: { $0.viewController === viewController }),
+           String(describing: type(of: tab)).range(of: "search", options: .caseInsensitive) != nil {
+            onSearchTap()
+            return false
+        }
+        return true
+    }
+}
+
+/// Resolves the enclosing `UITabBarController` and installs `coordinator` as its
+/// delegate so the search tab's selection can be intercepted.
+private struct FABTabBarConfigurator: UIViewControllerRepresentable {
+    let coordinator: FABTabBarCoordinator
+    let onSearchTap: () -> Void
+
+    func makeUIViewController(context: Context) -> UIViewController {
+        coordinator.onSearchTap = onSearchTap
+        let controller = UIViewController()
+        install(from: controller)
+        return controller
+    }
+
+    func updateUIViewController(_ uiViewController: UIViewController, context: Context) {
+        coordinator.onSearchTap = onSearchTap
+        install(from: uiViewController)
+    }
+
+    private func install(from controller: UIViewController) {
+        let coordinator = coordinator
+        DispatchQueue.main.async { [weak controller] in
+            guard let tabBarController = controller?.tabBarController else { return }
+            if tabBarController.delegate !== coordinator {
+                tabBarController.delegate = coordinator
+            }
+        }
     }
 }
 #endif
