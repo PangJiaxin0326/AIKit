@@ -223,7 +223,7 @@ public struct AIKitChatbotTabBar<Item: AIKitChatbotTab, TabContent: View, TabFab
     }
 
     public var body: some View {
-        TabView(selection: tabSelection) {
+        TabView(selection: $activeTab) {
             ForEach(Array(Item.allCases), id: \.description) { tab in
                 Tab(tab.description, systemImage: tab.symbol, value: tab) {
                     tabContent(tab)
@@ -258,16 +258,31 @@ public struct AIKitChatbotTabBar<Item: AIKitChatbotTab, TabContent: View, TabFab
             AssistantTabBottomAccessory(orchestrator: orchestrator)
         }
         .tabBarMinimizeBehavior(.onScrollDown)
+        // Composite the tab content, FAB overlay, and bottom accessory as a
+        // single layer before the glass effects resolve. Mirrors CXTabBar.
+        .compositingGroup()
         .onChange(of: activeTab) { oldValue, newValue in
-            if let newValue {
-                lastActiveTab = newValue
+            guard newValue == nil else {
+                lastActiveTab = newValue ?? lastActiveTab
                 showsRuntimeDetails = false
-            } else {
-                let restoreTab = oldValue ?? lastActiveTab
-                lastActiveTab = restoreTab
-                Task { @MainActor in
-                    openAssistantPanel(restoring: restoreTab)
-                }
+                return
+            }
+            // Selecting the search-role FAB tab drives the binding to nil.
+            // Restore the previous tab immediately — with tab-bar animations
+            // suppressed so the search tab never flashes — then toggle the
+            // assistant panel on the next runloop turn. Toggling synchronously
+            // inside the selection change (or letting the search-tab transition
+            // animate) corrupts the visible tab's NavigationStack chrome and
+            // safe area on device. Mirrors UICollection.CXTabBar.
+            let restoreTab = oldValue ?? lastActiveTab
+            lastActiveTab = restoreTab
+            activeTab = restoreTab
+            UITabBar.setAnimationsEnabled(false)
+            Task { @MainActor in
+                UITabBar.setAnimationsEnabled(true)
+                showsRuntimeDetails = false
+                isFABExpanded.toggle()
+                await refreshSnapshot()
             }
         }
         .onChange(of: selectedMenu) { _, menu in
@@ -291,42 +306,9 @@ public struct AIKitChatbotTabBar<Item: AIKitChatbotTab, TabContent: View, TabFab
         }
     }
 
-    private var tabSelection: Binding<Item?> {
-        Binding(
-            get: { activeTab ?? lastActiveTab },
-            set: handleTabSelection(_:)
-        )
-    }
-
-    private func handleTabSelection(_ selection: Item?) {
-        guard let selection else {
-            openAssistantPanel()
-            return
-        }
-
-        if activeTab != selection {
-            activeTab = selection
-        }
-        showsRuntimeDetails = false
-    }
-
-    private func openAssistantPanel(restoring restoreTab: Item? = nil) {
-        let restoreTab = restoreTab ?? lastActiveTab
-        if activeTab == nil {
-            activeTab = restoreTab
-        }
-        withAnimation(.spring(duration: 0.24)) {
-            showsRuntimeDetails = false
-            isFABExpanded.toggle()
-        }
-        Task { await refreshSnapshot() }
-    }
-
     private func dismissFAB() {
-        withAnimation(.spring(duration: 0.24)) {
-            showsRuntimeDetails = false
-            isFABExpanded = false
-        }
+        showsRuntimeDetails = false
+        isFABExpanded = false
     }
 
     private func dismissKeyboard() {
@@ -2173,32 +2155,22 @@ private struct AIKitTabFabOverlayModifier<ViewContent: View>: ViewModifier {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .overlay {
                 GlassEffectContainer {
-                    // The dimming layer stays in the tree at all times and is
-                    // shown/hidden via opacity. Conditionally inserting or
-                    // removing a `.ignoresSafeArea()` view inside an overlay
-                    // layered over a host `NavigationStack` forces that stack to
-                    // renegotiate its safe area mid-life, which SwiftUI
-                    // mishandles: the nav bar, `.searchable`, large-title
-                    // collapse, push animation, and any pushed destination's
-                    // safe area stay corrupted until the tab is rebuilt. Keeping
-                    // the only safe-area-ignoring view stable avoids that — the
-                    // conditionally shown panel respects the safe area, so its
-                    // insertion is harmless.
-                    Rectangle()
-                        .fill(.black.opacity(isPresented ? 0.25 : 0))
-                        .contentShape(.rect)
-                        .onTapGesture(perform: onDismiss)
-                        .ignoresSafeArea()
-
+                    if isPresented {
+                        Rectangle()
+                            .fill(.black.opacity(0.25))
+                            .contentShape(.rect)
+                            .onTapGesture(perform: onDismiss)
+                            .ignoresSafeArea()
+                            .transition(.opacity)
+                    }
                     if isPresented {
                         viewContent()
                             .clipShape(.rect(cornerRadius: 30))
+                            .contentShape(.rect(cornerRadius: 30))
                             .glassEffect(.regular.interactive(), in: .rect(cornerRadius: 30))
-                            .frame(maxWidth: .infinity)
                             .frame(maxHeight: .infinity, alignment: .bottom)
                             .padding(.horizontal, 15)
                             .padding(.bottom, 10)
-                            .transition(.move(edge: .bottom).combined(with: .opacity))
                     }
                 }
                 .allowsHitTesting(isPresented)
