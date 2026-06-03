@@ -307,7 +307,14 @@ public struct AIKitChatbotTabBar<Item: AIKitChatbotTab, TabContent: View, TabFab
             get: { selectedTab },
             set: { newValue in
                 guard let newValue else {
+                    // Tapping the search tab makes UIKit briefly switch to its
+                    // (empty) content before the getter snaps the selection back
+                    // — a visible flash. Suppress the tab-bar animation around
+                    // that, then toggle the panel on the next runloop turn.
+                    // Mirrors UICollection.CXTabBar.
+                    UITabBar.setAnimationsEnabled(false)
                     Task { @MainActor in
+                        UITabBar.setAnimationsEnabled(true)
                         showsRuntimeDetails = false
                         isFABExpanded.toggle()
                         await refreshSnapshot()
