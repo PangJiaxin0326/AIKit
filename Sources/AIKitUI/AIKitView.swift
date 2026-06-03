@@ -254,7 +254,11 @@ public struct AIKitChatbotTabBar<Item: AIKitChatbotTab, TabContent: View, TabFab
             }
 
             Tab(value: .none, role: .search) {
-                EmptyView()
+                // The selection wrapper refuses this tab, but SwiftUI still
+                // renders its content for one frame on tap. An EmptyView paints
+                // that frame white — a visible flash in the content area. Fill
+                // it with the grouped background so the flash blends in.
+                Color(.systemGroupedBackground).ignoresSafeArea()
             } label: {
                 Image(systemName: "sparkles")
             }
