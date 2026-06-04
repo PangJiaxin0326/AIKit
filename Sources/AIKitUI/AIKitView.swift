@@ -560,11 +560,21 @@ private struct AIKitSearchTabSelectionInterceptor: UIViewControllerRepresentable
 
         private var isPressed = false
         private var tintStates: [TintState] = []
+        private let feedbackImageView = UIImageView(image: UIImage(systemName: "sparkles"))
 
         override init(frame: CGRect) {
             super.init(frame: frame)
             isAccessibilityElement = false
             backgroundColor = .clear
+            feedbackImageView.isUserInteractionEnabled = false
+            feedbackImageView.contentMode = .scaleAspectFit
+            feedbackImageView.alpha = 0
+            feedbackImageView.tintColor = .systemYellow
+            feedbackImageView.preferredSymbolConfiguration = UIImage.SymbolConfiguration(
+                pointSize: 18,
+                weight: .semibold
+            )
+            addSubview(feedbackImageView)
             addTarget(self, action: #selector(handleTouchDown), for: [.touchDown, .touchDragEnter])
             addTarget(self, action: #selector(handleTouchCancel), for: [.touchCancel, .touchDragExit, .touchUpOutside])
             addTarget(self, action: #selector(handleTouchUpInside), for: .touchUpInside)
@@ -578,6 +588,12 @@ private struct AIKitSearchTabSelectionInterceptor: UIViewControllerRepresentable
         override func removeFromSuperview() {
             resetVisualState(for: highlightTarget)
             super.removeFromSuperview()
+        }
+
+        override func layoutSubviews() {
+            super.layoutSubviews()
+            feedbackImageView.bounds = CGRect(origin: .zero, size: CGSize(width: 28, height: 28))
+            feedbackImageView.center = CGPoint(x: bounds.midX, y: bounds.midY)
         }
 
         @objc private func handleTouchDown() {
@@ -607,6 +623,10 @@ private struct AIKitSearchTabSelectionInterceptor: UIViewControllerRepresentable
                 highlightTarget.transform = self.isPressed
                     ? CGAffineTransform(scaleX: 0.9, y: 0.9)
                     : .identity
+                self.feedbackImageView.alpha = self.isPressed || self.isActive ? 1 : 0
+                self.feedbackImageView.transform = self.isPressed
+                    ? CGAffineTransform(scaleX: 0.9, y: 0.9)
+                    : .identity
                 self.setTintColor(
                     self.isPressed || self.isActive ? .systemYellow : nil
                 )
@@ -629,6 +649,8 @@ private struct AIKitSearchTabSelectionInterceptor: UIViewControllerRepresentable
             guard let target else { return }
             setHighlighted(false, in: target)
             target.transform = .identity
+            feedbackImageView.alpha = isActive ? 1 : 0
+            feedbackImageView.transform = .identity
             restoreTintColors()
         }
 
