@@ -265,7 +265,6 @@ public struct AIKitChatbotTabBar<Item: AIKitChatbotTab, TabContent: View, TabFab
         }
         .background {
             AIKitSearchTabSelectionInterceptor(
-                isActive: isFABExpanded,
                 onTapSearchTab: { toggleFABPanel() }
             )
             .frame(width: 0, height: 0)
@@ -357,103 +356,109 @@ public struct AIKitChatbotTabBar<Item: AIKitChatbotTab, TabContent: View, TabFab
 }
 
 private struct AIKitSearchTabSelectionInterceptor: UIViewControllerRepresentable {
-    let isActive: Bool
     let onTapSearchTab: @MainActor () -> Void
 
     func makeUIViewController(context: Context) -> Controller {
         let controller = Controller()
-        controller.isSearchPanelActive = isActive
         controller.onTapSearchTab = onTapSearchTab
         return controller
     }
 
     func updateUIViewController(_ controller: Controller, context: Context) {
-        controller.isSearchPanelActive = isActive
         controller.onTapSearchTab = onTapSearchTab
-        controller.scheduleOverlayInstall()
+        controller.scheduleInterceptorInstall()
     }
 
-    final class Controller: UIViewController {
-        var isSearchPanelActive = false {
-            didSet {
-                overlay.isActive = isSearchPanelActive
-            }
-        }
+    final class Controller: UIViewController, UIGestureRecognizerDelegate {
+        var onTapSearchTab: (@MainActor () -> Void)?
 
-        var onTapSearchTab: (@MainActor () -> Void)? {
-            didSet {
-                overlay.onTap = onTapSearchTab
-            }
-        }
+        private lazy var searchTapRecognizer: SearchTabTapGestureRecognizer = {
+            let recognizer = SearchTabTapGestureRecognizer(
+                target: self,
+                action: #selector(handleSearchTap(_:))
+            )
+            recognizer.cancelsTouchesInView = true
+            recognizer.delaysTouchesBegan = false
+            recognizer.delaysTouchesEnded = true
+            recognizer.delegate = self
+            return recognizer
+        }()
 
-        private let overlay = SearchTabOverlayControl()
+        private weak var installedTabBar: UITabBar?
+        private weak var searchAuxiliaryView: UIView?
         private var installTask: Task<Void, Never>?
 
         deinit {
             installTask?.cancel()
-            overlay.removeFromSuperview()
+            removeInterceptor()
         }
 
         override func didMove(toParent parent: UIViewController?) {
             super.didMove(toParent: parent)
-            scheduleOverlayInstall()
+            scheduleInterceptorInstall()
         }
 
         override func viewDidAppear(_ animated: Bool) {
             super.viewDidAppear(animated)
-            scheduleOverlayInstall()
+            scheduleInterceptorInstall()
         }
 
         override func viewDidLayoutSubviews() {
             super.viewDidLayoutSubviews()
-            installOverlayIfPossible()
+            installInterceptorIfPossible()
         }
 
         override func viewWillDisappear(_ animated: Bool) {
             super.viewWillDisappear(animated)
             installTask?.cancel()
-            overlay.removeFromSuperview()
+            removeInterceptor()
         }
 
         @MainActor
-        func scheduleOverlayInstall() {
+        func scheduleInterceptorInstall() {
             installTask?.cancel()
             installTask = Task { @MainActor [weak self] in
                 for _ in 0..<20 {
                     guard let self else { return }
-                    installOverlayIfPossible()
+                    installInterceptorIfPossible()
                     try? await Task.sleep(nanoseconds: 50_000_000)
                 }
             }
         }
 
         @MainActor
-        private func installOverlayIfPossible() {
+        private func installInterceptorIfPossible() {
             guard
                 let window = view.window,
                 let tabBar = findTabBar(in: window),
                 let auxiliaryView = findSearchAuxiliaryView(in: tabBar)
             else {
-                overlay.removeFromSuperview()
+                removeInterceptor()
                 return
             }
 
-            if overlay.superview !== tabBar {
-                overlay.removeFromSuperview()
-                tabBar.addSubview(overlay)
+            if installedTabBar !== tabBar {
+                removeInterceptor()
+                tabBar.addGestureRecognizer(searchTapRecognizer)
+                installedTabBar = tabBar
             }
 
-            overlay.frame = auxiliaryView.frame
-            overlay.isHidden = auxiliaryView.isHidden
-                || auxiliaryView.alpha <= 0.01
-                || auxiliaryView.bounds.isEmpty
-            overlay.highlightTarget = findSearchHighlightTarget(
-                in: tabBar,
-                auxiliaryView: auxiliaryView
-            )
-            overlay.isActive = isSearchPanelActive
-            overlay.layer.zPosition = 1_000
-            tabBar.bringSubviewToFront(overlay)
+            searchAuxiliaryView = auxiliaryView
+            searchTapRecognizer.isEnabled = auxiliaryView.isHidden == false
+                && auxiliaryView.alpha > 0.01
+                && auxiliaryView.bounds.isEmpty == false
+        }
+
+        @MainActor
+        private func removeInterceptor() {
+            installedTabBar?.removeGestureRecognizer(searchTapRecognizer)
+            installedTabBar = nil
+            searchAuxiliaryView = nil
+        }
+
+        @objc private func handleSearchTap(_ recognizer: UITapGestureRecognizer) {
+            guard recognizer.state == .recognized else { return }
+            onTapSearchTab?()
         }
 
         @MainActor
@@ -481,211 +486,30 @@ private struct AIKitSearchTabSelectionInterceptor: UIViewControllerRepresentable
                 .max { lhs, rhs in lhs.frame.maxX < rhs.frame.maxX }
         }
 
-        @MainActor
-        private func findSearchHighlightTarget(
-            in tabBar: UITabBar,
-            auxiliaryView: UIView
-        ) -> UIView {
-            let searchCenter = CGPoint(x: auxiliaryView.frame.midX, y: auxiliaryView.frame.midY)
-            let wasOverlayUserInteractionEnabled = overlay.isUserInteractionEnabled
-            overlay.isUserInteractionEnabled = false
-            defer { overlay.isUserInteractionEnabled = wasOverlayUserInteractionEnabled }
-
-            if let hitView = tabBar.hitTest(searchCenter, with: nil),
-               hitView !== tabBar {
-                return findControlAncestor(from: hitView, inside: tabBar) ?? hitView
+        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+            guard
+                gestureRecognizer === searchTapRecognizer,
+                let tabBar = installedTabBar,
+                let auxiliaryView = searchAuxiliaryView,
+                auxiliaryView.isHidden == false,
+                auxiliaryView.alpha > 0.01,
+                auxiliaryView.bounds.isEmpty == false
+            else {
+                return false
             }
 
-            return findSearchTabButton(in: auxiliaryView) ?? auxiliaryView
-        }
-
-        @MainActor
-        private func findControlAncestor(from view: UIView, inside root: UIView) -> UIControl? {
-            var current: UIView? = view
-            while let candidate = current, candidate !== root {
-                if let control = candidate as? UIControl {
-                    return control
-                }
-                current = candidate.superview
-            }
-
-            return nil
-        }
-
-        @MainActor
-        private func findSearchTabButton(in root: UIView) -> UIControl? {
-            findSubview(in: root) { view in
-                guard let control = view as? UIControl else { return nil }
-                return NSStringFromClass(type(of: control)).contains("UITabButton")
-                    ? control
-                    : nil
-            } ?? findSubview(in: root) { $0 as? UIControl }
-        }
-
-        @MainActor
-        private func findSubview<T>(in root: UIView, matching predicate: (UIView) -> T?) -> T? {
-            if let match = predicate(root) {
-                return match
-            }
-
-            for subview in root.subviews {
-                if let match = findSubview(in: subview, matching: predicate) {
-                    return match
-                }
-            }
-
-            return nil
+            let searchHitFrame = auxiliaryView.frame.insetBy(dx: -8, dy: -8)
+            return searchHitFrame.contains(touch.location(in: tabBar))
         }
     }
 
-    final class SearchTabOverlayControl: UIControl {
-        var onTap: (@MainActor () -> Void)?
-        weak var highlightTarget: UIView? {
-            didSet {
-                guard highlightTarget !== oldValue else { return }
-                resetVisualState(for: oldValue)
-                tintStates.removeAll()
-                if let highlightTarget {
-                    captureTintStates(in: highlightTarget)
-                }
-                applyVisualState(animated: false)
-            }
-        }
-        var isActive = false {
-            didSet {
-                guard isActive != oldValue else { return }
-                applyVisualState(animated: true)
-            }
+    final class SearchTabTapGestureRecognizer: UITapGestureRecognizer {
+        override func canBePrevented(by preventingGestureRecognizer: UIGestureRecognizer) -> Bool {
+            false
         }
 
-        private var isPressed = false
-        private var tintStates: [TintState] = []
-        private let feedbackImageView = UIImageView(image: UIImage(systemName: "sparkles"))
-
-        override init(frame: CGRect) {
-            super.init(frame: frame)
-            isAccessibilityElement = false
-            backgroundColor = .clear
-            feedbackImageView.isUserInteractionEnabled = false
-            feedbackImageView.contentMode = .scaleAspectFit
-            feedbackImageView.alpha = 0
-            feedbackImageView.tintColor = .systemYellow
-            feedbackImageView.preferredSymbolConfiguration = UIImage.SymbolConfiguration(
-                pointSize: 18,
-                weight: .semibold
-            )
-            addSubview(feedbackImageView)
-            addTarget(self, action: #selector(handleTouchDown), for: [.touchDown, .touchDragEnter])
-            addTarget(self, action: #selector(handleTouchCancel), for: [.touchCancel, .touchDragExit, .touchUpOutside])
-            addTarget(self, action: #selector(handleTouchUpInside), for: .touchUpInside)
-        }
-
-        @available(*, unavailable)
-        required init?(coder: NSCoder) {
-            fatalError("init(coder:) has not been implemented")
-        }
-
-        override func removeFromSuperview() {
-            resetVisualState(for: highlightTarget)
-            super.removeFromSuperview()
-        }
-
-        override func layoutSubviews() {
-            super.layoutSubviews()
-            feedbackImageView.bounds = CGRect(origin: .zero, size: CGSize(width: 28, height: 28))
-            feedbackImageView.center = CGPoint(x: bounds.midX, y: bounds.midY)
-        }
-
-        @objc private func handleTouchDown() {
-            setPressed(true)
-        }
-
-        @objc private func handleTouchCancel() {
-            setPressed(false)
-        }
-
-        @objc private func handleTouchUpInside() {
-            onTap?()
-            setPressed(false)
-        }
-
-        private func setPressed(_ pressed: Bool) {
-            guard isPressed != pressed else { return }
-            isPressed = pressed
-            applyVisualState(animated: true)
-        }
-
-        private func applyVisualState(animated: Bool) {
-            guard let highlightTarget else { return }
-
-            let updates = {
-                self.setHighlighted(self.isPressed, in: highlightTarget)
-                highlightTarget.transform = self.isPressed
-                    ? CGAffineTransform(scaleX: 0.9, y: 0.9)
-                    : .identity
-                self.feedbackImageView.alpha = self.isPressed || self.isActive ? 1 : 0
-                self.feedbackImageView.transform = self.isPressed
-                    ? CGAffineTransform(scaleX: 0.9, y: 0.9)
-                    : .identity
-                self.setTintColor(
-                    self.isPressed || self.isActive ? .systemYellow : nil
-                )
-            }
-
-            guard animated else {
-                updates()
-                return
-            }
-
-            UIView.animate(
-                withDuration: isPressed ? 0.12 : 0.18,
-                delay: 0,
-                options: [.beginFromCurrentState, .allowUserInteraction, .curveEaseOut],
-                animations: updates
-            )
-        }
-
-        private func resetVisualState(for target: UIView?) {
-            guard let target else { return }
-            setHighlighted(false, in: target)
-            target.transform = .identity
-            feedbackImageView.alpha = isActive ? 1 : 0
-            feedbackImageView.transform = .identity
-            restoreTintColors()
-        }
-
-        private func setHighlighted(_ highlighted: Bool, in view: UIView) {
-            if let control = view as? UIControl {
-                control.isHighlighted = highlighted
-            }
-            view.subviews.forEach { setHighlighted(highlighted, in: $0) }
-        }
-
-        private func captureTintStates(in view: UIView) {
-            tintStates.append(TintState(view: view, tintColor: view.tintColor))
-            view.subviews.forEach { captureTintStates(in: $0) }
-        }
-
-        private func setTintColor(_ tintColor: UIColor?) {
-            guard let tintColor else {
-                restoreTintColors()
-                return
-            }
-
-            tintStates.forEach { state in
-                state.view?.tintColor = tintColor
-            }
-        }
-
-        private func restoreTintColors() {
-            tintStates.forEach { state in
-                state.view?.tintColor = state.tintColor
-            }
-        }
-
-        private struct TintState {
-            weak var view: UIView?
-            let tintColor: UIColor?
+        override func canPrevent(_ preventedGestureRecognizer: UIGestureRecognizer) -> Bool {
+            true
         }
     }
 }
