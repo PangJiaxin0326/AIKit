@@ -2123,42 +2123,37 @@ private struct AIKitTabFabPanel<CustomContent: View>: View {
     }
 
     var body: some View {
-        ZStack(alignment: .topLeading) {
-            Color.clear
-                .contentShape(.rect)
-                .onTapGesture { handleFreeSpaceTap() }
+        VStack(alignment: .leading, spacing: 12) {
+            if showsRuntimeDetails {
+                runtimeDetailHeader
+                AssistantRuntimeDetailContent(
+                    snapshot: snapshot,
+                    activity: activity,
+                    selectedMenu: $selectedMenu,
+                    activityDisplay: $activityDisplay,
+                    // Leave room for the panel's padding, header, and the
+                    // detail picker so the scroll area fits inside the panel.
+                    maxContentHeight: max(0, panelHeight - 110)
+                )
+            } else {
+                customContent()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
 
-            VStack(alignment: .leading, spacing: 12) {
-                if showsRuntimeDetails {
-                    runtimeDetailHeader
-                    AssistantRuntimeDetailContent(
-                        snapshot: snapshot,
-                        activity: activity,
-                        selectedMenu: $selectedMenu,
-                        activityDisplay: $activityDisplay,
-                        // Leave room for the panel's padding, header, and the
-                        // detail picker so the scroll area fits inside the panel.
-                        maxContentHeight: max(0, panelHeight - 110)
-                    )
-                } else {
-                    customContent()
-                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-
-                    Button {
-                        withAnimation(.spring(duration: 0.24)) {
-                            showsRuntimeDetails = true
-                        }
-                    } label: {
-                        Label("AI details", systemImage: "sparkles")
+                Button {
+                    withAnimation(.spring(duration: 0.24)) {
+                        showsRuntimeDetails = true
                     }
-                    .buttonStyle(.bordered)
+                } label: {
+                    Label("AI details", systemImage: "sparkles")
                 }
+                .buttonStyle(.bordered)
             }
-            .padding(14)
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
+        .padding(14)
         .frame(maxWidth: .infinity, alignment: .topLeading)
         .frame(height: panelHeight, alignment: .top)
+        .contentShape(.rect)
+        .onTapGesture { handleFreeSpaceTap() }
         .onReceive(NotificationCenter.default.publisher(
             for: UIResponder.keyboardWillShowNotification
         )) { _ in
@@ -2320,15 +2315,16 @@ private struct AIKitTabFabOverlayModifier<ViewContent: View>: ViewModifier {
         content
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .overlay {
-                if isPresented {
-                    GlassEffectContainer {
+                GlassEffectContainer {
+                    if isPresented {
                         Rectangle()
                             .fill(.black.opacity(0.25))
                             .contentShape(.rect)
                             .onTapGesture(perform: onDismiss)
                             .ignoresSafeArea()
                             .transition(.opacity)
-
+                    }
+                    if isPresented {
                         viewContent()
                             .clipShape(.rect(cornerRadius: 30))
                             .contentShape(.rect(cornerRadius: 30))
@@ -2337,16 +2333,13 @@ private struct AIKitTabFabOverlayModifier<ViewContent: View>: ViewModifier {
                             .padding(.horizontal, 15)
                             .padding(.bottom, 10)
                     }
-                    .transition(.opacity)
-                    .allowsHitTesting(true)
                 }
+                .allowsHitTesting(isPresented)
+                .animation(
+                    .interpolatingSpring(duration: 0.3, bounce: 0, initialVelocity: 0),
+                    value: isPresented
+                )
             }
-            .animation(
-                isPresented
-                    ? .interpolatingSpring(duration: 0.3, bounce: 0, initialVelocity: 0)
-                    : nil,
-                value: isPresented
-            )
     }
 }
 #endif
