@@ -447,7 +447,10 @@ private struct AIKitSearchTabSelectionInterceptor: UIViewControllerRepresentable
             overlay.isHidden = auxiliaryView.isHidden
                 || auxiliaryView.alpha <= 0.01
                 || auxiliaryView.bounds.isEmpty
-            overlay.highlightTarget = findSearchTabButton(in: auxiliaryView) ?? auxiliaryView
+            overlay.highlightTarget = findSearchHighlightTarget(
+                in: tabBar,
+                auxiliaryView: auxiliaryView
+            )
             overlay.isActive = isSearchPanelActive
             overlay.layer.zPosition = 1_000
             tabBar.bringSubviewToFront(overlay)
@@ -479,19 +482,59 @@ private struct AIKitSearchTabSelectionInterceptor: UIViewControllerRepresentable
         }
 
         @MainActor
+        private func findSearchHighlightTarget(
+            in tabBar: UITabBar,
+            auxiliaryView: UIView
+        ) -> UIView {
+            let searchCenter = CGPoint(x: auxiliaryView.frame.midX, y: auxiliaryView.frame.midY)
+            let wasOverlayUserInteractionEnabled = overlay.isUserInteractionEnabled
+            overlay.isUserInteractionEnabled = false
+            defer { overlay.isUserInteractionEnabled = wasOverlayUserInteractionEnabled }
+
+            if let hitView = tabBar.hitTest(searchCenter, with: nil),
+               hitView !== tabBar {
+                return findControlAncestor(from: hitView, inside: tabBar) ?? hitView
+            }
+
+            return findSearchTabButton(in: auxiliaryView) ?? auxiliaryView
+        }
+
+        @MainActor
+        private func findControlAncestor(from view: UIView, inside root: UIView) -> UIControl? {
+            var current: UIView? = view
+            while let candidate = current, candidate !== root {
+                if let control = candidate as? UIControl {
+                    return control
+                }
+                current = candidate.superview
+            }
+
+            return nil
+        }
+
+        @MainActor
         private func findSearchTabButton(in root: UIView) -> UIControl? {
-            if let control = root as? UIControl,
-               NSStringFromClass(type(of: control)).contains("UITabButton") {
-                return control
+            findSubview(in: root) { view in
+                guard let control = view as? UIControl else { return nil }
+                return NSStringFromClass(type(of: control)).contains("UITabButton")
+                    ? control
+                    : nil
+            } ?? findSubview(in: root) { $0 as? UIControl }
+        }
+
+        @MainActor
+        private func findSubview<T>(in root: UIView, matching predicate: (UIView) -> T?) -> T? {
+            if let match = predicate(root) {
+                return match
             }
 
             for subview in root.subviews {
-                if let control = findSearchTabButton(in: subview) {
-                    return control
+                if let match = findSubview(in: subview, matching: predicate) {
+                    return match
                 }
             }
 
-            return root.subviews.compactMap { $0 as? UIControl }.first
+            return nil
         }
     }
 
