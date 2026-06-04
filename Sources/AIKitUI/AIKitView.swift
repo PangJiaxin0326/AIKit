@@ -265,7 +265,6 @@ public struct AIKitChatbotTabBar<Item: AIKitChatbotTab, TabContent: View, TabFab
         }
         .background {
             AIKitSearchTabSelectionInterceptor(
-                searchTabIndex: Item.allCases.count,
                 onTapSearchTab: { toggleFABPanel() }
             )
             .frame(width: 0, height: 0)
@@ -357,107 +356,134 @@ public struct AIKitChatbotTabBar<Item: AIKitChatbotTab, TabContent: View, TabFab
 }
 
 private struct AIKitSearchTabSelectionInterceptor: UIViewControllerRepresentable {
-    let searchTabIndex: Int
     let onTapSearchTab: @MainActor () -> Void
-
-    func makeCoordinator() -> Coordinator {
-        Coordinator(
-            searchTabIndex: searchTabIndex,
-            onTapSearchTab: onTapSearchTab
-        )
-    }
 
     func makeUIViewController(context: Context) -> Controller {
         let controller = Controller()
-        controller.onAttach = { [weak coordinator = context.coordinator] controller in
-            coordinator?.installIfPossible(from: controller)
-        }
+        controller.onTapSearchTab = onTapSearchTab
         return controller
     }
 
     func updateUIViewController(_ controller: Controller, context: Context) {
-        context.coordinator.searchTabIndex = searchTabIndex
-        context.coordinator.onTapSearchTab = onTapSearchTab
-
-        Task { @MainActor [weak controller, weak coordinator = context.coordinator] in
-            guard let controller else { return }
-            coordinator?.installIfPossible(from: controller)
-        }
+        controller.onTapSearchTab = onTapSearchTab
+        controller.scheduleOverlayInstall()
     }
 
     final class Controller: UIViewController {
-        var onAttach: ((Controller) -> Void)?
+        var onTapSearchTab: (@MainActor () -> Void)? {
+            didSet {
+                overlay.onTap = onTapSearchTab
+            }
+        }
+
+        private let overlay = SearchTabOverlayControl()
+        private var installTask: Task<Void, Never>?
+
+        deinit {
+            installTask?.cancel()
+            overlay.removeFromSuperview()
+        }
 
         override func didMove(toParent parent: UIViewController?) {
             super.didMove(toParent: parent)
-            onAttach?(self)
+            scheduleOverlayInstall()
         }
 
         override func viewDidAppear(_ animated: Bool) {
             super.viewDidAppear(animated)
-            onAttach?(self)
+            scheduleOverlayInstall()
+        }
+
+        override func viewDidLayoutSubviews() {
+            super.viewDidLayoutSubviews()
+            installOverlayIfPossible()
+        }
+
+        override func viewWillDisappear(_ animated: Bool) {
+            super.viewWillDisappear(animated)
+            installTask?.cancel()
+            overlay.removeFromSuperview()
+        }
+
+        @MainActor
+        func scheduleOverlayInstall() {
+            installTask?.cancel()
+            installTask = Task { @MainActor [weak self] in
+                for _ in 0..<20 {
+                    guard let self else { return }
+                    installOverlayIfPossible()
+                    try? await Task.sleep(nanoseconds: 50_000_000)
+                }
+            }
+        }
+
+        @MainActor
+        private func installOverlayIfPossible() {
+            guard
+                let window = view.window,
+                let tabBar = findTabBar(in: window),
+                let auxiliaryView = findSearchAuxiliaryView(in: tabBar)
+            else {
+                overlay.removeFromSuperview()
+                return
+            }
+
+            if overlay.superview !== tabBar {
+                overlay.removeFromSuperview()
+                tabBar.addSubview(overlay)
+            }
+
+            overlay.frame = auxiliaryView.frame
+            overlay.isHidden = auxiliaryView.isHidden
+                || auxiliaryView.alpha <= 0.01
+                || auxiliaryView.bounds.isEmpty
+            overlay.layer.zPosition = 1_000
+            tabBar.bringSubviewToFront(overlay)
+        }
+
+        @MainActor
+        private func findTabBar(in root: UIView) -> UITabBar? {
+            if let tabBar = root as? UITabBar {
+                return tabBar
+            }
+
+            for subview in root.subviews {
+                if let tabBar = findTabBar(in: subview) {
+                    return tabBar
+                }
+            }
+
+            return nil
+        }
+
+        @MainActor
+        private func findSearchAuxiliaryView(in tabBar: UITabBar) -> UIView? {
+            tabBar.subviews
+                .filter { view in
+                    NSStringFromClass(type(of: view)).contains("UITabBarAuxiliaryView")
+                        && view.bounds.isEmpty == false
+                }
+                .max { lhs, rhs in lhs.frame.maxX < rhs.frame.maxX }
         }
     }
 
-    @MainActor
-    final class Coordinator: NSObject, UITabBarControllerDelegate {
-        var searchTabIndex: Int
-        var onTapSearchTab: @MainActor () -> Void
+    final class SearchTabOverlayControl: UIControl {
+        var onTap: (@MainActor () -> Void)?
 
-        private weak var tabBarController: UITabBarController?
-        private weak var forwardingDelegate: UITabBarControllerDelegate?
-
-        init(
-            searchTabIndex: Int,
-            onTapSearchTab: @escaping @MainActor () -> Void
-        ) {
-            self.searchTabIndex = searchTabIndex
-            self.onTapSearchTab = onTapSearchTab
+        override init(frame: CGRect) {
+            super.init(frame: frame)
+            isAccessibilityElement = false
+            backgroundColor = .clear
+            addTarget(self, action: #selector(handleTap), for: .touchUpInside)
         }
 
-        func installIfPossible(from controller: UIViewController) {
-            guard let tabBarController = controller.tabBarController else { return }
-            install(on: tabBarController)
+        @available(*, unavailable)
+        required init?(coder: NSCoder) {
+            fatalError("init(coder:) has not been implemented")
         }
 
-        private func install(on tabBarController: UITabBarController) {
-            if self.tabBarController !== tabBarController {
-                self.tabBarController = tabBarController
-                forwardingDelegate = nil
-            }
-
-            guard tabBarController.delegate !== self else { return }
-            forwardingDelegate = tabBarController.delegate
-            tabBarController.delegate = self
-        }
-
-        func tabBarController(
-            _ tabBarController: UITabBarController,
-            shouldSelect viewController: UIViewController
-        ) -> Bool {
-            guard
-                let viewControllers = tabBarController.viewControllers,
-                let selectedIndex = viewControllers.firstIndex(of: viewController),
-                selectedIndex == searchTabIndex
-            else {
-                return forwardingDelegate?.tabBarController?(
-                    tabBarController,
-                    shouldSelect: viewController
-                ) ?? true
-            }
-
-            onTapSearchTab()
-            return false
-        }
-
-        func tabBarController(
-            _ tabBarController: UITabBarController,
-            didSelect viewController: UIViewController
-        ) {
-            forwardingDelegate?.tabBarController?(
-                tabBarController,
-                didSelect: viewController
-            )
+        @objc private func handleTap() {
+            onTap?()
         }
     }
 }
