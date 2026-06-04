@@ -263,6 +263,13 @@ public struct AIKitChatbotTabBar<Item: AIKitChatbotTab, TabContent: View, TabFab
                 Image(systemName: "sparkles")
             }
         }
+        .background {
+            AIKitSearchTabSelectionInterceptor(
+                searchTabIndex: Item.allCases.count,
+                onTapSearchTab: { toggleFABPanel() }
+            )
+            .frame(width: 0, height: 0)
+        }
         .tabViewBottomAccessory {
             AssistantTabBottomAccessory(orchestrator: orchestrator)
         }
@@ -308,11 +315,7 @@ public struct AIKitChatbotTabBar<Item: AIKitChatbotTab, TabContent: View, TabFab
             get: { selectedTab },
             set: { newValue in
                 guard let newValue else {
-                    Task { @MainActor in
-                        showsRuntimeDetails = false
-                        isFABExpanded.toggle()
-                        await refreshSnapshot()
-                    }
+                    Task { @MainActor in toggleFABPanel() }
                     return
                 }
                 selectedTab = newValue
@@ -321,6 +324,13 @@ public struct AIKitChatbotTabBar<Item: AIKitChatbotTab, TabContent: View, TabFab
                 showsRuntimeDetails = false
             }
         )
+    }
+
+    @MainActor
+    private func toggleFABPanel() {
+        showsRuntimeDetails = false
+        isFABExpanded.toggle()
+        Task { await refreshSnapshot() }
     }
 
     private func dismissFAB() {
@@ -343,6 +353,112 @@ public struct AIKitChatbotTabBar<Item: AIKitChatbotTab, TabContent: View, TabFab
 
     private func refreshSnapshot() async {
         snapshot = await orchestrator.snapshot(recentActivityLimit: 24, recentTaskLimit: 8)
+    }
+}
+
+private struct AIKitSearchTabSelectionInterceptor: UIViewControllerRepresentable {
+    let searchTabIndex: Int
+    let onTapSearchTab: @MainActor () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(
+            searchTabIndex: searchTabIndex,
+            onTapSearchTab: onTapSearchTab
+        )
+    }
+
+    func makeUIViewController(context: Context) -> Controller {
+        let controller = Controller()
+        controller.onAttach = { [weak coordinator = context.coordinator] controller in
+            coordinator?.installIfPossible(from: controller)
+        }
+        return controller
+    }
+
+    func updateUIViewController(_ controller: Controller, context: Context) {
+        context.coordinator.searchTabIndex = searchTabIndex
+        context.coordinator.onTapSearchTab = onTapSearchTab
+
+        Task { @MainActor [weak controller, weak coordinator = context.coordinator] in
+            guard let controller else { return }
+            coordinator?.installIfPossible(from: controller)
+        }
+    }
+
+    final class Controller: UIViewController {
+        var onAttach: ((Controller) -> Void)?
+
+        override func didMove(toParent parent: UIViewController?) {
+            super.didMove(toParent: parent)
+            onAttach?(self)
+        }
+
+        override func viewDidAppear(_ animated: Bool) {
+            super.viewDidAppear(animated)
+            onAttach?(self)
+        }
+    }
+
+    @MainActor
+    final class Coordinator: NSObject, UITabBarControllerDelegate {
+        var searchTabIndex: Int
+        var onTapSearchTab: @MainActor () -> Void
+
+        private weak var tabBarController: UITabBarController?
+        private weak var forwardingDelegate: UITabBarControllerDelegate?
+
+        init(
+            searchTabIndex: Int,
+            onTapSearchTab: @escaping @MainActor () -> Void
+        ) {
+            self.searchTabIndex = searchTabIndex
+            self.onTapSearchTab = onTapSearchTab
+        }
+
+        func installIfPossible(from controller: UIViewController) {
+            guard let tabBarController = controller.tabBarController else { return }
+            install(on: tabBarController)
+        }
+
+        private func install(on tabBarController: UITabBarController) {
+            if self.tabBarController !== tabBarController {
+                self.tabBarController = tabBarController
+                forwardingDelegate = nil
+            }
+
+            guard tabBarController.delegate !== self else { return }
+            forwardingDelegate = tabBarController.delegate
+            tabBarController.delegate = self
+        }
+
+        func tabBarController(
+            _ tabBarController: UITabBarController,
+            shouldSelect viewController: UIViewController
+        ) -> Bool {
+            guard
+                let viewControllers = tabBarController.viewControllers,
+                let selectedIndex = viewControllers.firstIndex(of: viewController),
+                selectedIndex == searchTabIndex
+            else {
+                return forwardingDelegate?.tabBarController?(
+                    tabBarController,
+                    shouldSelect: viewController
+                ) ?? true
+            }
+
+            onTapSearchTab()
+            return false
+        }
+
+        func tabBarController(
+            _ tabBarController: UITabBarController,
+            didSelect viewController: UIViewController
+        ) {
+            forwardingDelegate?.tabBarController?(
+                tabBarController,
+                didSelect: viewController
+            )
+        }
     }
 }
 #endif
