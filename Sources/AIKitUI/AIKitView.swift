@@ -449,7 +449,6 @@ private struct AIKitSearchTabSelectionInterceptor: UIViewControllerRepresentable
                 && auxiliaryView.bounds.isEmpty == false
         }
 
-        @MainActor
         private func removeInterceptor() {
             installedTabBar?.removeGestureRecognizer(searchTapRecognizer)
             installedTabBar = nil
