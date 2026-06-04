@@ -9,9 +9,9 @@ import AIKitCore
 /// execution through `ToolRegistry`.
 ///
 /// Best-practice recipe (auto-bind, tier-matched structured output, temperature)
-/// and the brace-balanced JSON extraction it relies on are documented in
-/// `WORKFLOW_TWO_ROUND_RUNNER.md`; the lean planner/binder prompt contract +
-/// guard rails are in AIToolKit's `WORKFLOW_GUIDANCE.md` §4b.
+/// and the brace-balanced JSON extraction it relies on are in this package's
+/// `README.md` ("Two-round-trip runner recipe"); the lean planner/binder prompt
+/// contract + guard rails are in AIToolKit's `WORKFLOW_GUIDANCE.md` §4b.
 ///
 /// It is provider- and domain-agnostic: the local context is read through a
 /// `ContextHarvesting` you supply, not a concrete store. Token budgets are the
