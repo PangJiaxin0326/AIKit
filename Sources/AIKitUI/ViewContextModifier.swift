@@ -3,20 +3,13 @@ import AIKitCapability
 
 /// Environment slot carrying the app's `ContextResolver` so `.aiContext`
 /// modifiers can push/pop without manual plumbing.
-private struct ContextResolverKey: EnvironmentKey {
-    static let defaultValue = ContextResolver()
-}
-
 public extension EnvironmentValues {
-    var aiContextResolver: ContextResolver {
-        get { self[ContextResolverKey.self] }
-        set { self[ContextResolverKey.self] = newValue }
-    }
+    @Entry var aiContextResolver = ContextResolver()
 }
 
-private struct AIContextModifier: ViewModifier {
+struct AIKitContextLifecycleModifier: ViewModifier {
     @Environment(\.aiContextResolver) private var resolver
-    let context: ViewContext
+    let context: ViewContext?
 
     func body(content: Content) -> some View {
         content
@@ -28,6 +21,7 @@ private struct AIContextModifier: ViewModifier {
             // popping the exact token when the task ends keeps push/pop
             // balanced even with two live views sharing an id.
             .task(id: context) {
+                guard let context else { return }
                 let token = await resolver.push(context)
                 do {
                     // Park until the task is cancelled (view disappeared or
@@ -48,7 +42,7 @@ public extension View {
     /// Pushes `context` onto the shared resolver while this view is on screen,
     /// popping it on disappear.
     func aiContext(_ context: ViewContext) -> some View {
-        modifier(AIContextModifier(context: context))
+        modifier(AIKitContextLifecycleModifier(context: context))
     }
 
     /// Injects the resolver the orchestrator uses, so `.aiContext` works.

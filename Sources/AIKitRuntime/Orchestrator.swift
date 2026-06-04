@@ -1288,10 +1288,8 @@ public actor Orchestrator {
 
     // MARK: - LLM
 
-    private static let malformedToolInputRawKey = "__aikit_malformed_tool_input_raw"
-
     private static func malformedToolInput(raw: String) -> JSONValue {
-        .object([malformedToolInputRawKey: .string(raw)])
+        AIKitMalformedToolInput.make(raw: raw)
     }
 
     private func callLLM(
@@ -1301,10 +1299,11 @@ public actor Orchestrator {
         guard options.stream else {
             return try await llm.complete(request)
         }
-        var text = ""
-        var reasoning = ""
+        var textChunks: [String] = []
+        var reasoningChunks: [String] = []
         var audioBlocks: [AudioContent] = []
-        var toolBlocks: [(id: String, name: String, json: String)] = []
+        var toolBlocks: [StreamingToolBlock] = []
+        var toolIndexesByID: [String: Int] = [:]
         var stopReason: StopReason = .endTurn
         var usage = TokenUsage.zero
 
@@ -1315,10 +1314,10 @@ public actor Orchestrator {
             try Task.checkCancellation()
             switch chunk {
             case .textDelta(let delta):
-                text += delta
+                textChunks.append(delta)
                 emit(.llmDelta(delta))
             case .reasoningDelta(let delta):
-                reasoning += delta
+                reasoningChunks.append(delta)
                 emit(.reasoningDelta(delta))
             case .audio(let audio):
                 audioBlocks.append(audio)
@@ -1326,12 +1325,13 @@ public actor Orchestrator {
                     emit(.llmDelta(transcript))
                 }
             case .toolUseStart(let id, let name):
-                toolBlocks.append((id, name, ""))
+                toolIndexesByID[id] = toolBlocks.count
+                toolBlocks.append(StreamingToolBlock(id: id, name: name))
             case .toolUseInputDelta(let id, let json):
-                if let index = toolBlocks.firstIndex(where: { $0.id == id }) {
-                    toolBlocks[index].json += json
-                } else if !toolBlocks.isEmpty {
-                    toolBlocks[toolBlocks.count - 1].json += json
+                if let index = toolIndexesByID[id] {
+                    toolBlocks[index].jsonChunks.append(json)
+                } else if let index = toolBlocks.indices.last {
+                    toolBlocks[index].jsonChunks.append(json)
                 }
             case .toolUseStop:
                 continue
@@ -1349,21 +1349,30 @@ public actor Orchestrator {
         }
 
         var blocks: [ContentBlock] = []
+        let reasoning = reasoningChunks.joined()
+        let text = textChunks.joined()
         if !reasoning.isEmpty { blocks.append(.reasoning(reasoning)) }
         if !text.isEmpty { blocks.append(.text(text)) }
         blocks.append(contentsOf: audioBlocks.map(ContentBlock.audio))
         for tool in toolBlocks {
+            let json = tool.jsonChunks.joined()
             let input: JSONValue
-            if tool.json.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            if json.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 input = .object([:])
-            } else if let data = tool.json.data(using: .utf8),
+            } else if let data = json.data(using: .utf8),
                       let value = try? JSONValue(data: data) {
                 input = value
             } else {
-                input = Self.malformedToolInput(raw: tool.json)
+                input = Self.malformedToolInput(raw: json)
             }
             blocks.append(.toolUse(id: tool.id, name: tool.name, input: input))
         }
         return LLMResponse(content: blocks, stopReason: stopReason, usage: usage)
     }
+}
+
+private struct StreamingToolBlock {
+    let id: String
+    let name: String
+    var jsonChunks: [String] = []
 }

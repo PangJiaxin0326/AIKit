@@ -37,12 +37,7 @@ public struct AppleIntelligenceProvider: LLMProvider {
             )
         }
         #if canImport(FoundationModels)
-        if #available(iOS 26.0, macOS 26.0, visionOS 26.0, *) {
-            return try await AppleFoundationModels.complete(request)
-        }
-        throw LLMError.unsupported(
-            "Apple Intelligence requires the Foundation Models framework on iOS 26, macOS 26, or visionOS 26."
-        )
+        return try await AppleFoundationModels.complete(request)
         #else
         throw LLMError.unsupported(
             "Apple Intelligence requires the Foundation Models framework."
@@ -195,7 +190,6 @@ public struct AppleIntelligenceProvider: LLMProvider {
 }
 
 #if canImport(FoundationModels)
-@available(iOS 26.0, macOS 26.0, visionOS 26.0, *)
 private enum AppleFoundationModels {
     static func complete(_ request: LLMRequest) async throws -> LLMResponse {
         let model = SystemLanguageModel.default

@@ -1,6 +1,9 @@
 import Foundation
 import Testing
-import AIKit
+import AIKitCore
+import AIKitCapability
+import AIKitRuntime
+import AIKitSafety
 import AIKitTestSupport
 
 /// A tool that flips a flag when invoked, so tests can prove a blocked call

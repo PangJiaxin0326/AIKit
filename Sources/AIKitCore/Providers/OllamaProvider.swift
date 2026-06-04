@@ -52,13 +52,7 @@ public struct OllamaProvider: LLMProvider {
 
     public func complete(_ request: LLMRequest) async throws -> LLMResponse {
         let urlRequest = try makeURLRequest(request, stream: false)
-        let (data, response): (Data, URLResponse)
-        do {
-            (data, response) = try await configuration.session.data(for: urlRequest)
-        } catch {
-            throw LLMError.from(transport: error)
-        }
-        try Self.validate(response, data: data)
+        let data = try await validatedProviderData(for: urlRequest, session: configuration.session)
         do {
             return try JSONDecoder().decode(WireResponse.self, from: data).toResponse()
         } catch {
@@ -75,8 +69,10 @@ public struct OllamaProvider: LLMProvider {
             let task = Task {
                 do {
                     let urlRequest = try makeURLRequest(request, stream: true)
-                    let (bytes, response) = try await configuration.session.bytes(for: urlRequest)
-                    try Self.validate(response, data: Data())
+                    let bytes = try await validatedProviderBytes(
+                        for: urlRequest,
+                        session: configuration.session
+                    )
                     var toolIndex = 0
                     for try await line in bytes.lines {
                         try Task.checkCancellation()
@@ -250,14 +246,6 @@ public struct OllamaProvider: LLMProvider {
                 "parameters": descriptor.inputSchema,
             ]),
         ])
-    }
-
-    private static func validate(_ response: URLResponse, data: Data) throws {
-        guard let http = response as? HTTPURLResponse else { return }
-        guard (200..<300).contains(http.statusCode) else {
-            let body = String(data: data, encoding: .utf8) ?? ""
-            throw LLMError.httpStatus(code: http.statusCode, body: body)
-        }
     }
 }
 

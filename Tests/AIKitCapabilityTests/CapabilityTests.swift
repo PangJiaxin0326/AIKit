@@ -147,7 +147,7 @@ private struct EchoTool: Tool {
     }
 }
 
-@Suite struct MemoryStoreTests {
+@Suite(.serialized) struct MemoryStoreTests {
     @Test func inMemoryRecentAndSearch() async throws {
         let store = InMemoryMemoryStore()
         try await store.append(UsageEvent(viewID: .init("a"), kind: .userInstruction, text: "open settings"))

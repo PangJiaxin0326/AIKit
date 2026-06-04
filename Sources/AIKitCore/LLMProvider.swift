@@ -29,13 +29,13 @@ public struct LLMProviderConfiguration: Sendable {
         self.apiKey = apiKey
         self.baseURL = baseURL
         self.defaultModel = defaultModel?.trimmingCharacters(in: .whitespacesAndNewlines).emptyAsNil
-        self.availableModels = Self.normalizedModels(availableModels)
+        self.availableModels = AIKitModelListNormalizer.uniquePreservingOrder(availableModels)
         self.timeout = timeout
         self.session = session
     }
 
     public mutating func replaceAvailableModels(_ models: [String]) {
-        let normalized = Self.normalizedModels(models)
+        let normalized = AIKitModelListNormalizer.uniquePreservingOrder(models)
         availableModels = normalized
         guard let defaultModel, normalized.contains(defaultModel) else {
             self.defaultModel = nil
@@ -43,16 +43,6 @@ public struct LLMProviderConfiguration: Sendable {
         }
     }
 
-    private static func normalizedModels(_ models: [String]) -> [String] {
-        var seen: Set<String> = []
-        var normalized: [String] = []
-        for model in models {
-            let trimmed = model.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty, seen.insert(trimmed).inserted else { continue }
-            normalized.append(trimmed)
-        }
-        return normalized
-    }
 }
 
 private extension String {

@@ -51,13 +51,7 @@ public struct OpenAIProvider: LLMProvider {
 
     public func complete(_ request: LLMRequest) async throws -> LLMResponse {
         let urlRequest = try makeURLRequest(request, stream: false)
-        let (data, response): (Data, URLResponse)
-        do {
-            (data, response) = try await configuration.session.data(for: urlRequest)
-        } catch {
-            throw LLMError.from(transport: error)
-        }
-        try Self.validate(response, data: data)
+        let data = try await validatedProviderData(for: urlRequest, session: configuration.session)
         do {
             let wire = try JSONDecoder().decode(WireResponse.self, from: data)
             return try wire.toResponse(requestedAudioFormat: request.audioOutput?.format)
@@ -77,8 +71,10 @@ public struct OpenAIProvider: LLMProvider {
             let task = Task {
                 do {
                     let urlRequest = try makeURLRequest(request, stream: true)
-                    let (bytes, response) = try await configuration.session.bytes(for: urlRequest)
-                    try Self.validate(response, data: Data())
+                    let bytes = try await validatedProviderBytes(
+                        for: urlRequest,
+                        session: configuration.session
+                    )
                     var activeToolIDs: [Int: String] = [:]
                     for try await line in bytes.lines {
                         try Task.checkCancellation()
@@ -144,14 +140,6 @@ public struct OpenAIProvider: LLMProvider {
             throw LLMError.encodingFailed(String(describing: error))
         }
         return urlRequest
-    }
-
-    private static func validate(_ response: URLResponse, data: Data) throws {
-        guard let http = response as? HTTPURLResponse else { return }
-        guard (200..<300).contains(http.statusCode) else {
-            let body = String(data: data, encoding: .utf8) ?? ""
-            throw LLMError.httpStatus(code: http.statusCode, body: body)
-        }
     }
 }
 
@@ -389,10 +377,8 @@ private struct WireToolCall: Encodable, Decodable {
     }
 }
 
-private let malformedToolInputRawKey = "__aikit_malformed_tool_input_raw"
-
 private func malformedToolInput(raw: String) -> JSONValue {
-    .object([malformedToolInputRawKey: .string(raw)])
+    AIKitMalformedToolInput.make(raw: raw)
 }
 
 private func openAIImageURL(_ source: MediaSource) -> String {

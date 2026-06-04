@@ -1,42 +1,47 @@
 import SwiftUI
 import AIKitRuntime
 
+/// Which interaction model the pet button presents.
+public enum AIKitChatbotOverlayMode: Sendable {
+    /// Text-first overlay with a glass capsule. The default.
+    case assistant
+    /// Hands-free voice loop driven entirely by the button.
+    case voice
+}
+
 /// Floating assistant entry point. Two modes share the same pet button:
 ///
-/// - ``Mode/assistant`` — the full overlay: a tap-to-expand glass capsule
-///   with a text field, voice input, and a long-press detail panel.
-/// - ``Mode/voice`` — a pure-voice flow. The button has no capsule: a tap
-///   starts listening, silence fires the AI turn, and the assistant speaks
-///   back when it needs a follow-up.
-public struct AIKitChatbotOverlay: View {
-    /// Which interaction model the pet button presents.
-    public enum Mode: Sendable {
-        /// Text-first overlay with a glass capsule. The default.
-        case assistant
-        /// Hands-free voice loop driven entirely by the button.
-        case voice
-    }
+/// - ``AIKitChatbotOverlayMode/assistant`` — the full overlay: a tap-to-expand
+///   glass capsule with a text field, voice input, and a long-press detail panel.
+/// - ``AIKitChatbotOverlayMode/voice`` — a pure-voice flow. The button has no
+///   capsule: a tap starts listening, silence fires the AI turn, and the
+///   assistant speaks back when it needs a follow-up.
+public struct AIKitChatbotOverlay<DetailContent: View>: View {
+    public typealias Mode = AIKitChatbotOverlayMode
 
     private let orchestrator: Orchestrator
     private let mode: Mode
-    private let detailContent: @MainActor (AIKitOverlayContext) -> AnyView
+    private let detailContent: @MainActor (AIKitOverlayContext) -> DetailContent
 
     @MainActor
-    public init(orchestrator: Orchestrator, mode: Mode = .assistant) {
+    public init(
+        orchestrator: Orchestrator,
+        mode: Mode = .assistant
+    ) where DetailContent == EmptyView {
         self.orchestrator = orchestrator
         self.mode = mode
-        self.detailContent = { _ in AnyView(EmptyView()) }
+        self.detailContent = { _ in EmptyView() }
     }
 
     @MainActor
-    public init<DetailContent: View>(
+    public init(
         orchestrator: Orchestrator,
         mode: Mode = .assistant,
         @ViewBuilder detailContent: @escaping @MainActor (AIKitOverlayContext) -> DetailContent
     ) {
         self.orchestrator = orchestrator
         self.mode = mode
-        self.detailContent = { context in AnyView(detailContent(context)) }
+        self.detailContent = detailContent
     }
 
     @ViewBuilder
@@ -203,11 +208,5 @@ struct VoiceChatbotOverlay: View {
                     dragTranslation = .zero
                 }
             }
-    }
-}
-
-private extension Comparable {
-    func clamped(to range: ClosedRange<Self>) -> Self {
-        min(max(self, range.lowerBound), range.upperBound)
     }
 }

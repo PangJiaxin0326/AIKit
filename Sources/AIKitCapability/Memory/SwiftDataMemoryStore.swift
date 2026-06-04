@@ -7,10 +7,13 @@ import AIKitCore
 /// flat, migration-friendly record.
 @Model
 final class StoredUsageEvent {
+    #Index<StoredUsageEvent>([\.viewRawValue], [\.timestamp], [\.kindRawValue])
+
     var id: UUID = UUID()
     var timestamp: Date = Date(timeIntervalSince1970: 0)
     var viewRawValue: String = ""
     var kindRawValue: String = UsageEvent.Kind.error.rawValue
+    var payloadText: String = ""
     var payload: Data = Data()
 
     init(
@@ -18,12 +21,14 @@ final class StoredUsageEvent {
         timestamp: Date,
         viewRawValue: String,
         kindRawValue: String,
+        payloadText: String,
         payload: Data
     ) {
         self.id = id
         self.timestamp = timestamp
         self.viewRawValue = viewRawValue
         self.kindRawValue = kindRawValue
+        self.payloadText = payloadText
         self.payload = payload
     }
 
@@ -78,6 +83,7 @@ public actor SwiftDataMemoryStore: MemoryStore {
             timestamp: event.timestamp,
             viewRawValue: event.viewID.rawValue,
             kindRawValue: event.kind.rawValue,
+            payloadText: event.payloadText,
             payload: event.payload
         ))
         try modelContext.save()
@@ -96,20 +102,17 @@ public actor SwiftDataMemoryStore: MemoryStore {
     }
 
     public func search(query: String, limit: Int) async throws -> [UsageEvent] {
-        guard !query.isEmpty else { return [] }
-        let lowered = query.lowercased()
-        let descriptor = FetchDescriptor<StoredUsageEvent>(
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return [] }
+        var descriptor = FetchDescriptor<StoredUsageEvent>(
+            predicate: #Predicate<StoredUsageEvent> { row in
+                row.payloadText.localizedStandardContains(trimmed)
+                    || row.kindRawValue.localizedStandardContains(trimmed)
+            },
             sortBy: [SortDescriptor(\.timestamp, order: .reverse)]
         )
-        // Keyword search runs in Swift so the payload blob can be decoded as
-        // text; it mirrors `InMemoryMemoryStore` and treats the query
-        // literally (no LIKE-style wildcards).
-        let matches = try modelContext.fetch(descriptor).filter { row in
-            let text = String(decoding: row.payload, as: UTF8.self).lowercased()
-            return text.contains(lowered)
-                || row.kindRawValue.lowercased().contains(lowered)
-        }
-        return Array(matches.prefix(max(0, limit)).map(\.asUsageEvent))
+        descriptor.fetchLimit = max(0, limit)
+        return try modelContext.fetch(descriptor).map(\.asUsageEvent)
     }
 
     public func delete(id: UUID) async throws {

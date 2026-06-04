@@ -27,14 +27,14 @@ public enum OutputParser {
         _ response: LLMResponse,
         allowToolCallFallback: Bool = false
     ) throws -> ParsedOutput {
-        var text = ""
+        var textParts: [String] = []
         var calls: [ToolCall] = []
         var workflow: WorkflowSpec?
 
         for block in response.content {
             switch block {
             case .text(let value):
-                text += value
+                textParts.append(value)
             case .reasoning:
                 // Not part of the parsed intent; the Orchestrator surfaces it
                 // separately as a reasoning event.
@@ -43,8 +43,8 @@ public enum OutputParser {
                 continue
             case .audio(let audio):
                 if let transcript = audio.transcript {
-                    if !text.isEmpty { text += "\n" }
-                    text += transcript
+                    if !textParts.isEmpty { textParts.append("\n") }
+                    textParts.append(transcript)
                 }
             case .toolUse(let id, let name, let input):
                 // A tool_use block whose input failed to decode upstream is
@@ -61,7 +61,7 @@ public enum OutputParser {
             }
         }
 
-        var trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        var trimmed = textParts.joined().trimmingCharacters(in: .whitespacesAndNewlines)
 
         workflow = try Self.popWorkflowCall(from: &calls)
 
@@ -110,14 +110,8 @@ public enum OutputParser {
 
     // MARK: - Malformed native tool-call sentinel
 
-    private static let malformedToolInputRawKey = "__aikit_malformed_tool_input_raw"
-
     private static func malformedToolInputRaw(in input: JSONValue) -> String? {
-        guard case .object(let object) = input,
-              object.count == 1,
-              case .string(let raw)? = object[malformedToolInputRawKey]
-        else { return nil }
-        return raw
+        AIKitMalformedToolInput.raw(in: input)
     }
 
     // MARK: - Near-miss diagnostic

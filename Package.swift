@@ -109,7 +109,14 @@ let package = Package(
         ),
         .testTarget(
             name: "AIKitIntegrationTests",
-            dependencies: ["AIKit", "AIKitTestSupport"],
+            dependencies: [
+                "AIKit",
+                "AIKitCore",
+                "AIKitCapability",
+                "AIKitRuntime",
+                "AIKitSafety",
+                "AIKitTestSupport",
+            ],
             swiftSettings: swiftSettings
         ),
     ]

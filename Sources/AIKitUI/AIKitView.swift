@@ -514,13 +514,69 @@ private struct AIKitSearchTabSelectionInterceptor: UIViewControllerRepresentable
 }
 #endif
 
+private struct AIKitProviderCredentialStore: Equatable {
+    private static let storageKey = "AIKitProviderAPIKeys"
+
+    private var apiKeys: [AIKitProviderKind: String]
+
+    init(apiKeys: [AIKitProviderKind: String] = [:]) {
+        self.apiKeys = apiKeys
+    }
+
+    static func load(defaults: UserDefaults = .standard) -> Self {
+        guard let data = defaults.data(forKey: storageKey),
+              let storedValues = try? JSONDecoder().decode([String: String].self, from: data)
+        else {
+            return Self()
+        }
+
+        let apiKeys = storedValues.reduce(into: [AIKitProviderKind: String]()) { result, pair in
+            guard let provider = AIKitProviderKind(providerName: pair.key),
+                  provider.definition.apiKeyStrategy.requiresCredential,
+                  !pair.value.isEmpty
+            else { return }
+            result[provider] = pair.value
+        }
+        return Self(apiKeys: apiKeys)
+    }
+
+    func apiKey(for provider: AIKitProviderKind) -> String {
+        guard provider.definition.apiKeyStrategy.requiresCredential else { return "" }
+        return apiKeys[provider] ?? ""
+    }
+
+    mutating func setAPIKey(_ apiKey: String, for provider: AIKitProviderKind) {
+        guard provider.definition.apiKeyStrategy.requiresCredential else {
+            apiKeys[provider] = nil
+            return
+        }
+        if apiKey.isEmpty {
+            apiKeys[provider] = nil
+        } else {
+            apiKeys[provider] = apiKey
+        }
+    }
+
+    func save(defaults: UserDefaults = .standard) {
+        let storedValues = apiKeys.reduce(into: [String: String]()) { result, pair in
+            result[pair.key.rawValue] = pair.value
+        }
+        guard let data = try? JSONEncoder().encode(storedValues) else { return }
+        defaults.set(data, forKey: Self.storageKey)
+    }
+}
+
+private extension AIKitProviderDefinition.APIKeyStrategy {
+    var requiresCredential: Bool {
+        self != .none
+    }
+}
+
 /// A SwiftUI state-management surface for AIKit's Core, Capability, Runtime,
 /// and Safety configuration.
 public struct AIKitView: View {
     @State private var model: AIKitConfigurationViewModel
-    @AppStorage("openAIAPIKey") private var openAIAPIKey = ""
-    @AppStorage("anthropicAPIKey") private var anthropicAPIKey = ""
-    @AppStorage("arkAPIKey") private var arkAPIKey = ""
+    @State private var providerCredentials: AIKitProviderCredentialStore
 
     private let orchestrator: Orchestrator?
 
@@ -534,6 +590,7 @@ public struct AIKitView: View {
             store: configurationStore,
             toolRegistry: toolRegistry
         ))
+        _providerCredentials = State(initialValue: AIKitProviderCredentialStore.load())
     }
 
     @MainActor
@@ -547,6 +604,7 @@ public struct AIKitView: View {
             store: configurationStore,
             toolRegistry: toolRegistry
         ))
+        _providerCredentials = State(initialValue: AIKitProviderCredentialStore.load())
     }
 
     @ViewBuilder
@@ -656,8 +714,7 @@ public struct AIKitView: View {
 
     @ViewBuilder
     private var providerCredentialRow: some View {
-        switch selectedProvider {
-        case .openAI, .anthropic, .ark:
+        if selectedProviderDefinition.apiKeyStrategy.requiresCredential {
             LabeledContent("API key") {
                 SecureField("API key", text: providerAPIKeyBinding)
                     .multilineTextAlignment(.trailing)
@@ -668,8 +725,6 @@ public struct AIKitView: View {
                     .textContentType(.password)
                     .aiKitFieldStyle()
             }
-        case .ollama, .appleIntelligence:
-            EmptyView()
         }
     }
 
@@ -906,44 +961,16 @@ public struct AIKitView: View {
 
     private var providerAPIKeyBinding: Binding<String> {
         Binding(
-            get: {
-                switch selectedProvider {
-                case .openAI:
-                    openAIAPIKey
-                case .anthropic:
-                    anthropicAPIKey
-                case .ollama, .appleIntelligence:
-                    ""
-                case .ark:
-                    arkAPIKey
-                }
-            },
+            get: { providerCredentials.apiKey(for: selectedProvider) },
             set: { newValue in
-                switch selectedProvider {
-                case .openAI:
-                    openAIAPIKey = newValue
-                case .anthropic:
-                    anthropicAPIKey = newValue
-                case .ollama, .appleIntelligence:
-                    break
-                case .ark:
-                    arkAPIKey = newValue
-                }
+                providerCredentials.setAPIKey(newValue, for: selectedProvider)
+                providerCredentials.save()
             }
         )
     }
 
     private var providerAPIKey: String {
-        switch selectedProvider {
-        case .openAI:
-            openAIAPIKey
-        case .anthropic:
-            anthropicAPIKey
-        case .ollama, .appleIntelligence:
-            ""
-        case .ark:
-            arkAPIKey
-        }
+        providerCredentials.apiKey(for: selectedProvider)
     }
 
     private var selectedProviderEndpointBinding: Binding<String> {
@@ -1031,9 +1058,9 @@ public struct AIKitView: View {
 /// The text-first ("assistant") pet button: a tap-to-expand glass capsule
 /// with a prompt field, voice input, and a long-press detail panel. Reached
 /// through `AIKitChatbotOverlay` with `mode: .assistant`.
-struct AssistantChatbotOverlay: View {
+struct AssistantChatbotOverlay<DetailContent: View>: View {
     @State private var session: AIKitSession
-    @StateObject private var voiceRecorder = AudioRecorder()
+    @State private var voiceInput = AssistantVoiceInputController()
     /// Full assistant panel — opened by a long press on the pet.
     @State private var isDialogPresented = false
     /// Whether the glass capsule (status field + action) is expanded next
@@ -1043,9 +1070,6 @@ struct AssistantChatbotOverlay: View {
     @State private var activityDisplay: OverlayActivityDisplay = .tasks
     @State private var draft = ""
     @State private var capsuleDraft = ""
-    @State private var isVoiceTranscribing = false
-    @State private var voiceError: String?
-    @State private var voiceTask: Task<Void, Never>?
     @State private var capsuleSize: CGSize = .zero
     @State private var floatingSurfaceSize: CGSize = .zero
     /// The last instruction sent from the capsule, carried as context into
@@ -1073,7 +1097,7 @@ struct AssistantChatbotOverlay: View {
     @GestureState private var isInteracting = false
 
     private let orchestrator: Orchestrator
-    private let detailContent: @MainActor (AIKitOverlayContext) -> AnyView
+    private let detailContent: @MainActor (AIKitOverlayContext) -> DetailContent
 
     private let petDiameter = AIKitMetrics.petDiameter
     private let edgeInset = AIKitMetrics.edgeInset
@@ -1081,9 +1105,7 @@ struct AssistantChatbotOverlay: View {
     @MainActor
     init(
         orchestrator: Orchestrator,
-        detailContent: @escaping @MainActor (AIKitOverlayContext) -> AnyView = { _ in
-            AnyView(EmptyView())
-        }
+        @ViewBuilder detailContent: @escaping @MainActor (AIKitOverlayContext) -> DetailContent
     ) {
         self.orchestrator = orchestrator
         self.detailContent = detailContent
@@ -1341,7 +1363,7 @@ struct AssistantChatbotOverlay: View {
         guard !text.isEmpty, !activity.isBusy else { return }
         capsuleDraft = ""
         let instruction = activity.hasFailed
-            ? contextualFollowUp(
+            ? aiKitContextualFollowUpInstruction(
                 previous: lastInstruction,
                 reason: activity.failureReason,
                 followUp: text
@@ -1351,103 +1373,28 @@ struct AssistantChatbotOverlay: View {
         Task { await session.send(instruction) }
     }
 
-    private var voiceLevel: Double {
-        max(voiceRecorder.averagePowerLevel, voiceRecorder.peakPowerLevel * 0.85)
-    }
-
     private var overlayContext: AIKitOverlayContext {
         AIKitOverlayContext(snapshot: snapshot)
     }
 
     private func startVoiceRecording() {
-        guard !activity.isBusy, !isVoiceTranscribing else { return }
+        guard !activity.isBusy, !voiceInput.isVoiceTranscribing else { return }
         fieldFocused = false
         capsuleDraft = ""
-        voiceError = nil
-        voiceTask?.cancel()
-        voiceTask = Task { @MainActor in
-            do {
-                try await PermissionCenter.require(.speechRecognition)
-                try Task.checkCancellation()
-                _ = try await voiceRecorder.startRecordingWithPermission(
-                    configuration: AudioRecordingConfiguration(format: .wav)
-                )
-            } catch is CancellationError {
-                voiceRecorder.cancelRecording()
-            } catch {
-                voiceError = error.localizedDescription
-                voiceRecorder.cancelRecording()
-            }
-        }
+        voiceInput.startRecording()
     }
 
     private func finishVoiceRecording() {
-        guard let url = voiceRecorder.stopRecording() else { return }
-        transcribeVoiceRecording(at: url)
-    }
-
-    private func transcribeVoiceRecording(at url: URL) {
-        isVoiceTranscribing = true
-        voiceError = nil
-        voiceTask?.cancel()
-        voiceTask = Task { @MainActor [url] in
-            defer {
-                isVoiceTranscribing = false
-                voiceTask = nil
-                try? FileManager.default.removeItem(at: url)
-            }
-
-            do {
-                let result = try await SpeechTranscriptionService()
-                    .transcribeAudioFile(at: url)
-                try Task.checkCancellation()
-
-                let text = result.plainText
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !text.isEmpty else {
-                    voiceError = "No speech detected."
-                    return
-                }
-                sendCapsuleText(text)
-            } catch is CancellationError {
-                voiceRecorder.cancelRecording()
-            } catch {
-                voiceError = error.localizedDescription
-            }
-        }
+        voiceInput.finishRecording(onText: sendCapsuleText)
     }
 
     private func cancelVoiceInput() {
-        voiceTask?.cancel()
-        voiceTask = nil
-        if voiceRecorder.isRecording {
-            voiceRecorder.cancelRecording()
-        }
-        isVoiceTranscribing = false
+        voiceInput.cancel()
     }
 
     private func clearVoiceError() {
-        voiceError = nil
+        voiceInput.clearError()
         fieldFocused = true
-    }
-
-    private func contextualFollowUp(
-        previous: String,
-        reason: String?,
-        followUp: String
-    ) -> String {
-        var parts = ["This is a follow-up to a request you could not complete."]
-        if !previous.isEmpty {
-            parts.append("Your earlier request was: \"\(previous)\"")
-        }
-        if let reason, !reason.isEmpty {
-            parts.append("It could not be completed because: \(reason)")
-        }
-        parts.append("Clarification / new instruction: \(followUp)")
-        parts.append(
-            "Treat the earlier request and this clarification as one request."
-        )
-        return parts.joined(separator: "\n")
     }
 
     private func cancelCurrentWork() {
@@ -1519,17 +1466,17 @@ struct AssistantChatbotOverlay: View {
             text: $capsuleDraft,
             focused: $fieldFocused,
             activity: activity,
-            voiceLevel: voiceLevel,
-            isRecording: voiceRecorder.isRecording,
-            isVoiceTranscribing: isVoiceTranscribing,
-            voiceError: voiceError,
+            voiceLevel: voiceInput.voiceLevel,
+            isRecording: voiceInput.isRecording,
+            isVoiceTranscribing: voiceInput.isVoiceTranscribing,
+            voiceError: voiceInput.voiceError,
             horizontalPadding: capsuleContentPadding,
             onSubmit: sendCapsule,
             onStartVoiceRecording: startVoiceRecording,
             onFinishVoiceRecording: finishVoiceRecording,
             onCancelCurrentWork: cancelCurrentWork,
             onDismissFailure: dismissFailure,
-            onTextChanged: { voiceError = nil },
+            onTextChanged: voiceInput.clearError,
             onClearVoiceError: clearVoiceError
         )
         .frame(width: capsuleContentWidth(in: size))
@@ -1775,12 +1722,12 @@ struct AssistantChatbotOverlay: View {
     }
 }
 
-public typealias ChatbotOverlay = AIKitChatbotOverlay
+public typealias ChatbotOverlay<DetailContent: View> = AIKitChatbotOverlay<DetailContent>
 
 public extension View {
     func aiChatbotOverlay(
         orchestrator: Orchestrator,
-        mode: AIKitChatbotOverlay.Mode = .assistant
+        mode: AIKitChatbotOverlayMode = .assistant
     ) -> some View {
         overlay {
             AIKitChatbotOverlay(orchestrator: orchestrator, mode: mode)
@@ -1789,7 +1736,7 @@ public extension View {
 
     func aiChatbotOverlay<DetailContent: View>(
         orchestrator: Orchestrator,
-        mode: AIKitChatbotOverlay.Mode = .assistant,
+        mode: AIKitChatbotOverlayMode = .assistant,
         @ViewBuilder detailContent: @escaping @MainActor (AIKitOverlayContext) -> DetailContent
     ) -> some View {
         overlay {
@@ -2154,11 +2101,8 @@ private struct AIKitTabFabPanel<CustomContent: View>: View {
 
 private struct AssistantTabBottomAccessory: View {
     @State private var session: AIKitSession
-    @StateObject private var voiceRecorder = AudioRecorder()
+    @State private var voiceInput = AssistantVoiceInputController()
     @State private var draft = ""
-    @State private var isVoiceTranscribing = false
-    @State private var voiceError: String?
-    @State private var voiceTask: Task<Void, Never>?
     @State private var lastInstruction = ""
     @State private var activity: OrchestratorActivity = .idle
     @FocusState private var fieldFocused: Bool
@@ -2176,17 +2120,17 @@ private struct AssistantTabBottomAccessory: View {
             text: $draft,
             focused: $fieldFocused,
             activity: activity,
-            voiceLevel: voiceLevel,
-            isRecording: voiceRecorder.isRecording,
-            isVoiceTranscribing: isVoiceTranscribing,
-            voiceError: voiceError,
+            voiceLevel: voiceInput.voiceLevel,
+            isRecording: voiceInput.isRecording,
+            isVoiceTranscribing: voiceInput.isVoiceTranscribing,
+            voiceError: voiceInput.voiceError,
             horizontalPadding: 12,
             onSubmit: sendDraft,
             onStartVoiceRecording: startVoiceRecording,
             onFinishVoiceRecording: finishVoiceRecording,
             onCancelCurrentWork: cancelCurrentWork,
             onDismissFailure: dismissFailure,
-            onTextChanged: { voiceError = nil },
+            onTextChanged: voiceInput.clearError,
             onClearVoiceError: clearVoiceError
         )
         // No background of our own: the system tab accessory already
@@ -2205,10 +2149,6 @@ private struct AssistantTabBottomAccessory: View {
         .onDisappear { cancelVoiceInput() }
     }
 
-    private var voiceLevel: Double {
-        max(voiceRecorder.averagePowerLevel, voiceRecorder.peakPowerLevel * 0.85)
-    }
-
     private func sendDraft() {
         sendText(draft)
     }
@@ -2218,7 +2158,7 @@ private struct AssistantTabBottomAccessory: View {
         guard !text.isEmpty, !activity.isBusy else { return }
         draft = ""
         let instruction = activity.hasFailed
-            ? contextualFollowUp(
+            ? aiKitContextualFollowUpInstruction(
                 previous: lastInstruction,
                 reason: activity.failureReason,
                 followUp: text
@@ -2229,94 +2169,23 @@ private struct AssistantTabBottomAccessory: View {
     }
 
     private func startVoiceRecording() {
-        guard !activity.isBusy, !isVoiceTranscribing else { return }
+        guard !activity.isBusy, !voiceInput.isVoiceTranscribing else { return }
         fieldFocused = false
         draft = ""
-        voiceError = nil
-        voiceTask?.cancel()
-        voiceTask = Task { @MainActor in
-            do {
-                try await PermissionCenter.require(.speechRecognition)
-                try Task.checkCancellation()
-                _ = try await voiceRecorder.startRecordingWithPermission(
-                    configuration: AudioRecordingConfiguration(format: .wav)
-                )
-            } catch is CancellationError {
-                voiceRecorder.cancelRecording()
-            } catch {
-                voiceError = error.localizedDescription
-                voiceRecorder.cancelRecording()
-            }
-        }
+        voiceInput.startRecording()
     }
 
     private func finishVoiceRecording() {
-        guard let url = voiceRecorder.stopRecording() else { return }
-        transcribeVoiceRecording(at: url)
-    }
-
-    private func transcribeVoiceRecording(at url: URL) {
-        isVoiceTranscribing = true
-        voiceError = nil
-        voiceTask?.cancel()
-        voiceTask = Task { @MainActor [url] in
-            defer {
-                isVoiceTranscribing = false
-                voiceTask = nil
-                try? FileManager.default.removeItem(at: url)
-            }
-
-            do {
-                let result = try await SpeechTranscriptionService()
-                    .transcribeAudioFile(at: url)
-                try Task.checkCancellation()
-
-                let text = result.plainText
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !text.isEmpty else {
-                    voiceError = "No speech detected."
-                    return
-                }
-                sendText(text)
-            } catch is CancellationError {
-                voiceRecorder.cancelRecording()
-            } catch {
-                voiceError = error.localizedDescription
-            }
-        }
+        voiceInput.finishRecording(onText: sendText)
     }
 
     private func cancelVoiceInput() {
-        voiceTask?.cancel()
-        voiceTask = nil
-        if voiceRecorder.isRecording {
-            voiceRecorder.cancelRecording()
-        }
-        isVoiceTranscribing = false
+        voiceInput.cancel()
     }
 
     private func clearVoiceError() {
-        voiceError = nil
+        voiceInput.clearError()
         fieldFocused = true
-    }
-
-    private func contextualFollowUp(
-        previous: String,
-        reason: String?,
-        followUp: String
-    ) -> String {
-        var parts = ["This is a follow-up to a request you could not complete."]
-        if !previous.isEmpty {
-            parts.append("Your earlier request was: \"\(previous)\"")
-        }
-        if let reason, !reason.isEmpty {
-            parts.append("It could not be completed because: \(reason)")
-        }
-        parts.append("Clarification / new instruction: \(followUp)")
-        parts.append(
-            "Treat the earlier request and this clarification as one request."
-        )
-        return parts.joined(separator: "\n")
     }
 
     private func cancelCurrentWork() {
@@ -3108,32 +2977,6 @@ private extension AIKitConfigurationChange {
     }
 }
 
-private extension Comparable {
-    func clamped(to range: ClosedRange<Self>) -> Self {
-        min(max(self, range.lowerBound), range.upperBound)
-    }
-}
-
-private struct AIKitActiveContextModifier: ViewModifier {
-    @Environment(\.aiContextResolver) private var resolver
-    let context: ViewContext?
-
-    func body(content: Content) -> some View {
-        content
-            .task(id: context) {
-                guard let context else { return }
-                let token = await resolver.push(context)
-                do {
-                    while true {
-                        try await Task.sleep(nanoseconds: 3_600_000_000_000)
-                    }
-                } catch {
-                    await resolver.pop(token)
-                }
-            }
-    }
-}
-
 private extension View {
     /// The one inset-container treatment — a soft filled surface inside a
     /// single hairline and one continuous curve — shared by every editable
@@ -3163,22 +3006,12 @@ private extension View {
 
     @ViewBuilder
     func chatbotCapsuleStyle(tint: Color) -> some View {
-        if #available(iOS 26.0, macOS 26.0, visionOS 26.0, *) {
-            glassEffect(.regular.interactive().tint(tint), in: .capsule)
-        } else {
-            background(.regularMaterial, in: Capsule())
-                .overlay {
-                    Capsule().stroke(tint.opacity(0.35))
-                }
-                // Lift the fallback capsule off the canvas so it carries the
-                // same quiet depth the OS-26 glass renders natively.
-                .shadow(color: tint.opacity(0.25), radius: 10, y: 4)
-        }
+        glassEffect(.regular.interactive().tint(tint), in: .capsule)
     }
 
     #if os(iOS)
     func aiKitActiveContext(_ context: ViewContext?) -> some View {
-        modifier(AIKitActiveContextModifier(context: context))
+        modifier(AIKitContextLifecycleModifier(context: context))
     }
 
     func aiKitTabFabOverlay<Content: View>(

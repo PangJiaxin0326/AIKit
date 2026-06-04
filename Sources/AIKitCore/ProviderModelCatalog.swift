@@ -219,7 +219,7 @@ public struct AIKitModelCatalog: Sendable {
         timeout: TimeInterval? = nil
     ) async throws -> [String] {
         if case .staticList(let models) = provider.definition.modelListFormat {
-            return uniqueSorted(models)
+            return AIKitModelListNormalizer.uniqueSorted(models)
         }
 
         let request = try makeRequest(
@@ -227,13 +227,7 @@ public struct AIKitModelCatalog: Sendable {
             apiKey: apiKey,
             timeout: timeout
         )
-        let (data, response): (Data, URLResponse)
-        do {
-            (data, response) = try await session.data(for: request)
-        } catch {
-            throw LLMError.from(transport: error)
-        }
-        try validate(response, data: data)
+        let data = try await validatedProviderData(for: request, session: session)
         do {
             return try decodeModels(provider: provider, data: data)
         } catch {
@@ -269,36 +263,17 @@ public struct AIKitModelCatalog: Sendable {
         return request
     }
 
-    private func validate(_ response: URLResponse, data: Data) throws {
-        guard let http = response as? HTTPURLResponse else { return }
-        guard (200..<300).contains(http.statusCode) else {
-            let body = String(data: data, encoding: .utf8) ?? ""
-            throw LLMError.httpStatus(code: http.statusCode, body: body)
-        }
-    }
-
     private func decodeModels(provider: AIKitProviderKind, data: Data) throws -> [String] {
         switch provider.definition.modelListFormat {
         case .openAICompatible, .anthropic:
             let response = try JSONDecoder().decode(ListedModels.self, from: data)
-            return uniqueSorted(response.data.map(\.id))
+            return AIKitModelListNormalizer.uniqueSorted(response.data.map(\.id))
         case .ollama:
             let response = try JSONDecoder().decode(OllamaTags.self, from: data)
-            return uniqueSorted(response.models.compactMap { $0.name ?? $0.model })
+            return AIKitModelListNormalizer.uniqueSorted(response.models.compactMap { $0.name ?? $0.model })
         case .staticList(let models):
-            return uniqueSorted(models)
+            return AIKitModelListNormalizer.uniqueSorted(models)
         }
-    }
-
-    private func uniqueSorted(_ ids: [String]) -> [String] {
-        var seen: Set<String> = []
-        var unique: [String] = []
-        for id in ids {
-            let trimmed = id.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty, seen.insert(trimmed).inserted else { continue }
-            unique.append(trimmed)
-        }
-        return unique.sorted { $0.localizedStandardCompare($1) == .orderedAscending }
     }
 }
 

@@ -33,7 +33,7 @@ public struct AIKitConfiguration: Codable, Sendable, Hashable {
                 endpointURL: String? = nil
             ) {
                 self.defaultModel = defaultModel?.emptyAsNil
-                self.availableModels = Self.normalizedModels(availableModels)
+                self.availableModels = AIKitModelListNormalizer.uniquePreservingOrder(availableModels)
                 self.endpointURL = endpointURL?.emptyAsNil
             }
 
@@ -49,7 +49,7 @@ public struct AIKitConfiguration: Codable, Sendable, Hashable {
                     String.self,
                     forKey: .defaultModel
                 )?.emptyAsNil
-                self.availableModels = Self.normalizedModels(try container.decodeIfPresent(
+                self.availableModels = AIKitModelListNormalizer.uniquePreservingOrder(try container.decodeIfPresent(
                     [String].self,
                     forKey: .availableModels
                 ) ?? [])
@@ -68,23 +68,12 @@ public struct AIKitConfiguration: Codable, Sendable, Hashable {
             }
 
             public mutating func replaceAvailableModels(_ models: [String]) {
-                let normalized = Self.normalizedModels(models)
+                let normalized = AIKitModelListNormalizer.uniquePreservingOrder(models)
                 availableModels = normalized
                 guard let defaultModel, normalized.contains(defaultModel) else {
                     self.defaultModel = nil
                     return
                 }
-            }
-
-            private static func normalizedModels(_ models: [String]) -> [String] {
-                var seen: Set<String> = []
-                var normalized: [String] = []
-                for model in models {
-                    let trimmed = model.trimmingCharacters(in: .whitespacesAndNewlines)
-                    guard !trimmed.isEmpty, seen.insert(trimmed).inserted else { continue }
-                    normalized.append(trimmed)
-                }
-                return normalized
             }
         }
 
