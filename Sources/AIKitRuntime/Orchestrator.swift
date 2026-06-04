@@ -575,7 +575,6 @@ public actor Orchestrator {
         plannerToolNames: Set<String>,
         sources: [String],
         useStructuredPlannerOutput: Bool = false,
-        useStructuredBinderOutput: Bool = false,
         autoBind: Bool = true,
         planCache: WorkflowPlanCache? = nil
     ) -> AsyncThrowingStream<OrchestratorEvent, any Error> {
@@ -592,7 +591,6 @@ public actor Orchestrator {
                     plannerToolNames: plannerToolNames,
                     sources: sources,
                     useStructuredPlannerOutput: useStructuredPlannerOutput,
-                    useStructuredBinderOutput: useStructuredBinderOutput,
                     autoBind: autoBind,
                     planCache: planCache,
                     turnID: turnID,
@@ -611,7 +609,6 @@ public actor Orchestrator {
         plannerToolNames: Set<String>,
         sources: [String],
         useStructuredPlannerOutput: Bool,
-        useStructuredBinderOutput: Bool,
         autoBind: Bool,
         planCache: WorkflowPlanCache?,
         turnID: Int,
@@ -651,7 +648,6 @@ public actor Orchestrator {
                 sources: sources,
                 temperature: options.temperature,
                 useStructuredPlannerOutput: useStructuredPlannerOutput,
-                useStructuredBinderOutput: useStructuredBinderOutput,
                 autoBind: autoBind,
                 toolContext: ToolContext(
                     viewID: viewID.rawValue,

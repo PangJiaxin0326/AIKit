@@ -405,8 +405,7 @@ private struct FixedHarvester: ContextHarvesting {
             options: .init(
                 model: "test",
                 sources: ["current_destination"],
-                useStructuredPlannerOutput: true,
-                useStructuredBinderOutput: false
+                useStructuredPlannerOutput: true
             )
         )
 
