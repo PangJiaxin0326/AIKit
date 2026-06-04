@@ -500,8 +500,11 @@ private struct AIKitSearchTabSelectionInterceptor: UIViewControllerRepresentable
         weak var highlightTarget: UIView? {
             didSet {
                 guard highlightTarget !== oldValue else { return }
-                reset(target: oldValue)
-                originalTintColor = highlightTarget?.tintColor
+                resetVisualState(for: oldValue)
+                tintStates.removeAll()
+                if let highlightTarget {
+                    captureTintStates(in: highlightTarget)
+                }
                 applyVisualState(animated: false)
             }
         }
@@ -513,7 +516,7 @@ private struct AIKitSearchTabSelectionInterceptor: UIViewControllerRepresentable
         }
 
         private var isPressed = false
-        private var originalTintColor: UIColor?
+        private var tintStates: [TintState] = []
 
         override init(frame: CGRect) {
             super.init(frame: frame)
@@ -530,7 +533,7 @@ private struct AIKitSearchTabSelectionInterceptor: UIViewControllerRepresentable
         }
 
         override func removeFromSuperview() {
-            reset(target: highlightTarget)
+            resetVisualState(for: highlightTarget)
             super.removeFromSuperview()
         }
 
@@ -557,15 +560,13 @@ private struct AIKitSearchTabSelectionInterceptor: UIViewControllerRepresentable
             guard let highlightTarget else { return }
 
             let updates = {
-                if let control = highlightTarget as? UIControl {
-                    control.isHighlighted = self.isPressed
-                }
+                self.setHighlighted(self.isPressed, in: highlightTarget)
                 highlightTarget.transform = self.isPressed
                     ? CGAffineTransform(scaleX: 0.9, y: 0.9)
                     : .identity
-                highlightTarget.tintColor = self.isPressed || self.isActive
-                    ? .systemYellow
-                    : self.originalTintColor
+                self.setTintColor(
+                    self.isPressed || self.isActive ? .systemYellow : nil
+                )
             }
 
             guard animated else {
@@ -581,13 +582,45 @@ private struct AIKitSearchTabSelectionInterceptor: UIViewControllerRepresentable
             )
         }
 
-        private func reset(target: UIView?) {
+        private func resetVisualState(for target: UIView?) {
             guard let target else { return }
-            if let control = target as? UIControl {
-                control.isHighlighted = false
-            }
+            setHighlighted(false, in: target)
             target.transform = .identity
-            target.tintColor = originalTintColor
+            restoreTintColors()
+        }
+
+        private func setHighlighted(_ highlighted: Bool, in view: UIView) {
+            if let control = view as? UIControl {
+                control.isHighlighted = highlighted
+            }
+            view.subviews.forEach { setHighlighted(highlighted, in: $0) }
+        }
+
+        private func captureTintStates(in view: UIView) {
+            tintStates.append(TintState(view: view, tintColor: view.tintColor))
+            view.subviews.forEach { captureTintStates(in: $0) }
+        }
+
+        private func setTintColor(_ tintColor: UIColor?) {
+            guard let tintColor else {
+                restoreTintColors()
+                return
+            }
+
+            tintStates.forEach { state in
+                state.view?.tintColor = tintColor
+            }
+        }
+
+        private func restoreTintColors() {
+            tintStates.forEach { state in
+                state.view?.tintColor = state.tintColor
+            }
+        }
+
+        private struct TintState {
+            weak var view: UIView?
+            let tintColor: UIColor?
         }
     }
 }
