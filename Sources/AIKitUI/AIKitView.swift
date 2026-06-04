@@ -265,6 +265,7 @@ public struct AIKitChatbotTabBar<Item: AIKitChatbotTab, TabContent: View, TabFab
         }
         .background {
             AIKitSearchTabSelectionInterceptor(
+                isActive: isFABExpanded,
                 onTapSearchTab: { toggleFABPanel() }
             )
             .frame(width: 0, height: 0)
@@ -356,20 +357,29 @@ public struct AIKitChatbotTabBar<Item: AIKitChatbotTab, TabContent: View, TabFab
 }
 
 private struct AIKitSearchTabSelectionInterceptor: UIViewControllerRepresentable {
+    let isActive: Bool
     let onTapSearchTab: @MainActor () -> Void
 
     func makeUIViewController(context: Context) -> Controller {
         let controller = Controller()
+        controller.isSearchPanelActive = isActive
         controller.onTapSearchTab = onTapSearchTab
         return controller
     }
 
     func updateUIViewController(_ controller: Controller, context: Context) {
+        controller.isSearchPanelActive = isActive
         controller.onTapSearchTab = onTapSearchTab
         controller.scheduleOverlayInstall()
     }
 
     final class Controller: UIViewController {
+        var isSearchPanelActive = false {
+            didSet {
+                overlay.isActive = isSearchPanelActive
+            }
+        }
+
         var onTapSearchTab: (@MainActor () -> Void)? {
             didSet {
                 overlay.onTap = onTapSearchTab
@@ -437,6 +447,8 @@ private struct AIKitSearchTabSelectionInterceptor: UIViewControllerRepresentable
             overlay.isHidden = auxiliaryView.isHidden
                 || auxiliaryView.alpha <= 0.01
                 || auxiliaryView.bounds.isEmpty
+            overlay.highlightTarget = findSearchTabButton(in: auxiliaryView) ?? auxiliaryView
+            overlay.isActive = isSearchPanelActive
             overlay.layer.zPosition = 1_000
             tabBar.bringSubviewToFront(overlay)
         }
@@ -465,16 +477,51 @@ private struct AIKitSearchTabSelectionInterceptor: UIViewControllerRepresentable
                 }
                 .max { lhs, rhs in lhs.frame.maxX < rhs.frame.maxX }
         }
+
+        @MainActor
+        private func findSearchTabButton(in root: UIView) -> UIControl? {
+            if let control = root as? UIControl,
+               NSStringFromClass(type(of: control)).contains("UITabButton") {
+                return control
+            }
+
+            for subview in root.subviews {
+                if let control = findSearchTabButton(in: subview) {
+                    return control
+                }
+            }
+
+            return root.subviews.compactMap { $0 as? UIControl }.first
+        }
     }
 
     final class SearchTabOverlayControl: UIControl {
         var onTap: (@MainActor () -> Void)?
+        weak var highlightTarget: UIView? {
+            didSet {
+                guard highlightTarget !== oldValue else { return }
+                reset(target: oldValue)
+                originalTintColor = highlightTarget?.tintColor
+                applyVisualState(animated: false)
+            }
+        }
+        var isActive = false {
+            didSet {
+                guard isActive != oldValue else { return }
+                applyVisualState(animated: true)
+            }
+        }
+
+        private var isPressed = false
+        private var originalTintColor: UIColor?
 
         override init(frame: CGRect) {
             super.init(frame: frame)
             isAccessibilityElement = false
             backgroundColor = .clear
-            addTarget(self, action: #selector(handleTap), for: .touchUpInside)
+            addTarget(self, action: #selector(handleTouchDown), for: [.touchDown, .touchDragEnter])
+            addTarget(self, action: #selector(handleTouchCancel), for: [.touchCancel, .touchDragExit, .touchUpOutside])
+            addTarget(self, action: #selector(handleTouchUpInside), for: .touchUpInside)
         }
 
         @available(*, unavailable)
@@ -482,8 +529,65 @@ private struct AIKitSearchTabSelectionInterceptor: UIViewControllerRepresentable
             fatalError("init(coder:) has not been implemented")
         }
 
-        @objc private func handleTap() {
+        override func removeFromSuperview() {
+            reset(target: highlightTarget)
+            super.removeFromSuperview()
+        }
+
+        @objc private func handleTouchDown() {
+            setPressed(true)
+        }
+
+        @objc private func handleTouchCancel() {
+            setPressed(false)
+        }
+
+        @objc private func handleTouchUpInside() {
             onTap?()
+            setPressed(false)
+        }
+
+        private func setPressed(_ pressed: Bool) {
+            guard isPressed != pressed else { return }
+            isPressed = pressed
+            applyVisualState(animated: true)
+        }
+
+        private func applyVisualState(animated: Bool) {
+            guard let highlightTarget else { return }
+
+            let updates = {
+                if let control = highlightTarget as? UIControl {
+                    control.isHighlighted = self.isPressed
+                }
+                highlightTarget.transform = self.isPressed
+                    ? CGAffineTransform(scaleX: 0.9, y: 0.9)
+                    : .identity
+                highlightTarget.tintColor = self.isPressed || self.isActive
+                    ? .systemYellow
+                    : self.originalTintColor
+            }
+
+            guard animated else {
+                updates()
+                return
+            }
+
+            UIView.animate(
+                withDuration: isPressed ? 0.12 : 0.18,
+                delay: 0,
+                options: [.beginFromCurrentState, .allowUserInteraction, .curveEaseOut],
+                animations: updates
+            )
+        }
+
+        private func reset(target: UIView?) {
+            guard let target else { return }
+            if let control = target as? UIControl {
+                control.isHighlighted = false
+            }
+            target.transform = .identity
+            target.tintColor = originalTintColor
         }
     }
 }
