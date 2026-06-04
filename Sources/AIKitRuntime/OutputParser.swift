@@ -1,4 +1,5 @@
 import Foundation
+import AIToolKit
 import AIKitCore
 import AIKitCapability
 

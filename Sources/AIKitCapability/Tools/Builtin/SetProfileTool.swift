@@ -1,4 +1,5 @@
 import Foundation
+import AIToolKit
 import AIKitCore
 
 /// Built-in tool: mutates a key on the user's profile. Effect supplied by host.

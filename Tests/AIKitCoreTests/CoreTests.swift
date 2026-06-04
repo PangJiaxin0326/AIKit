@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import AIToolKit
 @testable import AIKitCore
 import AIKitTestSupport
 
@@ -495,6 +496,7 @@ import AIKitTestSupport
 
         var starts: [(id: String, name: String)] = []
         var inputIDs: [String] = []
+        var stopIDs: [String] = []
         var input = ""
         var stop: StopReason?
         for try await chunk in provider.stream(LLMRequest(model: "gpt-4o")) {
@@ -504,6 +506,8 @@ import AIKitTestSupport
             case .toolUseInputDelta(let id, let json):
                 inputIDs.append(id)
                 input += json
+            case .toolUseStop(let id):
+                stopIDs.append(id)
             case .stop(let reason):
                 stop = reason
             default:
@@ -515,6 +519,7 @@ import AIKitTestSupport
         #expect(starts.map(\.name) == ["navigate"])
         #expect(inputIDs == ["call_1", "call_1", "call_1"])
         #expect(input == "{\"destination\":\"settings\"}")
+        #expect(stopIDs == ["call_1"])
         #expect(stop == .toolUse)
     }
 

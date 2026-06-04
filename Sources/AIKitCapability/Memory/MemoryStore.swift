@@ -23,18 +23,32 @@ public actor InMemoryMemoryStore: MemoryStore {
     }
 
     public func recent(limit: Int, view: ViewContext.ID?) async throws -> [UsageEvent] {
-        let filtered = view.map { id in events.filter { $0.viewID == id } } ?? events
-        return Array(filtered.sorted { $0.timestamp > $1.timestamp }.prefix(max(0, limit)))
+        let limit = max(0, limit)
+        guard limit > 0 else { return [] }
+        var result: [UsageEvent] = []
+        result.reserveCapacity(limit)
+        for event in events.reversed() {
+            if let view, event.viewID != view { continue }
+            result.append(event)
+            if result.count == limit { break }
+        }
+        return result
     }
 
     public func search(query: String, limit: Int) async throws -> [UsageEvent] {
-        guard !query.isEmpty else { return [] }
+        let limit = max(0, limit)
+        guard !query.isEmpty, limit > 0 else { return [] }
         let lowered = query.lowercased()
-        let matches = events.filter {
-            $0.payloadText.lowercased().contains(lowered)
-                || $0.kind.rawValue.lowercased().contains(lowered)
+        var result: [UsageEvent] = []
+        result.reserveCapacity(limit)
+        for event in events.reversed() {
+            guard event.payloadText.lowercased().contains(lowered)
+                    || event.kind.rawValue.lowercased().contains(lowered)
+            else { continue }
+            result.append(event)
+            if result.count == limit { break }
         }
-        return Array(matches.sorted { $0.timestamp > $1.timestamp }.prefix(max(0, limit)))
+        return result
     }
 
     public func delete(id: UUID) async throws {

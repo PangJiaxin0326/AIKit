@@ -1,4 +1,5 @@
 import Foundation
+import AIToolKit
 import AIKitCore
 
 /// Built-in tool the model calls to bail out of a request it cannot

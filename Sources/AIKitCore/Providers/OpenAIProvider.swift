@@ -1,4 +1,5 @@
 import Foundation
+import AIToolKit
 
 /// `LLMProvider` backed by the OpenAI Chat Completions API. Tool use is mapped
 /// to function calling.
@@ -9,8 +10,8 @@ import Foundation
 /// configurable for gateways and providers that expose the Chat Completions
 /// protocol somewhere other than `/v1/chat/completions`.
 public struct OpenAIProvider: LLMProvider {
-    public static let defaultBaseURL = URL(string: "https://api.openai.com")!
-    public static let defaultChatCompletionsPath = "v1/chat/completions"
+    public static let defaultBaseURL = AIKitProviderDefaults.openAIBaseURL
+    public static let defaultChatCompletionsPath = AIKitProviderDefaults.openAIChatCompletionsPath
 
     public let configuration: LLMProviderConfiguration
     /// Relative or absolute endpoint for Chat Completions-compatible requests.
@@ -610,8 +611,15 @@ private struct StreamEvent: Decodable {
                 }
             }
             switch choice.finish_reason {
-            case "stop": result.append(.stop(.endTurn))
-            case "tool_calls": result.append(.stop(.toolUse))
+            case "stop":
+                result.append(.stop(.endTurn))
+            case "tool_calls":
+                for index in activeToolIDs.keys.sorted() {
+                    if let id = activeToolIDs.removeValue(forKey: index) {
+                        result.append(.toolUseStop(id: id))
+                    }
+                }
+                result.append(.stop(.toolUse))
             case "length": result.append(.stop(.maxTokens))
             case let other?: result.append(.stop(.other(other)))
             case nil: break

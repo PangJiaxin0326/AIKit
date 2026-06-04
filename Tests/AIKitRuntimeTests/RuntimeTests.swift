@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import AIToolKit
 @testable import AIKitRuntime
 import AIKitCore
 import AIKitCapability

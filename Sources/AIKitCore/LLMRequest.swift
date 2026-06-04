@@ -1,4 +1,5 @@
 import Foundation
+import AIToolKit
 
 /// A stateless request to an LLM provider. Carries no memory or retry policy.
 public struct LLMRequest: Sendable, Hashable {

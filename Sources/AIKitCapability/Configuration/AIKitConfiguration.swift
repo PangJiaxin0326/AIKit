@@ -1,4 +1,5 @@
 import Foundation
+import AIToolKit
 import AIKitCore
 
 /// User-facing configuration for AIKit's four major pieces.
@@ -68,12 +69,12 @@ public struct AIKitConfiguration: Codable, Sendable, Hashable {
             }
 
             public mutating func replaceAvailableModels(_ models: [String]) {
-                let normalized = AIKitModelListNormalizer.uniquePreservingOrder(models)
-                availableModels = normalized
-                guard let defaultModel, normalized.contains(defaultModel) else {
-                    self.defaultModel = nil
-                    return
-                }
+                let replacement = AIKitModelListNormalizer.replacingAvailableModels(
+                    models,
+                    currentDefaultModel: defaultModel
+                )
+                availableModels = replacement.models
+                defaultModel = replacement.defaultModel
             }
         }
 

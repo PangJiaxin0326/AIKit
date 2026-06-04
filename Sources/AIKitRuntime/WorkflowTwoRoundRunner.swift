@@ -1,4 +1,5 @@
 import Foundation
+import AIToolKit
 import AIKitCore
 
 /// Drives the two-round-trip compiler against an `LLMClient`: Plan → harvest →

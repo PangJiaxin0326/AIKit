@@ -1,4 +1,35 @@
 import Foundation
+import AIToolKit
+
+package enum AIKitProviderDefaults {
+    package static let openAIBaseURL = URL(string: "https://api.openai.com")!
+    package static let openAIModelListURL = URL(string: "https://api.openai.com/v1/models")!
+    package static let openAIChatCompletionsPath = "v1/chat/completions"
+    package static let openAIChatCompletionsURL = URL(
+        string: "https://api.openai.com/v1/chat/completions"
+    )!
+
+    package static let anthropicBaseURL = URL(string: "https://api.anthropic.com")!
+    package static let anthropicModelListURL = URL(string: "https://api.anthropic.com/v1/models")!
+    package static let anthropicMessagesURL = URL(string: "https://api.anthropic.com/v1/messages")!
+    package static let anthropicAPIVersion = "2023-06-01"
+
+    package static let ollamaBaseURL = URL(string: "http://localhost:11434")!
+    package static let ollamaModelListURL = URL(string: "http://localhost:11434/api/tags")!
+    package static let ollamaChatURL = URL(string: "http://localhost:11434/api/chat")!
+
+    package static let appleIntelligenceBaseURL = URL(string: "aikit-apple-intelligence://local")!
+    package static let appleIntelligenceModelListURL = URL(
+        string: "aikit-apple-intelligence://local/models"
+    )!
+
+    package static let arkModelListURL = URL(
+        string: "https://ark.cn-beijing.volces.com/api/v3/models"
+    )!
+    package static let arkChatCompletionsURL = URL(
+        string: "https://ark.cn-beijing.volces.com/api/v3/chat/completions"
+    )!
+}
 
 package enum AIKitModelListNormalizer {
     package static func uniquePreservingOrder(_ models: [String]) -> [String] {
@@ -16,6 +47,17 @@ package enum AIKitModelListNormalizer {
         uniquePreservingOrder(models).sorted {
             $0.localizedStandardCompare($1) == .orderedAscending
         }
+    }
+
+    package static func replacingAvailableModels(
+        _ models: [String],
+        currentDefaultModel: String?
+    ) -> (models: [String], defaultModel: String?) {
+        let normalized = uniquePreservingOrder(models)
+        guard let currentDefaultModel, normalized.contains(currentDefaultModel) else {
+            return (normalized, nil)
+        }
+        return (normalized, currentDefaultModel)
     }
 }
 

@@ -1,4 +1,5 @@
 import Foundation
+import AIToolKit
 import AIKitCore
 
 /// A scripted `LLMProvider` for tests. Returns queued responses in order; the

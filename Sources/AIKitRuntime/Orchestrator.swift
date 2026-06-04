@@ -1,5 +1,6 @@
 import Foundation
 import OSLog
+import AIToolKit
 import AIKitCore
 import AIKitCapability
 import AIKitSafety
@@ -984,6 +985,101 @@ public actor Orchestrator {
 
     // MARK: - Tool execution
 
+    private struct PreparedToolCall: Sendable {
+        let call: ToolCall
+        let inputData: Data
+    }
+
+    private func prepareToolCall(
+        _ call: ToolCall,
+        viewID: ViewContext.ID,
+        turnID: Int,
+        deadline: ContinuousClock.Instant?,
+        updatePhase: Bool = true,
+        emit: @Sendable (OrchestratorEvent) -> Void
+    ) async throws -> PreparedToolCall {
+        // `resolve` runs payload-rewriting rails (e.g. PIIRedactor in redact
+        // mode) before the block checks, so the tool sees the sanitized input.
+        let (resolvedPayload, warnings) = try await withTurnDeadline(deadline) {
+            try await self.guardrails.resolve(.preToolUse, .preToolUse(call))
+        }
+        for warning in warnings {
+            emit(.verification(stage: .preToolUse, outcome: .warn(reason: warning)))
+        }
+        let effectiveCall: ToolCall
+        if case .preToolUse(let rewritten) = resolvedPayload {
+            effectiveCall = rewritten
+        } else {
+            effectiveCall = call
+        }
+        emit(.verification(stage: .preToolUse, outcome: .pass))
+
+        let inputData = (try? effectiveCall.input.data()) ?? Data("{}".utf8)
+        if updatePhase {
+            setPhase(.callingTool(effectiveCall.name), turn: turnID)
+        }
+        emit(.toolCall(name: effectiveCall.name, input: inputData))
+        await recordActivity(
+            viewID: viewID,
+            kind: .toolInvoked,
+            text: "\(effectiveCall.name) \(String(decoding: inputData, as: UTF8.self))",
+            turn: turnID
+        )
+        return PreparedToolCall(call: effectiveCall, inputData: inputData)
+    }
+
+    private func finishToolCallFailure(
+        _ call: ToolCall,
+        output: Data,
+        viewID: ViewContext.ID,
+        turnID: Int,
+        deadline: ContinuousClock.Instant?,
+        emit: @Sendable (OrchestratorEvent) -> Void
+    ) async throws {
+        _ = try await withTurnDeadline(deadline) {
+            try await self.guardrails.verify(
+                .postToolUse,
+                .postToolUse(name: call.name, output: output, isError: true)
+            )
+        }
+        emit(.verification(stage: .postToolUse, outcome: .pass))
+        emit(.toolResult(name: call.name, output: output))
+        await recordActivity(
+            viewID: viewID,
+            kind: .toolResult,
+            text: "\(call.name) -> \(String(decoding: output, as: UTF8.self))",
+            turn: turnID
+        )
+    }
+
+    private func finishToolCallSuccess(
+        _ call: ToolCall,
+        diagnosticOutput: Data,
+        viewID: ViewContext.ID,
+        turnID: Int,
+        deadline: ContinuousClock.Instant?,
+        emit: @Sendable (OrchestratorEvent) -> Void
+    ) async throws {
+        _ = try await withTurnDeadline(deadline) {
+            try await self.guardrails.verify(
+                .postToolUse,
+                .postToolUse(name: call.name, output: diagnosticOutput, isError: false)
+            )
+        }
+        emit(.verification(stage: .postToolUse, outcome: .pass))
+        emit(.toolResult(name: call.name, output: diagnosticOutput))
+        await recordActivity(
+            viewID: viewID,
+            kind: .toolResult,
+            text: "\(call.name) -> \(String(decoding: diagnosticOutput, as: UTF8.self))",
+            turn: turnID
+        )
+    }
+
+    private static func data(forToolOutput value: JSONValue) -> Data {
+        (try? value.data()) ?? Data(WorkflowFinalRenderer.displayString(value).utf8)
+    }
+
     private func executeBatch(
         _ calls: [ToolCall],
         viewID: ViewContext.ID,
@@ -1030,7 +1126,6 @@ public actor Orchestrator {
             spec,
             policy: WorkflowValidationPolicy(descriptors: manifest)
         )
-        let guardrails = self.guardrails
         let tools = self.tools
         let logger = self.logger
         let descriptorsByName = Dictionary(uniqueKeysWithValues: manifest.map { ($0.name, $0) })
@@ -1048,68 +1143,46 @@ public actor Orchestrator {
                 name: tool,
                 input: resolvedInput
             )
-            let (resolvedPayload, warnings) = try await guardrails.resolve(
-                .preToolUse, .preToolUse(call)
-            )
-            for warning in warnings {
-                emit(.verification(stage: .preToolUse, outcome: .warn(reason: warning)))
-            }
-            let effectiveCall: ToolCall
-            if case .preToolUse(let rewritten) = resolvedPayload {
-                effectiveCall = rewritten
-            } else {
-                effectiveCall = call
-            }
-            emit(.verification(stage: .preToolUse, outcome: .pass))
-
-            let inputData = (try? effectiveCall.input.data()) ?? Data("{}".utf8)
-            emit(.toolCall(name: effectiveCall.name, input: inputData))
-            await self.recordActivity(
+            let prepared = try await self.prepareToolCall(
+                call,
                 viewID: viewID,
-                kind: .toolInvoked,
-                text: "\(effectiveCall.name) \(String(decoding: inputData, as: UTF8.self))",
-                turn: turnID
+                turnID: turnID,
+                deadline: deadline,
+                emit: emit
             )
 
             let outputValue: JSONValue
             do {
                 outputValue = try await tools.call(
-                    effectiveCall,
+                    prepared.call,
                     context: executionContext.toolContext
                 )
             } catch {
                 let output = Self.toolErrorOutput(error)
-                _ = try await guardrails.verify(
-                    .postToolUse,
-                    .postToolUse(
-                        name: effectiveCall.name,
-                        output: output,
-                        isError: true
-                    )
+                try await self.finishToolCallFailure(
+                    prepared.call,
+                    output: output,
+                    viewID: viewID,
+                    turnID: turnID,
+                    deadline: deadline,
+                    emit: emit
                 )
-                emit(.verification(stage: .postToolUse, outcome: .pass))
-                emit(.toolResult(name: effectiveCall.name, output: output))
                 throw error
             }
 
             let diagnosticValue = WorkflowOutputRedactor.diagnosticValue(
                 outputValue,
                 node: node,
-                descriptor: descriptorsByName[effectiveCall.name]
+                descriptor: descriptorsByName[prepared.call.name]
             )
-            let diagnosticOutput = (try? diagnosticValue.data())
-                ?? Data(WorkflowFinalRenderer.displayString(diagnosticValue).utf8)
-            _ = try await guardrails.verify(
-                .postToolUse,
-                .postToolUse(name: effectiveCall.name, output: diagnosticOutput, isError: false)
-            )
-            emit(.verification(stage: .postToolUse, outcome: .pass))
-            emit(.toolResult(name: effectiveCall.name, output: diagnosticOutput))
-            await self.recordActivity(
+            let diagnosticOutput = Self.data(forToolOutput: diagnosticValue)
+            try await self.finishToolCallSuccess(
+                prepared.call,
+                diagnosticOutput: diagnosticOutput,
                 viewID: viewID,
-                kind: .toolResult,
-                text: "\(effectiveCall.name) -> \(String(decoding: diagnosticOutput, as: UTF8.self))",
-                turn: turnID
+                turnID: turnID,
+                deadline: deadline,
+                emit: emit
             )
             return outputValue
         }
@@ -1159,100 +1232,61 @@ public actor Orchestrator {
         transcript: inout [TranscriptEntry],
         emit: @Sendable (OrchestratorEvent) -> Void
     ) async throws -> Data {
-        // `resolve` runs payload-rewriting rails (e.g. PIIRedactor in redact
-        // mode) before the block checks, so the tool sees the sanitized input.
-        // Raced against the turn budget so a slow rail can't overrun it.
-        let (resolvedPayload, warnings) = try await withTurnDeadline(deadline) {
-            try await self.guardrails.resolve(.preToolUse, .preToolUse(call))
-        }
-        for warning in warnings {
-            emit(.verification(stage: .preToolUse, outcome: .warn(reason: warning)))
-        }
-        let effectiveCall: ToolCall
-        if case .preToolUse(let rewritten) = resolvedPayload {
-            effectiveCall = rewritten
-        } else {
-            effectiveCall = call
-        }
-        emit(.verification(stage: .preToolUse, outcome: .pass))
-
-        let inputData = (try? effectiveCall.input.data()) ?? Data("{}".utf8)
-        setPhase(.callingTool(effectiveCall.name), turn: turnID)
-        emit(.toolCall(name: effectiveCall.name, input: inputData))
-        await recordActivity(
-            viewID: viewID,
-            kind: .toolInvoked,
-            text: "\(effectiveCall.name) \(String(decoding: inputData, as: UTF8.self))",
-            turn: turnID
-        )
-
         let context = ToolContext(
             viewID: viewID.rawValue,
             metadata: ["leafViewID": viewID.rawValue],
             logger: logger
         )
-        let output: Data
+        let prepared = try await prepareToolCall(
+            call,
+            viewID: viewID,
+            turnID: turnID,
+            deadline: deadline,
+            emit: emit
+        )
+        let outputValue: JSONValue
         do {
             // A hung or slow tool must not be able to overrun the turn budget,
             // so the invocation is raced against the deadline too.
-            output = try await withTurnDeadline(deadline) {
-                try await self.tools.call(
-                    name: effectiveCall.name, jsonInput: inputData, context: context
-                )
+            outputValue = try await withTurnDeadline(deadline) {
+                try await self.tools.call(prepared.call, context: context)
             }
         } catch {
-            let isError = true
             let output = Self.toolErrorOutput(error)
-            _ = try await withTurnDeadline(deadline) {
-                try await self.guardrails.verify(
-                    .postToolUse,
-                    .postToolUse(
-                        name: effectiveCall.name,
-                        output: output,
-                        isError: isError
-                    )
-                )
-            }
-            emit(.verification(stage: .postToolUse, outcome: .pass))
-            emit(.toolResult(name: effectiveCall.name, output: output))
-            let outputText = String(decoding: output, as: UTF8.self)
-            await recordActivity(
+            try await finishToolCallFailure(
+                prepared.call,
+                output: output,
                 viewID: viewID,
-                kind: .toolResult,
-                text: "\(effectiveCall.name) -> \(outputText)",
-                turn: turnID
+                turnID: turnID,
+                deadline: deadline,
+                emit: emit
             )
+            let outputText = String(decoding: output, as: UTF8.self)
             transcript.append(.toolResult(
-                id: effectiveCall.id ?? effectiveCall.name,
-                name: effectiveCall.name,
+                id: prepared.call.id ?? prepared.call.name,
+                name: prepared.call.name,
                 content: outputText,
-                isError: isError
+                isError: true
             ))
             // Surface to the catch-site classifier (tool-retriable, fatal, …).
             throw error
         }
 
-        let isError = false
-        _ = try await withTurnDeadline(deadline) {
-            try await self.guardrails.verify(
-                .postToolUse,
-                .postToolUse(name: effectiveCall.name, output: output, isError: isError)
-            )
-        }
-        emit(.verification(stage: .postToolUse, outcome: .pass))
-        emit(.toolResult(name: effectiveCall.name, output: output))
-        await recordActivity(
+        let output = Self.data(forToolOutput: outputValue)
+        try await finishToolCallSuccess(
+            prepared.call,
+            diagnosticOutput: output,
             viewID: viewID,
-            kind: .toolResult,
-            text: "\(effectiveCall.name) -> \(String(decoding: output, as: UTF8.self))",
-            turn: turnID
+            turnID: turnID,
+            deadline: deadline,
+            emit: emit
         )
 
         transcript.append(.toolResult(
-            id: effectiveCall.id ?? effectiveCall.name,
-            name: effectiveCall.name,
+            id: prepared.call.id ?? prepared.call.name,
+            name: prepared.call.name,
             content: String(decoding: output, as: UTF8.self),
-            isError: isError
+            isError: false
         ))
         return output
     }

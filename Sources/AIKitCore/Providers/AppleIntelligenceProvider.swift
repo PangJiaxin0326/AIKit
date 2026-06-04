@@ -1,4 +1,5 @@
 import Foundation
+import AIToolKit
 
 #if canImport(FoundationModels)
 import FoundationModels
@@ -23,7 +24,7 @@ public struct AppleIntelligenceProvider: LLMProvider {
     ) {
         self.configuration = LLMProviderConfiguration(
             apiKey: "",
-            baseURL: URL(string: "aikit-apple-intelligence://local")!,
+            baseURL: AIKitProviderDefaults.appleIntelligenceBaseURL,
             defaultModel: model,
             availableModels: availableModels,
             timeout: timeout

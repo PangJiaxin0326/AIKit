@@ -1,4 +1,5 @@
 import Foundation
+import AIToolKit
 import AIKitCore
 
 /// Built-in tool: mutates an app setting. Effect supplied by host.

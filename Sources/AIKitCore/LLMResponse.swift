@@ -1,4 +1,5 @@
 import Foundation
+import AIToolKit
 
 /// A complete, non-streamed response from an LLM provider.
 public struct LLMResponse: Sendable, Codable, Hashable {

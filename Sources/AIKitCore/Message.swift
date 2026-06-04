@@ -1,4 +1,5 @@
 import Foundation
+import AIToolKit
 
 /// A role in an LLM conversation.
 public enum Role: String, Sendable, Codable, Hashable {

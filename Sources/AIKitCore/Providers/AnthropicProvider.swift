@@ -1,9 +1,10 @@
 import Foundation
+import AIToolKit
 
 /// `LLMProvider` backed by the Anthropic Messages API.
 public struct AnthropicProvider: LLMProvider {
-    public static let defaultBaseURL = URL(string: "https://api.anthropic.com")!
-    public static let apiVersion = "2023-06-01"
+    public static let defaultBaseURL = AIKitProviderDefaults.anthropicBaseURL
+    public static let apiVersion = AIKitProviderDefaults.anthropicAPIVersion
 
     public let configuration: LLMProviderConfiguration
 

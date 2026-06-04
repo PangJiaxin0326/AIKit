@@ -1,4 +1,5 @@
 import Foundation
+import AIToolKit
 import AIKitCapability
 
 /// Blocks any tool call whose name is not in the resolved context's allowed

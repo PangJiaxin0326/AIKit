@@ -114,8 +114,8 @@ public struct AIKitProviderDefinition: Sendable, Hashable, Identifiable {
         kind: .openAI,
         displayName: "OpenAI",
         apiKeyStrategy: .bearerToken,
-        modelListURL: URL(string: "https://api.openai.com/v1/models")!,
-        streamingEndpoint: URL(string: "https://api.openai.com/v1/chat/completions")!,
+        modelListURL: AIKitProviderDefaults.openAIModelListURL,
+        streamingEndpoint: AIKitProviderDefaults.openAIChatCompletionsURL,
         modelListFormat: .openAICompatible,
         streamingProtocol: .openAIChatCompletions
     )
@@ -124,8 +124,8 @@ public struct AIKitProviderDefinition: Sendable, Hashable, Identifiable {
         kind: .anthropic,
         displayName: "Anthropic",
         apiKeyStrategy: .anthropicAPIKey,
-        modelListURL: URL(string: "https://api.anthropic.com/v1/models")!,
-        streamingEndpoint: URL(string: "https://api.anthropic.com/v1/messages")!,
+        modelListURL: AIKitProviderDefaults.anthropicModelListURL,
+        streamingEndpoint: AIKitProviderDefaults.anthropicMessagesURL,
         modelListFormat: .anthropic,
         streamingProtocol: .anthropicMessages
     )
@@ -134,8 +134,8 @@ public struct AIKitProviderDefinition: Sendable, Hashable, Identifiable {
         kind: .ollama,
         displayName: "Ollama",
         apiKeyStrategy: .none,
-        modelListURL: URL(string: "http://localhost:11434/api/tags")!,
-        streamingEndpoint: URL(string: "http://localhost:11434/api/chat")!,
+        modelListURL: AIKitProviderDefaults.ollamaModelListURL,
+        streamingEndpoint: AIKitProviderDefaults.ollamaChatURL,
         modelListFormat: .ollama,
         streamingProtocol: .ollamaChat,
         allowsStreamingEndpointOverride: true
@@ -145,8 +145,8 @@ public struct AIKitProviderDefinition: Sendable, Hashable, Identifiable {
         kind: .appleIntelligence,
         displayName: "Apple Intelligence",
         apiKeyStrategy: .none,
-        modelListURL: URL(string: "aikit-apple-intelligence://local/models")!,
-        streamingEndpoint: URL(string: "aikit-apple-intelligence://local")!,
+        modelListURL: AIKitProviderDefaults.appleIntelligenceModelListURL,
+        streamingEndpoint: AIKitProviderDefaults.appleIntelligenceBaseURL,
         modelListFormat: .staticList(["apple-intelligence"]),
         streamingProtocol: .foundationModels,
         supportsModelCatalogRefresh: false,
@@ -157,8 +157,8 @@ public struct AIKitProviderDefinition: Sendable, Hashable, Identifiable {
         kind: .ark,
         displayName: "Volcengine Ark",
         apiKeyStrategy: .bearerToken,
-        modelListURL: URL(string: "https://ark.cn-beijing.volces.com/api/v3/models")!,
-        streamingEndpoint: URL(string: "https://ark.cn-beijing.volces.com/api/v3/chat/completions")!,
+        modelListURL: AIKitProviderDefaults.arkModelListURL,
+        streamingEndpoint: AIKitProviderDefaults.arkChatCompletionsURL,
         modelListFormat: .openAICompatible,
         streamingProtocol: .openAIChatCompletions
     )

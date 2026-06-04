@@ -1,4 +1,5 @@
 import Foundation
+import AIToolKit
 
 /// Configuration shared by built-in providers. The host app owns the API key;
 /// the package never reads environment variables.
@@ -35,12 +36,12 @@ public struct LLMProviderConfiguration: Sendable {
     }
 
     public mutating func replaceAvailableModels(_ models: [String]) {
-        let normalized = AIKitModelListNormalizer.uniquePreservingOrder(models)
-        availableModels = normalized
-        guard let defaultModel, normalized.contains(defaultModel) else {
-            self.defaultModel = nil
-            return
-        }
+        let replacement = AIKitModelListNormalizer.replacingAvailableModels(
+            models,
+            currentDefaultModel: defaultModel
+        )
+        availableModels = replacement.models
+        defaultModel = replacement.defaultModel
     }
 
 }

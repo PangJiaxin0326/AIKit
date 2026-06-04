@@ -1,6 +1,7 @@
 import Foundation
 import SwiftUI
 import Observation
+import AIToolKit
 #if canImport(UIKit)
 import UIKit
 #endif
@@ -12,6 +13,32 @@ import AIKitCapability
 import AIKitRuntime
 import AIKitSafety
 import MultiModalKit
+
+private struct AIKitStreamingTextAccumulator {
+    private var renderedText = ""
+    private var pendingChunks: [String] = []
+    private var pendingBytes = 0
+    private let flushThreshold = 512
+
+    var isEmpty: Bool { renderedText.isEmpty && pendingChunks.isEmpty }
+
+    mutating func append(_ delta: String) -> String? {
+        guard !delta.isEmpty else { return nil }
+        pendingChunks.append(delta)
+        pendingBytes += delta.utf8.count
+        guard pendingBytes >= flushThreshold else { return nil }
+        return flush()
+    }
+
+    mutating func flush() -> String {
+        if !pendingChunks.isEmpty {
+            renderedText += pendingChunks.joined()
+            pendingChunks.removeAll(keepingCapacity: true)
+        }
+        pendingBytes = 0
+        return renderedText
+    }
+}
 
 /// Drives one `Orchestrator` turn and exposes its events for SwiftUI.
 @MainActor
@@ -68,14 +95,20 @@ public final class AIKitSession {
         streamingText = ""
         reasoningText = ""
         lines.append(Line(role: "you", text: trimmed))
+        var streamingBuffer = AIKitStreamingTextAccumulator()
+        var reasoningBuffer = AIKitStreamingTextAccumulator()
 
         do {
             for try await event in await orchestrator.run(trimmed) {
                 switch event {
                 case .llmDelta(let delta):
-                    streamingText += delta
+                    if let text = streamingBuffer.append(delta) {
+                        streamingText = text
+                    }
                 case .reasoningDelta(let delta):
-                    reasoningText += delta
+                    if let text = reasoningBuffer.append(delta) {
+                        reasoningText = text
+                    }
                 case .toolCall(let name, _):
                     lines.append(Line(role: "tool", text: "Calling \(name)"))
                 case .toolResult(let name, let output):
@@ -98,15 +131,33 @@ public final class AIKitSession {
                         outputTokens: totalUsage.outputTokens + usage.outputTokens
                     )
                 case .finalAnswer(let text):
+                    if !streamingBuffer.isEmpty {
+                        streamingText = streamingBuffer.flush()
+                    }
+                    if !reasoningBuffer.isEmpty {
+                        reasoningText = reasoningBuffer.flush()
+                    }
                     lines.append(Line(role: "assistant", text: text))
                     streamingText = ""
                     reasoningText = ""
                 case .failure(let reason):
+                    if !streamingBuffer.isEmpty {
+                        streamingText = streamingBuffer.flush()
+                    }
+                    if !reasoningBuffer.isEmpty {
+                        reasoningText = reasoningBuffer.flush()
+                    }
                     lastError = reason
                     lines.append(Line(role: "failed", text: reason))
                     streamingText = ""
                     reasoningText = ""
                 case .error(let error):
+                    if !streamingBuffer.isEmpty {
+                        streamingText = streamingBuffer.flush()
+                    }
+                    if !reasoningBuffer.isEmpty {
+                        reasoningText = reasoningBuffer.flush()
+                    }
                     let message = Self.describe(error)
                     lastError = message
                     lines.append(Line(role: "error", text: message))
@@ -115,11 +166,80 @@ public final class AIKitSession {
                 }
             }
         } catch {
+            if !streamingBuffer.isEmpty {
+                streamingText = streamingBuffer.flush()
+            }
+            if !reasoningBuffer.isEmpty {
+                reasoningText = reasoningBuffer.flush()
+            }
             let message = Self.describe(error)
             lastError = message
             lines.append(Line(role: "error", text: message))
         }
         isRunning = false
+    }
+}
+
+@MainActor
+@Observable
+private final class AssistantInputCoordinator {
+    var session: AIKitSession
+    var voiceInput = AssistantVoiceInputController()
+    var text = ""
+
+    @ObservationIgnored private let orchestrator: Orchestrator
+    @ObservationIgnored private var lastInstruction = ""
+
+    init(orchestrator: Orchestrator) {
+        self.orchestrator = orchestrator
+        self.session = AIKitSession(orchestrator: orchestrator)
+    }
+
+    func sendCurrentText(activity: OrchestratorActivity) {
+        sendText(text, activity: activity)
+    }
+
+    func sendText(_ rawText: String, activity: OrchestratorActivity) {
+        let trimmed = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !activity.isBusy else { return }
+        text = ""
+        let instruction = activity.hasFailed
+            ? aiKitContextualFollowUpInstruction(
+                previous: lastInstruction,
+                reason: activity.failureReason,
+                followUp: trimmed
+            )
+            : trimmed
+        lastInstruction = trimmed
+        Task { await session.send(instruction) }
+    }
+
+    func startVoiceRecording(activity: OrchestratorActivity) {
+        guard !activity.isBusy, !voiceInput.isVoiceTranscribing else { return }
+        text = ""
+        voiceInput.startRecording()
+    }
+
+    func finishVoiceRecording(activity: OrchestratorActivity) {
+        voiceInput.finishRecording { [weak self] text in
+            self?.sendText(text, activity: activity)
+        }
+    }
+
+    func cancelVoiceInput() {
+        voiceInput.cancel()
+    }
+
+    func clearVoiceError() {
+        voiceInput.clearError()
+    }
+
+    func cancelCurrentWork() {
+        Task { await orchestrator.cancelActiveTurns() }
+    }
+
+    func dismissFailure() {
+        Task { await orchestrator.cancelActiveTurns() }
     }
 }
 
@@ -388,6 +508,10 @@ private struct AIKitSearchTabSelectionInterceptor: UIViewControllerRepresentable
         private weak var searchAuxiliaryView: UIView?
         private var installTask: Task<Void, Never>?
 
+        private static let searchAuxiliaryClassNameFragment = "UITabBarAuxiliaryView"
+        private static let maxInstallAttempts = 20
+        private static let installRetryDelayNanos: UInt64 = 50_000_000
+
         deinit {
             installTask?.cancel()
             removeInterceptor()
@@ -418,23 +542,24 @@ private struct AIKitSearchTabSelectionInterceptor: UIViewControllerRepresentable
         func scheduleInterceptorInstall() {
             installTask?.cancel()
             installTask = Task { @MainActor [weak self] in
-                for _ in 0..<20 {
+                for _ in 0..<Self.maxInstallAttempts {
                     guard let self else { return }
-                    installInterceptorIfPossible()
-                    try? await Task.sleep(nanoseconds: 50_000_000)
+                    if installInterceptorIfPossible() {
+                        return
+                    }
+                    try? await Task.sleep(nanoseconds: Self.installRetryDelayNanos)
                 }
             }
         }
 
         @MainActor
-        private func installInterceptorIfPossible() {
-            guard
-                let window = view.window,
-                let tabBar = findTabBar(in: window),
-                let auxiliaryView = findSearchAuxiliaryView(in: tabBar)
+        @discardableResult
+        private func installInterceptorIfPossible() -> Bool {
+            guard let window = view.window,
+                  let tabBar = findTabBar(in: window)
             else {
                 removeInterceptor()
-                return
+                return false
             }
 
             if installedTabBar !== tabBar {
@@ -443,10 +568,17 @@ private struct AIKitSearchTabSelectionInterceptor: UIViewControllerRepresentable
                 installedTabBar = tabBar
             }
 
+            guard let auxiliaryView = findSearchAuxiliaryView(in: tabBar) else {
+                searchAuxiliaryView = nil
+                searchTapRecognizer.isEnabled = true
+                return false
+            }
+
             searchAuxiliaryView = auxiliaryView
             searchTapRecognizer.isEnabled = auxiliaryView.isHidden == false
                 && auxiliaryView.alpha > 0.01
                 && auxiliaryView.bounds.isEmpty == false
+            return true
         }
 
         private func removeInterceptor() {
@@ -479,10 +611,14 @@ private struct AIKitSearchTabSelectionInterceptor: UIViewControllerRepresentable
         private func findSearchAuxiliaryView(in tabBar: UITabBar) -> UIView? {
             tabBar.subviews
                 .filter { view in
-                    NSStringFromClass(type(of: view)).contains("UITabBarAuxiliaryView")
-                        && view.bounds.isEmpty == false
+                    isSearchAuxiliaryView(view) && view.bounds.isEmpty == false
                 }
                 .max { lhs, rhs in lhs.frame.maxX < rhs.frame.maxX }
+        }
+
+        private func isSearchAuxiliaryView(_ view: UIView) -> Bool {
+            NSStringFromClass(type(of: view))
+                .contains(Self.searchAuxiliaryClassNameFragment)
         }
 
         func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
@@ -1059,8 +1195,7 @@ public struct AIKitView: View {
 /// with a prompt field, voice input, and a long-press detail panel. Reached
 /// through `AIKitChatbotOverlay` with `mode: .assistant`.
 struct AssistantChatbotOverlay<DetailContent: View>: View {
-    @State private var session: AIKitSession
-    @State private var voiceInput = AssistantVoiceInputController()
+    @State private var input: AssistantInputCoordinator
     /// Full assistant panel — opened by a long press on the pet.
     @State private var isDialogPresented = false
     /// Whether the glass capsule (status field + action) is expanded next
@@ -1069,12 +1204,8 @@ struct AssistantChatbotOverlay<DetailContent: View>: View {
     @State private var selectedMenu = ChatbotMenu.context
     @State private var activityDisplay: OverlayActivityDisplay = .tasks
     @State private var draft = ""
-    @State private var capsuleDraft = ""
     @State private var capsuleSize: CGSize = .zero
     @State private var floatingSurfaceSize: CGSize = .zero
-    /// The last instruction sent from the capsule, carried as context into
-    /// a follow-up after a failure.
-    @State private var lastInstruction = ""
     @State private var snapshot: OrchestratorSnapshot?
     /// Live orchestrator activity, so the pet reflects any turn on this
     /// orchestrator — not just the overlay's own session.
@@ -1109,7 +1240,7 @@ struct AssistantChatbotOverlay<DetailContent: View>: View {
     ) {
         self.orchestrator = orchestrator
         self.detailContent = detailContent
-        _session = State(initialValue: AIKitSession(orchestrator: orchestrator))
+        _input = State(initialValue: AssistantInputCoordinator(orchestrator: orchestrator))
     }
 
     var body: some View {
@@ -1152,7 +1283,7 @@ struct AssistantChatbotOverlay<DetailContent: View>: View {
         .onChange(of: activity.isBusy) { _, busy in
             // When a turn finishes (busy → idle, not a failure), drop the
             // stale draft so a completed turn can't be re-sent.
-            if !busy && !activity.hasFailed { capsuleDraft = "" }
+            if !busy && !activity.hasFailed { input.text = "" }
             if !busy {
                 Task { await refreshSnapshot() }
             }
@@ -1355,22 +1486,11 @@ struct AssistantChatbotOverlay<DetailContent: View>: View {
     /// the failure reason are folded in so the model treats the follow-up
     /// as a clarification of the same request, not a brand-new one.
     private func sendCapsule() {
-        sendCapsuleText(capsuleDraft)
+        input.sendCurrentText(activity: activity)
     }
 
     private func sendCapsuleText(_ rawText: String) {
-        let text = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, !activity.isBusy else { return }
-        capsuleDraft = ""
-        let instruction = activity.hasFailed
-            ? aiKitContextualFollowUpInstruction(
-                previous: lastInstruction,
-                reason: activity.failureReason,
-                followUp: text
-              )
-            : text
-        lastInstruction = text
-        Task { await session.send(instruction) }
+        input.sendText(rawText, activity: activity)
     }
 
     private var overlayContext: AIKitOverlayContext {
@@ -1378,27 +1498,25 @@ struct AssistantChatbotOverlay<DetailContent: View>: View {
     }
 
     private func startVoiceRecording() {
-        guard !activity.isBusy, !voiceInput.isVoiceTranscribing else { return }
         fieldFocused = false
-        capsuleDraft = ""
-        voiceInput.startRecording()
+        input.startVoiceRecording(activity: activity)
     }
 
     private func finishVoiceRecording() {
-        voiceInput.finishRecording(onText: sendCapsuleText)
+        input.finishVoiceRecording(activity: activity)
     }
 
     private func cancelVoiceInput() {
-        voiceInput.cancel()
+        input.cancelVoiceInput()
     }
 
     private func clearVoiceError() {
-        voiceInput.clearError()
+        input.clearVoiceError()
         fieldFocused = true
     }
 
     private func cancelCurrentWork() {
-        Task { await orchestrator.cancelActiveTurns() }
+        input.cancelCurrentWork()
     }
 
     private func dismissToButton() {
@@ -1413,7 +1531,7 @@ struct AssistantChatbotOverlay<DetailContent: View>: View {
     /// collapses the capsule.
     private func dismissFailure() {
         fieldFocused = false
-        Task { await orchestrator.cancelActiveTurns() }
+        input.dismissFailure()
         withAnimation(.spring(duration: 0.24)) { isExpanded = false }
     }
 
@@ -1463,20 +1581,23 @@ struct AssistantChatbotOverlay<DetailContent: View>: View {
 
     private func capsuleContent(in size: CGSize) -> some View {
         AssistantInputBar(
-            text: $capsuleDraft,
+            text: Binding(
+                get: { input.text },
+                set: { input.text = $0 }
+            ),
             focused: $fieldFocused,
             activity: activity,
-            voiceLevel: voiceInput.voiceLevel,
-            isRecording: voiceInput.isRecording,
-            isVoiceTranscribing: voiceInput.isVoiceTranscribing,
-            voiceError: voiceInput.voiceError,
+            voiceLevel: input.voiceInput.voiceLevel,
+            isRecording: input.voiceInput.isRecording,
+            isVoiceTranscribing: input.voiceInput.isVoiceTranscribing,
+            voiceError: input.voiceInput.voiceError,
             horizontalPadding: capsuleContentPadding,
             onSubmit: sendCapsule,
             onStartVoiceRecording: startVoiceRecording,
             onFinishVoiceRecording: finishVoiceRecording,
             onCancelCurrentWork: cancelCurrentWork,
             onDismissFailure: dismissFailure,
-            onTextChanged: voiceInput.clearError,
+            onTextChanged: input.clearVoiceError,
             onClearVoiceError: clearVoiceError
         )
         .frame(width: capsuleContentWidth(in: size))
@@ -1664,22 +1785,22 @@ struct AssistantChatbotOverlay<DetailContent: View>: View {
 
     @ViewBuilder
     private var dialogTranscript: some View {
-        if !session.reasoningText.isEmpty {
-            Text(session.reasoningText)
+        if !input.session.reasoningText.isEmpty {
+            Text(input.session.reasoningText)
                 .font(.caption)
                 .italic()
                 .foregroundStyle(.tertiary)
                 .lineLimit(3)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
-        if !session.streamingText.isEmpty {
-            Text(session.streamingText)
+        if !input.session.streamingText.isEmpty {
+            Text(input.session.streamingText)
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .lineLimit(4)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
-        if let error = session.lastError {
+        if let error = input.session.lastError {
             Label(error, systemImage: "exclamationmark.triangle.fill")
                 .font(.caption)
                 .foregroundStyle(.red)
@@ -1693,7 +1814,7 @@ struct AssistantChatbotOverlay<DetailContent: View>: View {
             TextField("Prompt", text: $draft, axis: .vertical)
                 .textFieldStyle(.plain)
                 .lineLimit(1...4)
-                .disabled(session.isRunning)
+                .disabled(input.session.isRunning)
                 .onSubmit(submit)
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
@@ -1701,7 +1822,7 @@ struct AssistantChatbotOverlay<DetailContent: View>: View {
             Button(action: submit) {
                 Image(systemName: "paperplane.fill")
             }
-            .disabled(session.isRunning || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            .disabled(input.session.isRunning || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             .buttonStyle(.borderedProminent)
             .buttonBorderShape(.circle)
             .accessibilityLabel("Send")
@@ -1712,7 +1833,7 @@ struct AssistantChatbotOverlay<DetailContent: View>: View {
         let instruction = draft
         draft = ""
         Task {
-            await session.send(instruction)
+            await input.session.send(instruction)
             await refreshSnapshot()
         }
     }
@@ -2100,10 +2221,7 @@ private struct AIKitTabFabPanel<CustomContent: View>: View {
 }
 
 private struct AssistantTabBottomAccessory: View {
-    @State private var session: AIKitSession
-    @State private var voiceInput = AssistantVoiceInputController()
-    @State private var draft = ""
-    @State private var lastInstruction = ""
+    @State private var input: AssistantInputCoordinator
     @State private var activity: OrchestratorActivity = .idle
     @FocusState private var fieldFocused: Bool
 
@@ -2112,25 +2230,28 @@ private struct AssistantTabBottomAccessory: View {
     @MainActor
     init(orchestrator: Orchestrator) {
         self.orchestrator = orchestrator
-        _session = State(initialValue: AIKitSession(orchestrator: orchestrator))
+        _input = State(initialValue: AssistantInputCoordinator(orchestrator: orchestrator))
     }
 
     var body: some View {
         AssistantInputBar(
-            text: $draft,
+            text: Binding(
+                get: { input.text },
+                set: { input.text = $0 }
+            ),
             focused: $fieldFocused,
             activity: activity,
-            voiceLevel: voiceInput.voiceLevel,
-            isRecording: voiceInput.isRecording,
-            isVoiceTranscribing: voiceInput.isVoiceTranscribing,
-            voiceError: voiceInput.voiceError,
+            voiceLevel: input.voiceInput.voiceLevel,
+            isRecording: input.voiceInput.isRecording,
+            isVoiceTranscribing: input.voiceInput.isVoiceTranscribing,
+            voiceError: input.voiceInput.voiceError,
             horizontalPadding: 12,
             onSubmit: sendDraft,
             onStartVoiceRecording: startVoiceRecording,
             onFinishVoiceRecording: finishVoiceRecording,
             onCancelCurrentWork: cancelCurrentWork,
             onDismissFailure: dismissFailure,
-            onTextChanged: voiceInput.clearError,
+            onTextChanged: input.clearVoiceError,
             onClearVoiceError: clearVoiceError
         )
         // No background of our own: the system tab accessory already
@@ -2144,57 +2265,44 @@ private struct AssistantTabBottomAccessory: View {
             }
         }
         .onChange(of: activity.isBusy) { _, busy in
-            if !busy && !activity.hasFailed { draft = "" }
+            if !busy && !activity.hasFailed { input.text = "" }
         }
         .onDisappear { cancelVoiceInput() }
     }
 
     private func sendDraft() {
-        sendText(draft)
+        input.sendCurrentText(activity: activity)
     }
 
     private func sendText(_ rawText: String) {
-        let text = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, !activity.isBusy else { return }
-        draft = ""
-        let instruction = activity.hasFailed
-            ? aiKitContextualFollowUpInstruction(
-                previous: lastInstruction,
-                reason: activity.failureReason,
-                followUp: text
-              )
-            : text
-        lastInstruction = text
-        Task { await session.send(instruction) }
+        input.sendText(rawText, activity: activity)
     }
 
     private func startVoiceRecording() {
-        guard !activity.isBusy, !voiceInput.isVoiceTranscribing else { return }
         fieldFocused = false
-        draft = ""
-        voiceInput.startRecording()
+        input.startVoiceRecording(activity: activity)
     }
 
     private func finishVoiceRecording() {
-        voiceInput.finishRecording(onText: sendText)
+        input.finishVoiceRecording(activity: activity)
     }
 
     private func cancelVoiceInput() {
-        voiceInput.cancel()
+        input.cancelVoiceInput()
     }
 
     private func clearVoiceError() {
-        voiceInput.clearError()
+        input.clearVoiceError()
         fieldFocused = true
     }
 
     private func cancelCurrentWork() {
-        Task { await orchestrator.cancelActiveTurns() }
+        input.cancelCurrentWork()
     }
 
     private func dismissFailure() {
         fieldFocused = false
-        Task { await orchestrator.cancelActiveTurns() }
+        input.dismissFailure()
     }
 }
 

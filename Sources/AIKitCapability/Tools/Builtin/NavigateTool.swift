@@ -1,4 +1,5 @@
 import Foundation
+import AIToolKit
 import AIKitCore
 
 /// Built-in tool: requests navigation to a named destination. The host app

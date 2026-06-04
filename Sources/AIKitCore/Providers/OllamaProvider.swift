@@ -1,4 +1,5 @@
 import Foundation
+import AIToolKit
 
 /// `LLMProvider` backed by Ollama's native `/api/chat` endpoint.
 ///
@@ -11,7 +12,7 @@ import Foundation
 /// Ollama streams newline-delimited JSON (not SSE), and emits `tool_calls` as
 /// a single complete block rather than incremental deltas.
 public struct OllamaProvider: LLMProvider {
-    public static let defaultBaseURL = URL(string: "http://localhost:11434")!
+    public static let defaultBaseURL = AIKitProviderDefaults.ollamaBaseURL
 
     public let configuration: LLMProviderConfiguration
 

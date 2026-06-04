@@ -1,4 +1,5 @@
 import Foundation
+import AIToolKit
 import AIKitCore
 
 /// Built-in tool: reads the shared AIKit configuration state.
