@@ -17,3 +17,4 @@ DerivedData/
 # Markdown docs
 *.md
 !README.md
+!AGENTS.md
