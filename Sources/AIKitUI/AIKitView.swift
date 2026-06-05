@@ -266,6 +266,22 @@ enum AIKitMetrics {
     static let badgeSize: CGFloat = 32
     /// Comfortable reading measure; the column centers within wider windows.
     static let contentWidth: CGFloat = 760
+    static var textFieldRowSpacer: CGFloat {
+        #if os(macOS)
+        32
+        #elseif os(visionOS)
+        24
+        #else
+        16
+        #endif
+    }
+    static var textFieldStackSpacing: CGFloat {
+        #if os(macOS)
+        6
+        #else
+        8
+        #endif
+    }
 
     /// Floating chatbot overlay — pet button, glass capsule, detail panel.
     static let petDiameter: CGFloat = 58
@@ -999,16 +1015,19 @@ public struct AIKitView: View {
                     .multilineTextAlignment(.trailing)
                     .aiKitFieldStyle()
             }
+            .aiKitTextFieldRowStyle()
             LabeledContent("Temperature") {
                 TextField("Default", text: optionalDoubleBinding(\.core.temperature))
                     .multilineTextAlignment(.trailing)
                     .aiKitFieldStyle()
             }
+            .aiKitTextFieldRowStyle()
             LabeledContent("Max tokens") {
                 TextField("Default", text: optionalIntBinding(\.core.maxTokens))
                     .multilineTextAlignment(.trailing)
                     .aiKitFieldStyle()
             }
+            .aiKitTextFieldRowStyle()
         }
     }
 
@@ -1025,6 +1044,7 @@ public struct AIKitView: View {
                     .textContentType(.password)
                     .aiKitFieldStyle()
             }
+            .aiKitTextFieldRowStyle()
         }
     }
 
@@ -1035,6 +1055,7 @@ public struct AIKitView: View {
                     .multilineTextAlignment(.trailing)
                     .aiKitFieldStyle()
             }
+            .aiKitTextFieldRowStyle()
             VStack(alignment: .leading, spacing: 8) {
                 Text("System prompt")
                     .font(.subheadline)
@@ -1062,6 +1083,7 @@ public struct AIKitView: View {
                     .multilineTextAlignment(.trailing)
                     .aiKitFieldStyle()
                 }
+                .aiKitTextFieldRowStyle()
             } else {
                 VStack(alignment: .leading, spacing: 8) {
                     Text("Enabled tools")
@@ -1090,6 +1112,7 @@ public struct AIKitView: View {
                     .multilineTextAlignment(.trailing)
                     .aiKitFieldStyle()
             }
+            .aiKitTextFieldRowStyle()
             Picker("Tool fallback", selection: binding(\.runtime.toolCallFallback)) {
                 ForEach(AIKitConfiguration.ToolCallFallbackMode.allCases, id: \.self) { mode in
                     Text(mode.label).tag(mode)
@@ -1119,16 +1142,19 @@ public struct AIKitView: View {
                     .multilineTextAlignment(.trailing)
                     .aiKitFieldStyle()
             }
+            .aiKitTextFieldRowStyle()
             LabeledContent("Guardrails") {
                 TextField("Comma-separated", text: setBinding(\.safety.enabledGuardrailIDs))
                     .multilineTextAlignment(.trailing)
                     .aiKitFieldStyle()
             }
+            .aiKitTextFieldRowStyle()
             LabeledContent("Tool allowlist") {
                 TextField("Comma-separated", text: setBinding(\.safety.allowlistedToolNames))
                     .multilineTextAlignment(.trailing)
                     .aiKitFieldStyle()
             }
+            .aiKitTextFieldRowStyle()
         }
     }
 
@@ -2156,6 +2182,28 @@ private struct AIKitConfigurationSection<Content: View>: View {
                 .font(.headline)
                 .bold()
             Spacer(minLength: 0)
+        }
+    }
+}
+
+private struct AIKitTextFieldRowStyle: LabeledContentStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(alignment: .center, spacing: 12) {
+                configuration.label
+                    .font(.subheadline)
+                    .foregroundStyle(.primary)
+                Spacer(minLength: AIKitMetrics.textFieldRowSpacer)
+                configuration.content
+            }
+
+            VStack(alignment: .leading, spacing: AIKitMetrics.textFieldStackSpacing) {
+                configuration.label
+                    .font(.subheadline)
+                    .foregroundStyle(.primary)
+                configuration.content
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
         }
     }
 }
@@ -3278,6 +3326,10 @@ private extension View {
                 length * 0.5
             }
             .aiKitContainerStyle()
+    }
+
+    func aiKitTextFieldRowStyle() -> some View {
+        labeledContentStyle(AIKitTextFieldRowStyle())
     }
 
     @ViewBuilder
