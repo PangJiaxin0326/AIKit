@@ -530,7 +530,9 @@ private struct AIKitSearchTabSelectionInterceptor: UIViewControllerRepresentable
 
         deinit {
             installTask?.cancel()
-            removeInterceptor()
+            MainActor.assumeIsolated {
+                removeInterceptor()
+            }
         }
 
         override func didMove(toParent parent: UIViewController?) {
@@ -597,6 +599,7 @@ private struct AIKitSearchTabSelectionInterceptor: UIViewControllerRepresentable
             return true
         }
 
+        @MainActor
         private func removeInterceptor() {
             installedTabBar?.removeGestureRecognizer(searchTapRecognizer)
             installedTabBar = nil
@@ -1976,6 +1979,100 @@ public extension View {
         }
     }
 }
+
+#if os(macOS)
+/// macOS entry point for AIKit's assistant runtime detail surface.
+///
+/// This wraps the shared ``AssistantRuntimeDetailContent`` used by the
+/// assistant overlay, while owning the macOS-friendly snapshot/activity state
+/// needed by hosts that want to place the detail surface in a window, panel, or
+/// debug view.
+public struct AssistantRuntimeDetailView: View {
+    private let orchestrator: Orchestrator
+    private let title: String
+    private let maxContentHeight: CGFloat
+
+    @State private var snapshot: OrchestratorSnapshot?
+    @State private var activity: OrchestratorActivity = .idle
+    @State private var selectedMenu = ChatbotMenu.context
+    @State private var activityDisplay: OverlayActivityDisplay = .tasks
+
+    public init(
+        orchestrator: Orchestrator,
+        title: String = "Assistant Runtime",
+        maxContentHeight: CGFloat = 420
+    ) {
+        self.orchestrator = orchestrator
+        self.title = title
+        self.maxContentHeight = maxContentHeight
+    }
+
+    public var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            header
+            AssistantRuntimeDetailContent(
+                snapshot: snapshot,
+                activity: activity,
+                selectedMenu: $selectedMenu,
+                activityDisplay: $activityDisplay,
+                maxContentHeight: maxContentHeight
+            )
+        }
+        .padding(AIKitMetrics.cardPadding)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: AIKitMetrics.cardRadius))
+        .overlay {
+            RoundedRectangle(cornerRadius: AIKitMetrics.cardRadius)
+                .strokeBorder(.separator.opacity(0.36), lineWidth: 0.5)
+        }
+        .task { await refreshSnapshot() }
+        .task {
+            for await update in orchestrator.activityUpdates() {
+                activity = update
+            }
+        }
+        .onChange(of: activity.isBusy) { _, busy in
+            if !busy {
+                Task { await refreshSnapshot() }
+            }
+        }
+    }
+
+    private var header: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "sparkles")
+                .font(.callout.weight(.semibold))
+                .foregroundStyle(.white)
+                .frame(width: 30, height: 30)
+                .background(Color.accentColor.gradient, in: RoundedRectangle(cornerRadius: 8))
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.headline)
+                Text(activity.statusText)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+
+            Spacer(minLength: 8)
+
+            Button {
+                Task { await refreshSnapshot() }
+            } label: {
+                Image(systemName: "arrow.clockwise")
+                    .frame(width: 28, height: 28)
+            }
+            .buttonStyle(.borderless)
+            .help("Refresh runtime details")
+        }
+    }
+
+    private func refreshSnapshot() async {
+        snapshot = await orchestrator.snapshot(recentActivityLimit: 24, recentTaskLimit: 8)
+    }
+}
+#endif
 
 @MainActor
 @Observable
