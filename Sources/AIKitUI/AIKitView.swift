@@ -262,7 +262,6 @@ enum AIKitMetrics {
     /// Section surfaces and their icon badges share one measured curve.
     static let cardRadius: CGFloat = 18
     static let fieldRadius: CGFloat = 12
-    static let fieldWidth: CGFloat = 260
     static let badgeRadius: CGFloat = 9
     static let badgeSize: CGFloat = 32
     /// Comfortable reading measure; the column centers within wider windows.
@@ -881,60 +880,83 @@ public struct AIKitView: View {
     }
 
     private var providerPickerCapsule: some View {
-        AIKitPickerCapsule(
-            title: "Provider",
-            systemImage: "server.rack",
-            tint: .blue
-        ) {
-            Picker("Provider", selection: providerBinding) {
-                ForEach(AIKitProviderDefinition.all) { provider in
-                    Text(provider.displayName).tag(provider.kind)
+        Menu {
+            ForEach(AIKitProviderDefinition.all) { provider in
+                Button(provider.displayName) {
+                    model.selectProvider(provider.kind)
                 }
             }
-            .labelsHidden()
-            .pickerStyle(.menu)
+        } label: {
+            AIKitPickerCapsule(
+                title: "Provider",
+                value: selectedProviderDefinition.displayName,
+                systemImage: "server.rack",
+                tint: .blue
+            )
         }
+        .buttonStyle(.plain)
     }
 
     private var modelPickerCapsule: some View {
         let modelOptions = model.modelOptions(for: selectedProvider)
         let isRefreshingModels = model.isRefreshingModels(for: selectedProvider)
 
-        return AIKitPickerCapsule(
-            title: "Model",
-            systemImage: "cpu",
-            tint: .indigo
-        ) {
-            HStack(spacing: 8) {
-                Picker("Model", selection: selectedModelBinding) {
-                    Text("None").tag(Optional<String>.none)
-                    ForEach(modelOptions, id: \.self) { modelName in
-                        Text(modelName).tag(Optional(modelName))
+        return HStack(spacing: 8) {
+            Menu {
+                Button("None") {
+                    model.selectModel(nil, for: selectedProvider)
+                }
+                Divider()
+                ForEach(modelOptions, id: \.self) { modelName in
+                    Button(modelName) {
+                        model.selectModel(modelName, for: selectedProvider)
                     }
                 }
-                .labelsHidden()
-                .pickerStyle(.menu)
-
-                if selectedProviderDefinition.supportsModelCatalogRefresh {
-                    Button {
-                        Task { await refreshModelCatalog() }
-                    } label: {
-                        ZStack {
-                            Label("Refresh models", systemImage: "arrow.clockwise")
-                                .labelStyle(.iconOnly)
-                                .opacity(isRefreshingModels ? 0 : 1)
-                            if isRefreshingModels {
-                                ProgressView()
-                                    .controlSize(.small)
-                            }
-                        }
-                        .frame(width: 44, height: 44)
-                    }
-                    .buttonStyle(.glass)
-                    .buttonBorderShape(.circle)
-                    .disabled(isRefreshingModels)
-                }
+            } label: {
+                AIKitPickerCapsuleLabel(
+                    title: "Model",
+                    value: selectedModelTitle,
+                    systemImage: "cpu",
+                    tint: .indigo
+                )
+                .contentShape(.rect)
             }
+            .buttonStyle(.plain)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(.rect)
+
+            if selectedProviderDefinition.supportsModelCatalogRefresh {
+                Button {
+                    Task { await refreshModelCatalog() }
+                } label: {
+                    ZStack {
+                        Label("Refresh models", systemImage: "arrow.clockwise")
+                            .labelStyle(.iconOnly)
+                            .font(.footnote)
+                            .opacity(isRefreshingModels ? 0 : 1)
+                        if isRefreshingModels {
+                            ProgressView()
+                                .controlSize(.mini)
+                        }
+                    }
+                    .frame(width: 30, height: 30)
+                    .glassEffect(
+                        .regular.interactive().tint(Color.indigo.opacity(0.08)),
+                        in: .circle
+                    )
+                }
+                .buttonStyle(.plain)
+                .disabled(isRefreshingModels)
+            }
+        }
+        .padding(.leading, 12)
+        .padding(.trailing, 8)
+        .padding(.vertical, 5)
+        .frame(minWidth: 220, maxWidth: .infinity, minHeight: 44, alignment: .leading)
+        .background(.regularMaterial, in: .capsule)
+        .overlay {
+            Capsule()
+                .strokeBorder(Color.indigo.opacity(0.18), lineWidth: 0.5)
         }
     }
 
@@ -1152,22 +1174,10 @@ public struct AIKitView: View {
         selectedProvider.definition
     }
 
-    private var providerBinding: Binding<AIKitProviderKind> {
-        Binding(
-            get: { selectedProvider },
-            set: { model.selectProvider($0) }
-        )
-    }
-
-    private var selectedModelBinding: Binding<String?> {
-        Binding(
-            get: {
-                model.configuration.core
-                    .providerConfiguration(for: selectedProvider)
-                    .defaultModel
-            },
-            set: { model.selectModel($0, for: selectedProvider) }
-        )
+    private var selectedModelTitle: String {
+        model.configuration.core
+            .providerConfiguration(for: selectedProvider)
+            .defaultModel ?? "None"
     }
 
     private var providerAPIKeyBinding: Binding<String> {
@@ -2172,11 +2182,35 @@ private struct AIKitSummaryChip: View {
     }
 }
 
-private struct AIKitPickerCapsule<Control: View>: View {
+private struct AIKitPickerCapsule: View {
     let title: String
+    let value: String
     let systemImage: String
     let tint: Color
-    @ViewBuilder var control: Control
+
+    var body: some View {
+        AIKitPickerCapsuleLabel(
+            title: title,
+            value: value,
+            systemImage: systemImage,
+            tint: tint
+        )
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .frame(minWidth: 150, maxWidth: .infinity, minHeight: 44, alignment: .leading)
+        .background(.regularMaterial, in: .capsule)
+        .overlay {
+            Capsule()
+                .strokeBorder(tint.opacity(0.18), lineWidth: 0.5)
+        }
+    }
+}
+
+private struct AIKitPickerCapsuleLabel: View {
+    let title: String
+    let value: String
+    let systemImage: String
+    let tint: Color
 
     var body: some View {
         HStack(spacing: 10) {
@@ -2185,24 +2219,17 @@ private struct AIKitPickerCapsule<Control: View>: View {
                 .foregroundStyle(tint)
                 .frame(width: 22)
 
-            Text(title)
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-
-            control
-                .font(.footnote)
-                .bold()
-                .foregroundStyle(.primary)
-                .frame(maxWidth: .infinity, alignment: .trailing)
-        }
-        .padding(.leading, 12)
-        .padding(.trailing, 8)
-        .padding(.vertical, 6)
-        .frame(minWidth: 220, maxWidth: .infinity, minHeight: 44, alignment: .leading)
-        .background(.regularMaterial, in: .capsule)
-        .overlay {
-            Capsule()
-                .strokeBorder(tint.opacity(0.18), lineWidth: 0.5)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                Text(value)
+                    .font(.footnote)
+                    .bold()
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+            }
+            .frame(minWidth: 0, alignment: .leading)
         }
     }
 }
@@ -3233,9 +3260,11 @@ private extension View {
         textFieldStyle(.plain)
             .padding(.horizontal, 12)
             .padding(.vertical, 9)
-            .aiKitContainerStyle()
             .frame(minHeight: 44)
-            .frame(width: AIKitMetrics.fieldWidth, alignment: .trailing)
+            .containerRelativeFrame(.horizontal) { length, _ in
+                length * 0.5
+            }
+            .aiKitContainerStyle()
     }
 
     @ViewBuilder
