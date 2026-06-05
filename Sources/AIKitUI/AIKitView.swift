@@ -826,7 +826,7 @@ public struct AIKitView: View {
 
     private var statusBadge: some View {
         let status = model.status ?? "Ready"
-        let tint: Color = model.status == "Reset" ? .orange : (model.status == nil ? .secondary : .green)
+        let tint: Color = model.status == "Reset" ? .orange : .green
         return HStack(spacing: 7) {
             Image(systemName: model.status == nil ? "circle.fill" : "checkmark.circle.fill")
                 .font(.footnote)
@@ -880,21 +880,34 @@ public struct AIKitView: View {
     }
 
     private var providerPickerCapsule: some View {
-        Menu {
-            ForEach(AIKitProviderDefinition.all) { provider in
-                Button(provider.displayName) {
-                    model.selectProvider(provider.kind)
+        HStack {
+            Menu {
+                ForEach(AIKitProviderDefinition.all) { provider in
+                    Button(provider.displayName) {
+                        model.selectProvider(provider.kind)
+                    }
                 }
+            } label: {
+                AIKitPickerCapsuleLabel(
+                    title: "Provider",
+                    value: selectedProviderDefinition.displayName,
+                    systemImage: "server.rack",
+                    tint: .blue
+                )
+                .contentShape(.rect)
             }
-        } label: {
-            AIKitPickerCapsule(
-                title: "Provider",
-                value: selectedProviderDefinition.displayName,
-                systemImage: "server.rack",
-                tint: .blue
-            )
+            .buttonStyle(.plain)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(.rect)
         }
-        .buttonStyle(.plain)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .frame(minWidth: 150, maxWidth: .infinity, minHeight: 44, alignment: .leading)
+        .background(.regularMaterial, in: .capsule)
+        .overlay {
+            Capsule()
+                .strokeBorder(Color.blue.opacity(0.18), lineWidth: 0.5)
+        }
     }
 
     private var modelPickerCapsule: some View {
