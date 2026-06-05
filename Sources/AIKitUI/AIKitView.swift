@@ -251,21 +251,21 @@ private final class AssistantInputCoordinator {
 /// radii stay roughly concentric — an inset control's curve echoes the card
 /// that holds it — so the whole interface reads as a single hand.
 enum AIKitMetrics {
-    /// Gap between the stacked configuration cards.
-    static let sectionSpacing: CGFloat = 24
-    /// Gap between rows within a card.
-    static let rowSpacing: CGFloat = 16
-    /// Inset inside each card.
-    static let cardPadding: CGFloat = 20
+    /// Gap between the stacked configuration surfaces.
+    static let sectionSpacing: CGFloat = 18
+    /// Gap between rows within a surface.
+    static let rowSpacing: CGFloat = 14
+    /// Inset inside each surface.
+    static let cardPadding: CGFloat = 18
     /// Margin around the whole dashboard column.
-    static let pagePadding: CGFloat = 24
-    /// Cards and their icon badges share one continuous ("squircle") curve.
-    static let cardRadius: CGFloat = 20
-    static let fieldRadius: CGFloat = 10
-    static let badgeRadius: CGFloat = 8
-    static let badgeSize: CGFloat = 30
+    static let pagePadding: CGFloat = 28
+    /// Section surfaces and their icon badges share one measured curve.
+    static let cardRadius: CGFloat = 18
+    static let fieldRadius: CGFloat = 12
+    static let badgeRadius: CGFloat = 9
+    static let badgeSize: CGFloat = 32
     /// Comfortable reading measure; the column centers within wider windows.
-    static let contentWidth: CGFloat = 640
+    static let contentWidth: CGFloat = 760
 
     /// Floating chatbot overlay — pet button, glass capsule, detail panel.
     static let petDiameter: CGFloat = 58
@@ -753,57 +753,137 @@ public struct AIKitView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: AIKitMetrics.sectionSpacing) {
                 header
-                coreSection
-                capabilitySection
-                runtimeSection
-                safetySection
+                VStack(spacing: 12) {
+                    coreSection
+                    capabilitySection
+                    runtimeSection
+                    safetySection
+                }
                 if !model.recentChanges.isEmpty {
                     changeLogSection
                 }
                 resetFooter
             }
-            .padding(AIKitMetrics.pagePadding)
+            .padding(.horizontal, AIKitMetrics.pagePadding)
+            .padding(.vertical, 28)
             .frame(maxWidth: AIKitMetrics.contentWidth, alignment: .leading)
             .frame(maxWidth: .infinity)
             .animation(.snappy(duration: 0.25), value: model.recentChanges.count)
         }
         .scrollIndicators(.hidden)
-        .background(.background.secondary)
+        .background {
+            dashboardBackground
+        }
+    }
+
+    private var dashboardBackground: some View {
+        ZStack {
+            Rectangle()
+                .fill(.background)
+            LinearGradient(
+                colors: [
+                    Color.accentColor.opacity(0.07),
+                    Color.clear,
+                    Color.primary.opacity(0.035),
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+        }
+        .ignoresSafeArea()
     }
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .firstTextBaseline) {
-                Text("AIKit")
-                    .font(.largeTitle.weight(.bold))
-                    .tracking(-0.5)
-                Spacer(minLength: 12)
-                statusBadge
+        VStack(alignment: .leading, spacing: 16) {
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .top, spacing: 16) {
+                    headerTitle
+                    Spacer(minLength: 16)
+                    statusBadge
+                }
+                VStack(alignment: .leading, spacing: 12) {
+                    headerTitle
+                    statusBadge
+                }
             }
+            summaryStrip
+        }
+        .padding(.horizontal, 4)
+        .padding(.bottom, 8)
+        .animation(.snappy(duration: 0.2), value: model.status)
+    }
+
+    private var headerTitle: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("AIKit")
+                .font(.largeTitle)
+                .bold()
             Text("Core · Capability · Runtime · Safety")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
         }
-        .padding(.horizontal, 4)
-        .padding(.bottom, 2)
-        .animation(.snappy(duration: 0.2), value: model.status)
+    }
+
+    private var statusBadge: some View {
+        let status = model.status ?? "Ready"
+        let tint: Color = model.status == "Reset" ? .orange : (model.status == nil ? .secondary : .green)
+        return HStack(spacing: 7) {
+            Image(systemName: model.status == nil ? "circle.fill" : "checkmark.circle.fill")
+                .font(.footnote)
+                .foregroundStyle(tint)
+            Text(status)
+                .foregroundStyle(.secondary)
+        }
+        .font(.footnote)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .glassEffect(.regular.tint(tint.opacity(0.08)), in: .capsule)
+        .overlay {
+            Capsule()
+                .strokeBorder(tint.opacity(0.22), lineWidth: 0.5)
+        }
+        .transition(.opacity.combined(with: .move(edge: .trailing)))
+    }
+
+    private var summaryStrip: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 10) {
+                summaryChips
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            VStack(alignment: .leading, spacing: 10) {
+                summaryChips
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
     }
 
     @ViewBuilder
-    private var statusBadge: some View {
-        if let status = model.status {
-            HStack(spacing: 5) {
-                Image(systemName: "checkmark.circle.fill")
-                    .foregroundStyle(.green)
-                Text(status)
-                    .foregroundStyle(.secondary)
-            }
-            .font(.footnote.weight(.medium))
-            .padding(.horizontal, 10)
-            .padding(.vertical, 5)
-            .background(.background.secondary, in: Capsule())
-            .transition(.opacity.combined(with: .move(edge: .trailing)))
-        }
+    private var summaryChips: some View {
+        AIKitSummaryChip(
+            title: "Provider",
+            value: selectedProviderDefinition.displayName,
+            systemImage: "server.rack",
+            tint: .blue
+        )
+        AIKitSummaryChip(
+            title: "Model",
+            value: modelMenuTitle,
+            systemImage: "cpu",
+            tint: .indigo
+        )
+        AIKitSummaryChip(
+            title: "Tools",
+            value: "\(model.configuration.capability.enabledToolNames.count)",
+            systemImage: "wrench.and.screwdriver",
+            tint: .purple
+        )
+        AIKitSummaryChip(
+            title: "Guardrails",
+            value: "\(model.configuration.safety.enabledGuardrailIDs.count)",
+            systemImage: "shield.checkered",
+            tint: .green
+        )
     }
 
     private var coreSection: some View {
@@ -823,11 +903,20 @@ public struct AIKitView: View {
             endpointRow
 
             if let modelCatalogStatus = model.modelCatalogStatus(for: selectedProvider) {
-                Text(modelCatalogStatus)
+                Label(
+                    modelCatalogStatus,
+                    systemImage: model.modelCatalogStatusIsError(for: selectedProvider)
+                        ? "exclamationmark.triangle.fill"
+                        : "checkmark.circle.fill"
+                )
                     .font(.footnote)
                     .foregroundStyle(
                         model.modelCatalogStatusIsError(for: selectedProvider) ? .red : .secondary
                     )
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 9)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .aiKitContainerStyle()
             }
 
             LabeledContent("Timeout") {
@@ -890,16 +979,20 @@ public struct AIKitView: View {
                     Button {
                         Task { await refreshModelCatalog() }
                     } label: {
-                        if isRefreshingModels {
-                            ProgressView()
-                                .controlSize(.small)
-                        } else {
-                            Image(systemName: "arrow.clockwise")
+                        ZStack {
+                            Label("Refresh models", systemImage: "arrow.clockwise")
+                                .labelStyle(.iconOnly)
+                                .opacity(isRefreshingModels ? 0 : 1)
+                            if isRefreshingModels {
+                                ProgressView()
+                                    .controlSize(.small)
+                            }
                         }
+                        .frame(width: 44, height: 44)
                     }
-                    .buttonStyle(.borderless)
+                    .buttonStyle(.glass)
+                    .buttonBorderShape(.circle)
                     .disabled(isRefreshingModels)
-                    .accessibilityLabel("Refresh models")
                 }
             }
         }
@@ -1065,17 +1158,19 @@ public struct AIKitView: View {
     }
 
     private var resetFooter: some View {
-        HStack {
-            Spacer()
-            Button(role: .destructive) {
-                model.resetToDefaults()
-            } label: {
-                Label("Reset to defaults", systemImage: "arrow.counterclockwise")
-                    .font(.callout)
+        GlassEffectContainer(spacing: 10) {
+            HStack {
+                Spacer()
+                Button(role: .destructive) {
+                    model.resetToDefaults()
+                } label: {
+                    Label("Reset to defaults", systemImage: "arrow.counterclockwise")
+                        .font(.callout)
+                }
+                .buttonStyle(.glass)
+                .tint(.red)
+                Spacer()
             }
-            .buttonStyle(.bordered)
-            .tint(.red)
-            Spacer()
         }
         .padding(.top, 4)
     }
@@ -2058,26 +2153,58 @@ private struct AIKitConfigurationSection<Content: View>: View {
         }
         .padding(AIKitMetrics.cardPadding)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.background, in: shape)
+        .background(.regularMaterial, in: shape)
         .overlay {
-            shape.strokeBorder(.separator.opacity(0.5), lineWidth: 0.5)
+            shape.strokeBorder(.separator.opacity(0.38), lineWidth: 0.5)
         }
-        .shadow(color: .black.opacity(0.05), radius: 10, y: 3)
     }
 
     private var header: some View {
         HStack(spacing: 12) {
             Image(systemName: systemImage)
-                .font(.system(size: 15, weight: .semibold))
-                .foregroundStyle(.white)
+                .font(.system(size: 15, weight: .medium))
+                .foregroundStyle(tint)
                 .frame(width: AIKitMetrics.badgeSize, height: AIKitMetrics.badgeSize)
-                .background(
-                    tint.gradient,
-                    in: RoundedRectangle(cornerRadius: AIKitMetrics.badgeRadius, style: .continuous)
-                )
+                .background(tint.opacity(0.12), in: .rect(cornerRadius: AIKitMetrics.badgeRadius))
             Text(title)
                 .font(.headline)
+                .bold()
             Spacer(minLength: 0)
+        }
+    }
+}
+
+private struct AIKitSummaryChip: View {
+    let title: String
+    let value: String
+    let systemImage: String
+    let tint: Color
+
+    var body: some View {
+        HStack(spacing: 9) {
+            Image(systemName: systemImage)
+                .font(.subheadline)
+                .foregroundStyle(tint)
+                .frame(width: 22)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                Text(value)
+                    .font(.footnote)
+                    .bold()
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+            }
+            .frame(minWidth: 0, alignment: .leading)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .frame(minWidth: 150, maxWidth: .infinity, minHeight: 44, alignment: .leading)
+        .background(.regularMaterial, in: .capsule)
+        .overlay {
+            Capsule()
+                .strokeBorder(tint.opacity(0.18), lineWidth: 0.5)
         }
     }
 }
@@ -3095,9 +3222,9 @@ private extension View {
         cornerRadius: CGFloat = AIKitMetrics.fieldRadius
     ) -> some View {
         let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-        return background(.background.secondary, in: shape)
+        return background(.thinMaterial, in: shape)
             .overlay {
-                shape.strokeBorder(.separator.opacity(0.5), lineWidth: 0.5)
+                shape.strokeBorder(.separator.opacity(0.36), lineWidth: 0.5)
             }
     }
 
@@ -3106,10 +3233,11 @@ private extension View {
     /// Built on ``aiKitContainerStyle`` so it shares the same hairline.
     func aiKitFieldStyle() -> some View {
         textFieldStyle(.plain)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 7)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 9)
             .aiKitContainerStyle()
-            .frame(maxWidth: 200, alignment: .trailing)
+            .frame(minHeight: 44)
+            .frame(maxWidth: 240, alignment: .trailing)
     }
 
     @ViewBuilder
