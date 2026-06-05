@@ -111,7 +111,7 @@ final class VoiceModeController {
                 guard !spoken.isEmpty else { return }
 
                 let instruction = pendingFollowUp.map {
-                    Self.followUpInstruction(
+                    aiKitContextualFollowUpInstruction(
                         previous: $0.instruction,
                         reason: $0.reason,
                         followUp: spoken
@@ -228,22 +228,6 @@ final class VoiceModeController {
         if let failure, !failure.isEmpty { return .needsFollowUp(failure) }
         if let finalAnswer, !finalAnswer.isEmpty { return .completed }
         return .empty
-    }
-
-    /// Folds a failed turn and the spoken clarification into one instruction,
-    /// so the model treats the follow-up as part of the same request.
-    private static func followUpInstruction(
-        previous: String,
-        reason: String,
-        followUp: String
-    ) -> String {
-        """
-        This is a follow-up to a request you could not complete.
-        Your earlier request was: "\(previous)"
-        It could not be completed because: \(reason)
-        Clarification / new instruction: \(followUp)
-        Treat the earlier request and this clarification as one request.
-        """
     }
 
     // MARK: - Audio session
