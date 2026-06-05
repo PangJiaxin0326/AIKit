@@ -262,6 +262,7 @@ enum AIKitMetrics {
     /// Section surfaces and their icon badges share one measured curve.
     static let cardRadius: CGFloat = 18
     static let fieldRadius: CGFloat = 12
+    static let fieldWidth: CGFloat = 260
     static let badgeRadius: CGFloat = 9
     static let badgeSize: CGFloat = 32
     /// Comfortable reading measure; the column centers within wider windows.
@@ -846,61 +847,100 @@ public struct AIKitView: View {
     }
 
     private var summaryStrip: some View {
-        ViewThatFits(in: .horizontal) {
-            HStack(spacing: 10) {
-                summaryChips
+        VStack(alignment: .leading, spacing: 10) {
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 10) {
+                    providerPickerCapsule
+                    modelPickerCapsule
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+                VStack(alignment: .leading, spacing: 10) {
+                    providerPickerCapsule
+                    modelPickerCapsule
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            VStack(alignment: .leading, spacing: 10) {
-                summaryChips
+
+            HStack(spacing: 10) {
+                AIKitSummaryChip(
+                    title: "Tools",
+                    value: "\(model.configuration.capability.enabledToolNames.count)",
+                    systemImage: "wrench.and.screwdriver",
+                    tint: .purple
+                )
+                AIKitSummaryChip(
+                    title: "Guardrails",
+                    value: "\(model.configuration.safety.enabledGuardrailIDs.count)",
+                    systemImage: "shield.checkered",
+                    tint: .green
+                )
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
-    @ViewBuilder
-    private var summaryChips: some View {
-        AIKitSummaryChip(
+    private var providerPickerCapsule: some View {
+        AIKitPickerCapsule(
             title: "Provider",
-            value: selectedProviderDefinition.displayName,
             systemImage: "server.rack",
             tint: .blue
-        )
-        AIKitSummaryChip(
-            title: "Model",
-            value: modelMenuTitle,
-            systemImage: "cpu",
-            tint: .indigo
-        )
-        AIKitSummaryChip(
-            title: "Tools",
-            value: "\(model.configuration.capability.enabledToolNames.count)",
-            systemImage: "wrench.and.screwdriver",
-            tint: .purple
-        )
-        AIKitSummaryChip(
-            title: "Guardrails",
-            value: "\(model.configuration.safety.enabledGuardrailIDs.count)",
-            systemImage: "shield.checkered",
-            tint: .green
-        )
+        ) {
+            Picker("Provider", selection: providerBinding) {
+                ForEach(AIKitProviderDefinition.all) { provider in
+                    Text(provider.displayName).tag(provider.kind)
+                }
+            }
+            .labelsHidden()
+            .pickerStyle(.menu)
+        }
     }
 
-    private var coreSection: some View {
-        AIKitConfigurationSection(title: "Core", systemImage: "cpu", tint: .blue) {
-            LabeledContent("Provider") {
-                Picker("Provider", selection: providerBinding) {
-                    ForEach(AIKitProviderDefinition.all) { provider in
-                        Text(provider.displayName).tag(provider.kind)
+    private var modelPickerCapsule: some View {
+        let modelOptions = model.modelOptions(for: selectedProvider)
+        let isRefreshingModels = model.isRefreshingModels(for: selectedProvider)
+
+        return AIKitPickerCapsule(
+            title: "Model",
+            systemImage: "cpu",
+            tint: .indigo
+        ) {
+            HStack(spacing: 8) {
+                Picker("Model", selection: selectedModelBinding) {
+                    Text("None").tag(Optional<String>.none)
+                    ForEach(modelOptions, id: \.self) { modelName in
+                        Text(modelName).tag(Optional(modelName))
                     }
                 }
                 .labelsHidden()
                 .pickerStyle(.menu)
-            }
 
+                if selectedProviderDefinition.supportsModelCatalogRefresh {
+                    Button {
+                        Task { await refreshModelCatalog() }
+                    } label: {
+                        ZStack {
+                            Label("Refresh models", systemImage: "arrow.clockwise")
+                                .labelStyle(.iconOnly)
+                                .opacity(isRefreshingModels ? 0 : 1)
+                            if isRefreshingModels {
+                                ProgressView()
+                                    .controlSize(.small)
+                            }
+                        }
+                        .frame(width: 44, height: 44)
+                    }
+                    .buttonStyle(.glass)
+                    .buttonBorderShape(.circle)
+                    .disabled(isRefreshingModels)
+                }
+            }
+        }
+    }
+
+    private var coreSection: some View {
+        AIKitConfigurationSection(title: "Core", systemImage: "cpu", tint: .blue) {
             providerCredentialRow
-            modelRow
-            endpointRow
 
             if let modelCatalogStatus = model.modelCatalogStatus(for: selectedProvider) {
                 Label(
@@ -949,77 +989,6 @@ public struct AIKitView: View {
                     #endif
                     .textContentType(.password)
                     .aiKitFieldStyle()
-            }
-        }
-    }
-
-    private var modelRow: some View {
-        LabeledContent("Model") {
-            let modelOptions = model.modelOptions(for: selectedProvider)
-            let isRefreshingModels = model.isRefreshingModels(for: selectedProvider)
-            HStack(spacing: 8) {
-                Menu {
-                    Button("None") {
-                        model.selectModel(nil, for: selectedProvider)
-                    }
-                    Divider()
-                    ForEach(modelOptions, id: \.self) { modelName in
-                        Button(modelName) {
-                            model.selectModel(modelName, for: selectedProvider)
-                        }
-                    }
-                } label: {
-                    Text(modelMenuTitle)
-                        .lineLimit(1)
-                        .frame(maxWidth: .infinity, alignment: .trailing)
-                }
-                .menuStyle(.button)
-
-                if selectedProviderDefinition.supportsModelCatalogRefresh {
-                    Button {
-                        Task { await refreshModelCatalog() }
-                    } label: {
-                        ZStack {
-                            Label("Refresh models", systemImage: "arrow.clockwise")
-                                .labelStyle(.iconOnly)
-                                .opacity(isRefreshingModels ? 0 : 1)
-                            if isRefreshingModels {
-                                ProgressView()
-                                    .controlSize(.small)
-                            }
-                        }
-                        .frame(width: 44, height: 44)
-                    }
-                    .buttonStyle(.glass)
-                    .buttonBorderShape(.circle)
-                    .disabled(isRefreshingModels)
-                }
-            }
-        }
-    }
-
-    private var endpointRow: some View {
-        LabeledContent("Endpoint") {
-            if let displayName = selectedProviderDefinition.streamingEndpointDisplayName {
-                Text(displayName)
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .trailing)
-            } else if selectedProviderDefinition.allowsStreamingEndpointOverride {
-                TextField(
-                    selectedProviderDefinition.streamingEndpoint.absoluteString,
-                    text: selectedProviderEndpointBinding
-                )
-                    .multilineTextAlignment(.trailing)
-                    .autocorrectionDisabled()
-                    #if os(iOS)
-                    .textInputAutocapitalization(.never)
-                    #endif
-                    .aiKitFieldStyle()
-            } else {
-                Text(selectedProviderDefinition.streamingEndpoint.absoluteString)
-                    .lineLimit(1)
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .trailing)
             }
         }
     }
@@ -1190,6 +1159,17 @@ public struct AIKitView: View {
         )
     }
 
+    private var selectedModelBinding: Binding<String?> {
+        Binding(
+            get: {
+                model.configuration.core
+                    .providerConfiguration(for: selectedProvider)
+                    .defaultModel
+            },
+            set: { model.selectModel($0, for: selectedProvider) }
+        )
+    }
+
     private var providerAPIKeyBinding: Binding<String> {
         Binding(
             get: { providerCredentials.apiKey(for: selectedProvider) },
@@ -1202,23 +1182,6 @@ public struct AIKitView: View {
 
     private var providerAPIKey: String {
         providerCredentials.apiKey(for: selectedProvider)
-    }
-
-    private var selectedProviderEndpointBinding: Binding<String> {
-        Binding(
-            get: {
-                model.configuration.core
-                    .providerConfiguration(for: selectedProvider)
-                    .endpointURL ?? selectedProviderDefinition.streamingEndpoint.absoluteString
-            },
-            set: { model.selectEndpointURL($0, for: selectedProvider) }
-        )
-    }
-
-    private var modelMenuTitle: String {
-        model.configuration.core
-            .providerConfiguration(for: selectedProvider)
-            .defaultModel ?? "None"
     }
 
     private func refreshModelCatalog() async {
@@ -2201,6 +2164,41 @@ private struct AIKitSummaryChip: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
         .frame(minWidth: 150, maxWidth: .infinity, minHeight: 44, alignment: .leading)
+        .background(.regularMaterial, in: .capsule)
+        .overlay {
+            Capsule()
+                .strokeBorder(tint.opacity(0.18), lineWidth: 0.5)
+        }
+    }
+}
+
+private struct AIKitPickerCapsule<Control: View>: View {
+    let title: String
+    let systemImage: String
+    let tint: Color
+    @ViewBuilder var control: Control
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: systemImage)
+                .font(.subheadline)
+                .foregroundStyle(tint)
+                .frame(width: 22)
+
+            Text(title)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+
+            control
+                .font(.footnote)
+                .bold()
+                .foregroundStyle(.primary)
+                .frame(maxWidth: .infinity, alignment: .trailing)
+        }
+        .padding(.leading, 12)
+        .padding(.trailing, 8)
+        .padding(.vertical, 6)
+        .frame(minWidth: 220, maxWidth: .infinity, minHeight: 44, alignment: .leading)
         .background(.regularMaterial, in: .capsule)
         .overlay {
             Capsule()
@@ -3237,7 +3235,7 @@ private extension View {
             .padding(.vertical, 9)
             .aiKitContainerStyle()
             .frame(minHeight: 44)
-            .frame(maxWidth: 240, alignment: .trailing)
+            .frame(width: AIKitMetrics.fieldWidth, alignment: .trailing)
     }
 
     @ViewBuilder
