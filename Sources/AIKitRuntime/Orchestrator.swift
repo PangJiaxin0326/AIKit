@@ -166,13 +166,17 @@ public struct OrchestratorActivity: Sendable, Equatable {
 private struct OrchestratorTaskRecord: Sendable {
     let id: Int
     let instruction: String
+    let usageRecordID: UUID
+    let usageTaskID: String
     let startedAt: Date
     var viewID: ViewContext.ID?
     var endedAt: Date?
     var phase: OrchestratorPhase
     var failureReason: String?
     var usage = TokenUsage.zero
+    var roundTripCount = 0
     var activities: [UsageEvent] = []
+    var usageRecordPersisted = false
 
     var snapshot: OrchestratorTaskSnapshot {
         OrchestratorTaskSnapshot(
@@ -184,6 +188,53 @@ private struct OrchestratorTaskRecord: Sendable {
             failureReason: failureReason,
             usage: usage,
             activities: activities
+        )
+    }
+
+    func duration(at date: Date = Date()) -> TimeInterval {
+        max(0, (endedAt ?? date).timeIntervalSince(startedAt))
+    }
+
+    func messageCount(outcome: AIKitSessionUsageOutcome) -> Int {
+        let activityMessageCount = activities.reduce(into: 0) { count, event in
+            switch event.kind {
+            case .userInstruction, .llmResponse, .error:
+                count += 1
+            case .toolInvoked, .toolResult:
+                break
+            }
+        }
+        let hasUserInstruction = activities.contains { $0.kind == .userInstruction }
+        let hasTerminalAssistantMessage = activities.contains {
+            $0.kind == .llmResponse || $0.kind == .error
+        }
+        let userMessageCount = hasUserInstruction ? activityMessageCount : activityMessageCount + 1
+        if !hasTerminalAssistantMessage,
+           outcome == .failed || outcome == .refused {
+            return userMessageCount + 1
+        }
+        return userMessageCount
+    }
+
+    func usageSummary(
+        modelName: String,
+        providerName: String?,
+        outcome: AIKitSessionUsageOutcome
+    ) -> AIKitSessionUsageSummary {
+        let endedAt = endedAt ?? Date()
+        return AIKitSessionUsageSummary(
+            id: usageRecordID,
+            taskID: usageTaskID,
+            modelName: modelName,
+            providerName: providerName,
+            startedAt: startedAt,
+            endedAt: endedAt,
+            durationSeconds: duration(at: endedAt),
+            roundTripCount: roundTripCount,
+            messageCount: messageCount(outcome: outcome),
+            usage: usage,
+            outcome: outcome,
+            recordedAt: Date()
         )
     }
 }
@@ -271,6 +322,7 @@ public actor Orchestrator {
     private let memory: any MemoryStore
     private let contextResolver: ContextResolver
     private let guardrails: PolicyEngine
+    private let usageRecorder: (any AIKitSessionUsageRecording)?
     private let errorHandler = ErrorHandler()
     private let options: Options
     private let logger = AIKitLog.runtime
@@ -301,6 +353,8 @@ public actor Orchestrator {
         taskRecords[turn] = OrchestratorTaskRecord(
             id: turn,
             instruction: instruction,
+            usageRecordID: UUID(),
+            usageTaskID: "turn-\(turn)-\(UUID().uuidString)",
             startedAt: Date(),
             viewID: nil,
             endedAt: nil,
@@ -315,8 +369,13 @@ public actor Orchestrator {
         taskRecords[turn] = record
     }
 
-    private func finishTask(_ turn: Int, failureReason: String? = nil) {
-        guard var record = taskRecords[turn] else { return }
+    private func finishTask(
+        _ turn: Int,
+        failureReason: String? = nil,
+        outcome: AIKitSessionUsageOutcome? = nil
+    ) -> AIKitSessionUsageSummary? {
+        guard var record = taskRecords[turn] else { return nil }
+        guard !record.usageRecordPersisted else { return nil }
         if record.endedAt == nil {
             record.endedAt = Date()
         }
@@ -324,8 +383,17 @@ public actor Orchestrator {
             record.failureReason = failureReason
         }
         record.phase = .idle
+        let resolvedOutcome = outcome
+            ?? (record.failureReason == nil ? .completed : .failed)
+        let summary = record.usageSummary(
+            modelName: (options.model ?? llm.defaultModel ?? ""),
+            providerName: llm.providerName,
+            outcome: resolvedOutcome
+        )
+        record.usageRecordPersisted = true
         taskRecords[turn] = record
         trimCompletedTaskRecords()
+        return summary
     }
 
     private func trimCompletedTaskRecords() {
@@ -363,8 +431,18 @@ public actor Orchestrator {
             inputTokens: record.usage.inputTokens + usage.inputTokens,
             outputTokens: record.usage.outputTokens + usage.outputTokens
         )
+        record.roundTripCount += 1
         taskRecords[turn] = record
         broadcast()
+    }
+
+    private func persistUsage(_ summary: AIKitSessionUsageSummary?) async {
+        guard let summary, let usageRecorder else { return }
+        do {
+            try await usageRecorder.record(summary)
+        } catch {
+            logger.error("Failed to persist AIKit session usage")
+        }
     }
 
     private func appendTaskActivity(_ event: UsageEvent, turn: Int?) {
@@ -387,15 +465,21 @@ public actor Orchestrator {
 
     /// Cancels every in-flight turn and clears any sticky failure, returning
     /// the orchestrator to idle. Safe to call from UI (e.g. a Cancel button).
-    public func cancelActiveTurns() {
+    public func cancelActiveTurns() async {
         for task in turnTasks.values { task.cancel() }
+        var summaries: [AIKitSessionUsageSummary] = []
         for turn in turnTasks.keys {
-            finishTask(turn)
+            if let summary = finishTask(turn, outcome: .cancelled) {
+                summaries.append(summary)
+            }
         }
         turnTasks.removeAll()
         turnPhases.removeAll()
         lastFailureReason = nil
         broadcast()
+        for summary in summaries {
+            await persistUsage(summary)
+        }
     }
 
     /// A live stream of this orchestrator's activity: the current state is
@@ -459,20 +543,29 @@ public actor Orchestrator {
 
     /// Ends a turn: drops its phase and task handle, keeping any sticky
     /// failure so UI can still show it.
-    private func finishTurn(_ turn: Int) {
-        finishTask(turn)
+    private func finishTurn(
+        _ turn: Int,
+        outcome: AIKitSessionUsageOutcome? = nil
+    ) async {
+        let summary = finishTask(turn, outcome: outcome)
         turnPhases[turn] = nil
         turnTasks[turn] = nil
         broadcast()
+        await persistUsage(summary)
     }
 
     /// Records a sticky failure reason for a turn and ends it.
-    private func recordFailure(_ reason: String, turn: Int) {
+    private func recordFailure(
+        _ reason: String,
+        turn: Int,
+        outcome: AIKitSessionUsageOutcome = .failed
+    ) async {
         lastFailureReason = reason
-        finishTask(turn, failureReason: reason)
+        let summary = finishTask(turn, failureReason: reason, outcome: outcome)
         turnPhases[turn] = nil
         turnTasks[turn] = nil
         broadcast()
+        await persistUsage(summary)
     }
 
     private func registerTask(_ task: Task<Void, Never>, turn: Int) {
@@ -515,6 +608,7 @@ public actor Orchestrator {
         memory: any MemoryStore,
         contextResolver: ContextResolver,
         guardrails: PolicyEngine,
+        usageRecorder: (any AIKitSessionUsageRecording)? = nil,
         options: Options = .init()
     ) {
         self.llm = llm
@@ -522,6 +616,7 @@ public actor Orchestrator {
         self.memory = memory
         self.contextResolver = contextResolver
         self.guardrails = guardrails
+        self.usageRecorder = usageRecorder
         self.options = options
     }
 
@@ -550,7 +645,7 @@ public actor Orchestrator {
         emit: @escaping @Sendable (OrchestratorEvent) -> Void
     ) async {
         await loop(instruction, turnID: turnID, emit: emit)
-        finishTurn(turnID)
+        await finishTurn(turnID)
     }
 
     // MARK: - Workflow turns
@@ -614,8 +709,6 @@ public actor Orchestrator {
         turnID: Int,
         emit: @escaping @Sendable (OrchestratorEvent) -> Void
     ) async {
-        defer { finishTurn(turnID) }
-
         let context = await contextResolver.merged()
         let viewID = context.leafID
         setTaskViewID(viewID, turn: turnID)
@@ -627,7 +720,7 @@ public actor Orchestrator {
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .emptyAsNil else {
             let error = LLMError.missingModel
-            recordFailure(errorMessage(error), turn: turnID)
+            await recordFailure(errorMessage(error), turn: turnID)
             emit(.error(error))
             return
         }
@@ -636,7 +729,10 @@ public actor Orchestrator {
         // so the pet pulses for the whole turn. (The runner executes the DAG
         // locally, so there's no per-node phase to forward.)
         setPhase(.thinking, turn: turnID)
-        if Task.isCancelled { return }
+        if Task.isCancelled {
+            await finishTurn(turnID, outcome: .cancelled)
+            return
+        }
 
         let runner = WorkflowTwoRoundRunner(
             llm: llm,
@@ -674,9 +770,14 @@ public actor Orchestrator {
                 )
             }
             emit(.finalAnswer(finalText))
-        case .refused(let reason), .failed(let reason):
+            await finishTurn(turnID)
+        case .refused(let reason):
             await recordActivity(viewID: viewID, kind: .error, text: reason, turn: turnID)
-            recordFailure(reason, turn: turnID)
+            await recordFailure(reason, turn: turnID, outcome: .refused)
+            emit(.failure(reason: reason))
+        case .failed(let reason):
+            await recordActivity(viewID: viewID, kind: .error, text: reason, turn: turnID)
+            await recordFailure(reason, turn: turnID)
             emit(.failure(reason: reason))
         }
     }
@@ -764,10 +865,13 @@ public actor Orchestrator {
         var attempt = 0
 
         for _ in 0..<options.maxIterations {
-            if Task.isCancelled { return }
+            if Task.isCancelled {
+                await finishTurn(turnID, outcome: .cancelled)
+                return
+            }
             if let deadline, ContinuousClock.now >= deadline {
                 let error = TurnDeadlineExceeded(budget: options.maxTurnDuration ?? 0)
-                recordFailure(errorMessage(error), turn: turnID)
+                await recordFailure(errorMessage(error), turn: turnID)
                 emit(.error(error))
                 return
             }
@@ -784,7 +888,7 @@ public actor Orchestrator {
                 let manifest = await tools.manifest(for: context.toolNames)
                 guard let selectedModel = configuredModel else {
                     let error = LLMError.missingModel
-                    recordFailure(errorMessage(error), turn: turnID)
+                    await recordFailure(errorMessage(error), turn: turnID)
                     emit(.error(error))
                     return
                 }
@@ -863,7 +967,7 @@ public actor Orchestrator {
                         )
                     }
                     if let reason = failureReason(in: calls) {
-                        recordFailure(reason, turn: turnID)
+                        await recordFailure(reason, turn: turnID, outcome: .refused)
                         emit(.failure(reason: reason))
                         return
                     }
@@ -881,7 +985,7 @@ public actor Orchestrator {
                         )
                     }
                     if let reason = failureReason(in: calls) {
-                        recordFailure(reason, turn: turnID)
+                        await recordFailure(reason, turn: turnID, outcome: .refused)
                         emit(.failure(reason: reason))
                         return
                     }
@@ -915,7 +1019,14 @@ public actor Orchestrator {
                     return
                 }
                 attempt = 0
+            } catch is CancellationError {
+                await finishTurn(turnID, outcome: .cancelled)
+                return
             } catch {
+                if Task.isCancelled {
+                    await finishTurn(turnID, outcome: .cancelled)
+                    return
+                }
                 attempt += 1
                 let decision = await errorHandler.handle(
                     error, attempt: attempt, policy: options.retry
@@ -925,7 +1036,7 @@ public actor Orchestrator {
                 )
                 switch decision {
                 case .abort(let cause):
-                    recordFailure(errorMessage(cause), turn: turnID)
+                    await recordFailure(errorMessage(cause), turn: turnID)
                     emit(.error(cause))
                     return
                 case .retry:
@@ -937,7 +1048,7 @@ public actor Orchestrator {
             }
         }
         let limitError = IterationLimitExceeded(limit: options.maxIterations)
-        recordFailure(errorMessage(limitError), turn: turnID)
+        await recordFailure(errorMessage(limitError), turn: turnID)
         emit(.error(limitError))
     }
 

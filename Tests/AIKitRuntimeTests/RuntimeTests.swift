@@ -544,7 +544,8 @@ private struct FixedHarvester: ContextHarvesting {
 @Suite struct OrchestratorTests {
     private func makeOrchestrator(
         provider: MockProvider,
-        guardrails: PolicyEngine = PolicyEngine()
+        guardrails: PolicyEngine = PolicyEngine(),
+        usageRecorder: (any AIKitSessionUsageRecording)? = nil
     ) async -> Orchestrator {
         let registry = ToolRegistry()
         await registry.register(NavigateTool { input, _ in
@@ -563,6 +564,7 @@ private struct FixedHarvester: ContextHarvesting {
             memory: InMemoryMemoryStore(),
             contextResolver: resolver,
             guardrails: guardrails,
+            usageRecorder: usageRecorder,
             options: .init(model: "test", stream: false, workflowPlanning: false)
         )
     }
@@ -629,6 +631,46 @@ private struct FixedHarvester: ContextHarvesting {
         #expect(task.activities.contains { $0.kind == .toolInvoked })
         #expect(task.activities.contains { $0.kind == .toolResult })
         #expect(task.activities.contains { $0.kind == .llmResponse })
+    }
+
+    @Test func finishedTurnRecordsSessionUsage() async throws {
+        let provider = MockProvider(responses: [
+            LLMResponse(
+                content: [.toolUse(
+                    id: "t1", name: "navigate",
+                    input: .object(["destination": .string("settings")])
+                )],
+                stopReason: .toolUse,
+                usage: TokenUsage(inputTokens: 10, outputTokens: 2)
+            ),
+            LLMResponse(
+                content: [.text("You're on settings now.")],
+                stopReason: .endTurn,
+                usage: TokenUsage(inputTokens: 5, outputTokens: 7)
+            ),
+        ])
+        let usageStore = InMemorySessionUsageStore()
+        let orchestrator = await makeOrchestrator(
+            provider: provider,
+            usageRecorder: usageStore
+        )
+
+        for try await event in await orchestrator.run("Go to settings") {
+            if case .error(let error) = event {
+                Issue.record("unexpected error: \(error)")
+            }
+        }
+
+        let summaries = await usageStore.all()
+        let summary = try #require(summaries.first)
+        #expect(summaries.count == 1)
+        #expect(summary.taskID.hasPrefix("turn-"))
+        #expect(summary.modelName == "test")
+        #expect(summary.providerName == "MockProvider")
+        #expect(summary.roundTripCount == 2)
+        #expect(summary.messageCount == 2)
+        #expect(summary.usage == TokenUsage(inputTokens: 15, outputTokens: 9))
+        #expect(summary.outcome == .completed)
     }
 
     @Test func runWorkflowTaskHostsTwoRoundAsTrackedTurn() async throws {

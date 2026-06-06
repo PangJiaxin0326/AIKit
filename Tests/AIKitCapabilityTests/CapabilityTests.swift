@@ -251,6 +251,7 @@ private struct EchoTool: Tool {
             endedAt: endedAt,
             durationSeconds: 3.5,
             roundTripCount: 2,
+            messageCount: 4,
             usage: TokenUsage(inputTokens: 120, outputTokens: 34),
             outcome: .completed,
             recordedAt: endedAt
@@ -269,8 +270,49 @@ private struct EchoTool: Tool {
         #expect(fetched.endedAt == endedAt)
         #expect(fetched.durationSeconds == 3.5)
         #expect(fetched.roundTripCount == 2)
+        #expect(fetched.messageCount == 4)
         #expect(fetched.usage == TokenUsage(inputTokens: 120, outputTokens: 34))
         #expect(fetched.totalTokens == 154)
+        #expect(fetched.outcome == .completed)
+    }
+
+    @Test func swiftDataSessionUsageStorePersistsSummary() async throws {
+        let configuration = ModelConfiguration(
+            isStoredInMemoryOnly: true,
+            cloudKitDatabase: .none
+        )
+        let container = try ModelContainer(
+            for: AIKitSessionUsageRecord.self,
+            configurations: configuration
+        )
+        let store = SwiftDataSessionUsageStore(modelContainer: container)
+        let startedAt = Date(timeIntervalSince1970: 1_800_000_000)
+        let endedAt = startedAt.addingTimeInterval(2)
+        let id = UUID()
+
+        try await store.record(AIKitSessionUsageSummary(
+            id: id,
+            taskID: "turn-1",
+            modelName: "gpt-5",
+            providerName: "openai",
+            startedAt: startedAt,
+            endedAt: endedAt,
+            durationSeconds: 2,
+            roundTripCount: 1,
+            messageCount: 2,
+            usage: TokenUsage(inputTokens: 10, outputTokens: 5),
+            outcome: .completed,
+            recordedAt: endedAt
+        ))
+
+        let context = ModelContext(container)
+        let fetched = try #require(context.fetch(
+            FetchDescriptor<AIKitSessionUsageRecord>()
+        ).first)
+        #expect(fetched.id == id)
+        #expect(fetched.taskID == "turn-1")
+        #expect(fetched.messageCount == 2)
+        #expect(fetched.usage == TokenUsage(inputTokens: 10, outputTokens: 5))
         #expect(fetched.outcome == .completed)
     }
 }

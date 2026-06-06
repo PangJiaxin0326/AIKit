@@ -16,6 +16,9 @@ public struct LLMClient: Sendable {
     /// The latest model list stored in the provider configuration.
     public var availableModels: [String] { provider.configuration.availableModels }
 
+    /// Human-readable provider type for runtime telemetry and usage records.
+    public var providerName: String { String(describing: type(of: provider)) }
+
     /// Whether the underlying provider speaks a native function-calling
     /// protocol. The Runtime uses this to decide whether to inject the fenced
     /// tool-call fallback when `Options.toolCallFallback` is left unset.

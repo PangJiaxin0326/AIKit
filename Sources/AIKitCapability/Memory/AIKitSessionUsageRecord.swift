@@ -27,6 +27,7 @@ public final class AIKitSessionUsageRecord {
     public var endedAt: Date?
     public var durationSeconds: TimeInterval = 0
     public var roundTripCount: Int = 0
+    public var messageCount: Int = 0
     public var inputTokens: Int = 0
     public var outputTokens: Int = 0
     public var outcomeRawValue: String = AIKitSessionUsageOutcome.completed.rawValue
@@ -41,6 +42,7 @@ public final class AIKitSessionUsageRecord {
         endedAt: Date? = nil,
         durationSeconds: TimeInterval,
         roundTripCount: Int,
+        messageCount: Int = 0,
         inputTokens: Int,
         outputTokens: Int,
         outcome: AIKitSessionUsageOutcome = .completed,
@@ -54,6 +56,7 @@ public final class AIKitSessionUsageRecord {
         self.endedAt = endedAt
         self.durationSeconds = max(0, durationSeconds)
         self.roundTripCount = max(0, roundTripCount)
+        self.messageCount = max(0, messageCount)
         self.inputTokens = max(0, inputTokens)
         self.outputTokens = max(0, outputTokens)
         self.outcomeRawValue = outcome.rawValue
@@ -69,6 +72,7 @@ public final class AIKitSessionUsageRecord {
         endedAt: Date? = nil,
         durationSeconds: TimeInterval,
         roundTripCount: Int,
+        messageCount: Int = 0,
         usage: TokenUsage,
         outcome: AIKitSessionUsageOutcome = .completed,
         recordedAt: Date = Date()
@@ -82,6 +86,7 @@ public final class AIKitSessionUsageRecord {
             endedAt: endedAt,
             durationSeconds: durationSeconds,
             roundTripCount: roundTripCount,
+            messageCount: messageCount,
             inputTokens: usage.inputTokens,
             outputTokens: usage.outputTokens,
             outcome: outcome,
