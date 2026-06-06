@@ -5,7 +5,7 @@
 @_exported import AIKitUI
 
 /// AIKit umbrella. Importing `AIKit` re-exports the full public surface of
-/// every sub-module. See `GUIDE.md` for architecture.
+/// every sub-module. See `README.md` for architecture.
 public enum AIKit {
     public static let version = "1.0.0"
 }
