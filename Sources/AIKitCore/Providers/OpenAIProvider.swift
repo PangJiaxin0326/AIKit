@@ -13,6 +13,8 @@ public struct OpenAIProvider: LLMProvider {
     public static let defaultBaseURL = AIKitProviderDefaults.openAIBaseURL
     public static let defaultChatCompletionsPath = AIKitProviderDefaults.openAIChatCompletionsPath
 
+    public var providerName: String { AIKitProviderKind.openAI.definition.displayName }
+
     public let configuration: LLMProviderConfiguration
     /// Relative or absolute endpoint for Chat Completions-compatible requests.
     ///

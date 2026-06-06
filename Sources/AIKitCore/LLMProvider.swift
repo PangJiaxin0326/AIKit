@@ -58,6 +58,11 @@ public protocol LLMProvider: Sendable {
     /// and the latest fetched model list.
     var configuration: LLMProviderConfiguration { get }
 
+    /// Stable, human-readable provider label for telemetry and usage records.
+    /// Wrappers should forward or override this so hosts do not leak adapter
+    /// type names into persisted history.
+    var providerName: String { get }
+
     /// Whether the Runtime can rely on native function calling for **every**
     /// model this provider serves.
     ///
@@ -85,6 +90,8 @@ public protocol LLMProvider: Sendable {
 
 public extension LLMProvider {
     var supportsNativeTools: Bool { true }
+
+    var providerName: String { String(describing: Self.self) }
 }
 
 /// Merges provider-specific `extraBody` keys into an already-encoded request

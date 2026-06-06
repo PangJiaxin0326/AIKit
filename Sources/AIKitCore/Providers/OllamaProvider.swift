@@ -14,6 +14,8 @@ import AIToolKit
 public struct OllamaProvider: LLMProvider {
     public static let defaultBaseURL = AIKitProviderDefaults.ollamaBaseURL
 
+    public var providerName: String { AIKitProviderKind.ollama.definition.displayName }
+
     public let configuration: LLMProviderConfiguration
 
     /// Ollama tool support is a property of the *model*, not the endpoint:

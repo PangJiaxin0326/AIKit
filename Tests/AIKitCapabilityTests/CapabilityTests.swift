@@ -276,6 +276,29 @@ private struct EchoTool: Tool {
         #expect(fetched.outcome == .completed)
     }
 
+    @Test func sessionUsageRecordClampsTokenAccessors() {
+        let record = AIKitSessionUsageRecord(
+            taskID: "task-123",
+            modelName: "gpt-5",
+            durationSeconds: 1,
+            roundTripCount: 1,
+            inputTokens: 1,
+            outputTokens: 2
+        )
+
+        record.inputTokens = -10
+        record.outputTokens = -20
+
+        #expect(record.usage == .zero)
+        #expect(record.totalTokens == 0)
+
+        record.usage = TokenUsage(inputTokens: -30, outputTokens: 40)
+
+        #expect(record.inputTokens == 0)
+        #expect(record.outputTokens == 40)
+        #expect(record.totalTokens == 40)
+    }
+
     @Test func swiftDataSessionUsageStorePersistsSummary() async throws {
         let configuration = ModelConfiguration(
             isStoredInMemoryOnly: true,

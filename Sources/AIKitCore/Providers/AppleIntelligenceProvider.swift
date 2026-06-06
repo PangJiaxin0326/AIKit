@@ -13,6 +13,10 @@ import FoundationModels
 /// fenced-```tool``` fallback so the runtime can continue to dispatch tools
 /// through the registry without a second adapter layer.
 public struct AppleIntelligenceProvider: LLMProvider {
+    public var providerName: String {
+        AIKitProviderKind.appleIntelligence.definition.displayName
+    }
+
     public let configuration: LLMProviderConfiguration
 
     public var supportsNativeTools: Bool { false }

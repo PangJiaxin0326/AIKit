@@ -6,6 +6,8 @@ public struct AnthropicProvider: LLMProvider {
     public static let defaultBaseURL = AIKitProviderDefaults.anthropicBaseURL
     public static let apiVersion = AIKitProviderDefaults.anthropicAPIVersion
 
+    public var providerName: String { AIKitProviderKind.anthropic.definition.displayName }
+
     public let configuration: LLMProviderConfiguration
 
     public init(configuration: LLMProviderConfiguration) {

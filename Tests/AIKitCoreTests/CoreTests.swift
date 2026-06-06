@@ -153,6 +153,16 @@ import AIKitTestSupport
         #expect(OpenAIProvider(apiKey: "k").supportsNativeTools == true)
     }
 
+    @Test func providerNamesAreStableDisplayLabels() {
+        #expect(LLMClient(provider: OpenAIProvider(apiKey: "k")).providerName == "OpenAI")
+        #expect(LLMClient(provider: AnthropicProvider(apiKey: "k")).providerName == "Anthropic")
+        #expect(LLMClient(provider: OllamaProvider()).providerName == "Ollama")
+        #expect(
+            LLMClient(provider: AppleIntelligenceProvider()).providerName ==
+            "Apple Intelligence"
+        )
+    }
+
     @Test func appleIntelligencePromptIncludesToolManifest() {
         let request = LLMRequest(
             model: "apple-intelligence",

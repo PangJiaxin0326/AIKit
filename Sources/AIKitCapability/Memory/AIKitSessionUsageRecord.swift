@@ -17,7 +17,9 @@ public enum AIKitSessionUsageOutcome: String, Codable, Sendable, Hashable {
 /// to a task model, so usage history can remain after task details are deleted.
 @Model
 public final class AIKitSessionUsageRecord {
-    #Index<AIKitSessionUsageRecord>([\.taskID], [\.startedAt], [\.modelName])
+    #Index<AIKitSessionUsageRecord>(
+        [\.id], [\.taskID], [\.startedAt], [\.modelName], [\.recordedAt]
+    )
 
     public var id: UUID = UUID()
     public var taskID: String = ""
@@ -96,7 +98,10 @@ public final class AIKitSessionUsageRecord {
 
     public var usage: TokenUsage {
         get {
-            TokenUsage(inputTokens: inputTokens, outputTokens: outputTokens)
+            TokenUsage(
+                inputTokens: max(0, inputTokens),
+                outputTokens: max(0, outputTokens)
+            )
         }
         set {
             inputTokens = max(0, newValue.inputTokens)
@@ -114,6 +119,6 @@ public final class AIKitSessionUsageRecord {
     }
 
     public var totalTokens: Int {
-        inputTokens + outputTokens
+        max(0, inputTokens) + max(0, outputTokens)
     }
 }
