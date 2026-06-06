@@ -47,7 +47,7 @@ public actor ErrorHandler {
             }
             let delay = policy.backoff.delay(forAttempt: attempt)
             if delay > 0 {
-                try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                try? await Task.sleep(for: .seconds(delay))
             }
             if category == .toolRetriable {
                 let message = (error as? any ToolError).map { "\($0)" } ?? "\(error)"
