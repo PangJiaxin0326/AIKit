@@ -29,7 +29,7 @@ struct AIKitContextLifecycleModifier: ViewModifier {
                     // immediately on cancel regardless of the duration. The
                     // bounded interval just avoids any deadline overflow.
                     while true {
-                        try await Task.sleep(nanoseconds: 3_600_000_000_000)
+                        try await Task.sleep(for: .seconds(3600))
                     }
                 } catch {
                     await resolver.pop(token)
