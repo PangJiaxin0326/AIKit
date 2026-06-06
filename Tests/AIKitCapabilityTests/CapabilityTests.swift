@@ -1,4 +1,5 @@
 import Foundation
+import SwiftData
 import Testing
 @testable import AIKitCapability
 import AIKitCore
@@ -228,6 +229,49 @@ private struct EchoTool: Tool {
         let remaining = try await store.recent(limit: 10, view: .init("home"))
         #expect(remaining.map(\.id) == [keep.id])
         #expect(try await store.search(query: "forget", limit: 10).isEmpty)
+    }
+
+    @Test func sessionUsageRecordPersistsTaskIndependentStats() throws {
+        let configuration = ModelConfiguration(
+            isStoredInMemoryOnly: true,
+            cloudKitDatabase: .none
+        )
+        let container = try ModelContainer(
+            for: AIKitSessionUsageRecord.self,
+            configurations: configuration
+        )
+        let context = ModelContext(container)
+        let startedAt = Date(timeIntervalSince1970: 1_800_000_000)
+        let endedAt = startedAt.addingTimeInterval(3.5)
+        let record = AIKitSessionUsageRecord(
+            taskID: "task-123",
+            modelName: "gpt-5",
+            providerName: "openai",
+            startedAt: startedAt,
+            endedAt: endedAt,
+            durationSeconds: 3.5,
+            roundTripCount: 2,
+            usage: TokenUsage(inputTokens: 120, outputTokens: 34),
+            outcome: .completed,
+            recordedAt: endedAt
+        )
+
+        context.insert(record)
+        try context.save()
+
+        let fetched = try #require(context.fetch(
+            FetchDescriptor<AIKitSessionUsageRecord>()
+        ).first)
+        #expect(fetched.taskID == "task-123")
+        #expect(fetched.modelName == "gpt-5")
+        #expect(fetched.providerName == "openai")
+        #expect(fetched.startedAt == startedAt)
+        #expect(fetched.endedAt == endedAt)
+        #expect(fetched.durationSeconds == 3.5)
+        #expect(fetched.roundTripCount == 2)
+        #expect(fetched.usage == TokenUsage(inputTokens: 120, outputTokens: 34))
+        #expect(fetched.totalTokens == 154)
+        #expect(fetched.outcome == .completed)
     }
 }
 
