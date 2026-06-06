@@ -161,8 +161,7 @@ transcription service.
 The **Orchestrator** is the only stateful runtime component. Everything else is
 a pure function or an actor owning a small slice of state. One `run(_:)` call is
 one turn: it may loop through several LLM↔tool iterations, with guardrails run
-at four stages (`prePrompt`, `preToolUse`, `postToolUse`, `finalResult`). See
-`GUIDE.md` for the full design.
+at four stages (`prePrompt`, `preToolUse`, `postToolUse`, `finalResult`).
 
 For low-latency mobile agents, AIKit also supports AIToolKit `WorkflowSpec`:
 the model can emit one topological JSON DAG containing multiple ordered or
@@ -195,8 +194,9 @@ The current best-practice configuration — reproducible with no host context:
 - **Tier-matched structured output, planner only.** A *strong* planner runs
   freeform (≈0 malformed JSON); a *weak/mid* planner sets
   `useStructuredPlannerOutput: true` (the json_schema makes the nested-`$ref`
-  malformed shape unrepresentable). Keep `useStructuredBinderOutput: false` — a
-  strict schema tempts the binder to mutate the graph.
+  malformed shape unrepresentable). The binder round is always freeform (there
+  is no binder structured-output knob) — a strict schema there only tempts the
+  binder to mutate the graph.
 - **String-aware, brace-balanced JSON extraction (built in).** Weak planners on
   the `{{slot}}` authoring path append a stray `}` (the `{{ }}` token in a body
   string mis-counts their braces); `extractJSONObject` scans string-aware and

@@ -1599,10 +1599,6 @@ struct AssistantChatbotOverlay<DetailContent: View>: View {
         input.sendCurrentText(activity: activity)
     }
 
-    private func sendCapsuleText(_ rawText: String) {
-        input.sendText(rawText, activity: activity)
-    }
-
     private var overlayContext: AIKitOverlayContext {
         AIKitOverlayContext(snapshot: snapshot)
     }
