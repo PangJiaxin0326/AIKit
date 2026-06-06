@@ -5,18 +5,18 @@ import AIKitCore
 /// Sendable task-level usage aggregate emitted by the runtime when a session
 /// finishes. The SwiftData model stays inside `SwiftDataSessionUsageStore`.
 public struct AIKitSessionUsageSummary: Sendable, Hashable, Codable {
-    public var id: UUID
-    public var taskID: String
-    public var modelName: String
-    public var providerName: String?
-    public var startedAt: Date
-    public var endedAt: Date?
-    public var durationSeconds: TimeInterval
-    public var roundTripCount: Int
-    public var messageCount: Int
-    public var usage: TokenUsage
-    public var outcome: AIKitSessionUsageOutcome
-    public var recordedAt: Date
+    public let id: UUID
+    public let taskID: String
+    public let modelName: String
+    public let providerName: String?
+    public let startedAt: Date
+    public let endedAt: Date?
+    public let durationSeconds: TimeInterval
+    public let roundTripCount: Int
+    public let messageCount: Int
+    public let usage: TokenUsage
+    public let outcome: AIKitSessionUsageOutcome
+    public let recordedAt: Date
 
     public init(
         id: UUID = UUID(),
@@ -104,21 +104,5 @@ public actor SwiftDataSessionUsageStore: AIKitSessionUsageRecording {
         record.usage = summary.usage
         record.outcome = summary.outcome
         record.recordedAt = summary.recordedAt
-    }
-}
-
-/// Lightweight recorder for runtime tests and hosts that want to observe
-/// usage summaries without SwiftData.
-public actor InMemorySessionUsageStore: AIKitSessionUsageRecording {
-    private var summaries: [AIKitSessionUsageSummary] = []
-
-    public init() {}
-
-    public func record(_ summary: AIKitSessionUsageSummary) async throws {
-        summaries.append(summary)
-    }
-
-    public func all() -> [AIKitSessionUsageSummary] {
-        summaries
     }
 }

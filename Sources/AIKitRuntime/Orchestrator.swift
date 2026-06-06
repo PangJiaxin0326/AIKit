@@ -176,7 +176,6 @@ private struct OrchestratorTaskRecord: Sendable {
     var usage = TokenUsage.zero
     var roundTripCount = 0
     var activities: [UsageEvent] = []
-    var usageRecordPersisted = false
 
     var snapshot: OrchestratorTaskSnapshot {
         OrchestratorTaskSnapshot(
@@ -335,6 +334,10 @@ public actor Orchestrator {
     private var turnTasks: [Int: Task<Void, Never>] = [:]
     /// Per-turn activity ledgers backing the overlay's task-grouped history.
     private var taskRecords: [Int: OrchestratorTaskRecord] = [:]
+    /// Turn ids whose durable usage summary has already been created. Kept
+    /// outside `OrchestratorTaskRecord` so UI task snapshots remain pure view
+    /// state and persistence finalization stays runtime-owned.
+    private var finalizedUsageTurns: Set<Int> = []
     private let maxTrackedCompletedTasks = 24
     /// Sticky reason from the last failed turn; cleared when a new turn
     /// starts or `cancelActiveTurns()` is called.
@@ -375,7 +378,7 @@ public actor Orchestrator {
         outcome: AIKitSessionUsageOutcome? = nil
     ) -> AIKitSessionUsageSummary? {
         guard var record = taskRecords[turn] else { return nil }
-        guard !record.usageRecordPersisted else { return nil }
+        guard finalizedUsageTurns.insert(turn).inserted else { return nil }
         if record.endedAt == nil {
             record.endedAt = Date()
         }
@@ -390,7 +393,6 @@ public actor Orchestrator {
             providerName: llm.providerName,
             outcome: resolvedOutcome
         )
-        record.usageRecordPersisted = true
         taskRecords[turn] = record
         trimCompletedTaskRecords()
         return summary
@@ -402,6 +404,7 @@ public actor Orchestrator {
             .sorted { $0.startedAt > $1.startedAt }
         for record in completed.dropFirst(maxTrackedCompletedTasks) {
             taskRecords[record.id] = nil
+            finalizedUsageTurns.remove(record.id)
         }
     }
 
@@ -755,6 +758,10 @@ public actor Orchestrator {
         )
 
         let result = await runner.run(intent: intent)
+        if Task.isCancelled {
+            await finishTurn(turnID, outcome: .cancelled)
+            return
+        }
         for call in result.calls {
             addUsage(call.usage, turn: turnID)
             emit(.usage(call.usage))

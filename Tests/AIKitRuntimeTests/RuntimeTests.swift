@@ -543,7 +543,7 @@ private struct FixedHarvester: ContextHarvesting {
 
 @Suite struct OrchestratorTests {
     private func makeOrchestrator(
-        provider: MockProvider,
+        provider: any LLMProvider,
         guardrails: PolicyEngine = PolicyEngine(),
         usageRecorder: (any AIKitSessionUsageRecording)? = nil
     ) async -> Orchestrator {
@@ -671,6 +671,34 @@ private struct FixedHarvester: ContextHarvesting {
         #expect(summary.messageCount == 2)
         #expect(summary.usage == TokenUsage(inputTokens: 15, outputTokens: 9))
         #expect(summary.outcome == .completed)
+    }
+
+    @Test func cancelledTurnRecordsSessionUsageOnce() async throws {
+        let usageStore = InMemorySessionUsageStore()
+        let orchestrator = await makeOrchestrator(
+            provider: SlowProvider(delay: .seconds(5)),
+            usageRecorder: usageStore
+        )
+
+        let stream = await orchestrator.run("Go to settings")
+        let drainTask = Task {
+            for try await event in stream {
+                if case .error(let error) = event {
+                    Issue.record("unexpected error: \(error)")
+                }
+            }
+        }
+        try await Task.sleep(for: .milliseconds(50))
+        await orchestrator.cancelActiveTurns()
+        try await drainTask.value
+
+        let summaries = await usageStore.all()
+        let summary = try #require(summaries.first)
+        #expect(summaries.count == 1)
+        #expect(summary.outcome == .cancelled)
+        #expect(summary.messageCount == 1)
+        #expect(summary.roundTripCount == 0)
+        #expect(summary.usage == .zero)
     }
 
     @Test func runWorkflowTaskHostsTwoRoundAsTrackedTurn() async throws {

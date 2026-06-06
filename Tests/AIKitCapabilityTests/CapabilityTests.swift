@@ -315,6 +315,62 @@ private struct EchoTool: Tool {
         #expect(fetched.usage == TokenUsage(inputTokens: 10, outputTokens: 5))
         #expect(fetched.outcome == .completed)
     }
+
+    @Test func swiftDataSessionUsageStoreUpsertsSummaryByID() async throws {
+        let configuration = ModelConfiguration(
+            isStoredInMemoryOnly: true,
+            cloudKitDatabase: .none
+        )
+        let container = try ModelContainer(
+            for: AIKitSessionUsageRecord.self,
+            configurations: configuration
+        )
+        let store = SwiftDataSessionUsageStore(modelContainer: container)
+        let id = UUID()
+        let startedAt = Date(timeIntervalSince1970: 1_800_000_000)
+        let endedAt = startedAt.addingTimeInterval(2)
+
+        try await store.record(AIKitSessionUsageSummary(
+            id: id,
+            taskID: "turn-1",
+            modelName: "gpt-5",
+            providerName: "openai",
+            startedAt: startedAt,
+            endedAt: endedAt,
+            durationSeconds: 2,
+            roundTripCount: 1,
+            messageCount: 2,
+            usage: TokenUsage(inputTokens: 10, outputTokens: 5),
+            outcome: .completed,
+            recordedAt: endedAt
+        ))
+        try await store.record(AIKitSessionUsageSummary(
+            id: id,
+            taskID: "turn-1",
+            modelName: "gpt-5.1",
+            providerName: "openai",
+            startedAt: startedAt,
+            endedAt: endedAt.addingTimeInterval(1),
+            durationSeconds: 3,
+            roundTripCount: 2,
+            messageCount: 3,
+            usage: TokenUsage(inputTokens: 20, outputTokens: 8),
+            outcome: .failed,
+            recordedAt: endedAt.addingTimeInterval(1)
+        ))
+
+        let context = ModelContext(container)
+        let records = try context.fetch(FetchDescriptor<AIKitSessionUsageRecord>())
+        let fetched = try #require(records.first)
+        #expect(records.count == 1)
+        #expect(fetched.id == id)
+        #expect(fetched.modelName == "gpt-5.1")
+        #expect(fetched.durationSeconds == 3)
+        #expect(fetched.roundTripCount == 2)
+        #expect(fetched.messageCount == 3)
+        #expect(fetched.usage == TokenUsage(inputTokens: 20, outputTokens: 8))
+        #expect(fetched.outcome == .failed)
+    }
 }
 
 @Suite struct AIKitConfigurationToolTests {
