@@ -526,7 +526,7 @@ private struct AIKitSearchTabSelectionInterceptor: UIViewControllerRepresentable
 
         private static let searchAuxiliaryClassNameFragment = "UITabBarAuxiliaryView"
         private static let maxInstallAttempts = 20
-        private static let installRetryDelayNanos: UInt64 = 50_000_000
+        private static let installRetryDelay: Duration = .milliseconds(50)
 
         deinit {
             installTask?.cancel()
@@ -565,7 +565,7 @@ private struct AIKitSearchTabSelectionInterceptor: UIViewControllerRepresentable
                     if installInterceptorIfPossible() {
                         return
                     }
-                    try? await Task.sleep(nanoseconds: Self.installRetryDelayNanos)
+                    try? await Task.sleep(for: Self.installRetryDelay)
                 }
             }
         }
