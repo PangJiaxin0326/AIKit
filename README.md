@@ -21,7 +21,7 @@ MultiModalKit voice input.
 ## Install
 
 ```swift
-.package(url: "https://example.com/AIKit.git", from: "1.0.0")
+.package(url: "https://github.com/PangJiaxin0326/AIKit.git", branch: "main")
 ```
 
 Add the `AIKit` product to your target.
