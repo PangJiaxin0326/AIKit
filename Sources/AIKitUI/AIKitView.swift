@@ -1005,19 +1005,19 @@ public struct AIKitView: View {
             }
 
             LabeledContent("Timeout") {
-                TextField("Seconds", text: optionalDoubleBinding(\.core.timeout))
+                TextField("Seconds", text: optionalNumberBinding(\.core.timeout))
                     .multilineTextAlignment(.trailing)
                     .aiKitFieldStyle()
             }
             .aiKitTextFieldRowStyle()
             LabeledContent("Temperature") {
-                TextField("Default", text: optionalDoubleBinding(\.core.temperature))
+                TextField("Default", text: optionalNumberBinding(\.core.temperature))
                     .multilineTextAlignment(.trailing)
                     .aiKitFieldStyle()
             }
             .aiKitTextFieldRowStyle()
             LabeledContent("Max tokens") {
-                TextField("Default", text: optionalIntBinding(\.core.maxTokens))
+                TextField("Default", text: optionalNumberBinding(\.core.maxTokens))
                     .multilineTextAlignment(.trailing)
                     .aiKitFieldStyle()
             }
@@ -1102,7 +1102,7 @@ public struct AIKitView: View {
                 )
             }
             LabeledContent("Turn budget") {
-                TextField("Seconds", text: optionalDoubleBinding(\.runtime.maxTurnDuration))
+                TextField("Seconds", text: optionalNumberBinding(\.runtime.maxTurnDuration))
                     .multilineTextAlignment(.trailing)
                     .aiKitFieldStyle()
             }
@@ -1128,7 +1128,7 @@ public struct AIKitView: View {
             Toggle("PII redaction", isOn: binding(\.safety.piiRedactionEnabled))
             Toggle("Injection sniffing", isOn: binding(\.safety.injectionSniffingEnabled))
             LabeledContent("Output cap") {
-                TextField("Characters", text: optionalIntBinding(\.safety.outputLengthLimit))
+                TextField("Characters", text: optionalNumberBinding(\.safety.outputLengthLimit))
                     .multilineTextAlignment(.trailing)
                     .aiKitFieldStyle()
             }
@@ -1239,27 +1239,15 @@ public struct AIKitView: View {
         )
     }
 
-    private func optionalDoubleBinding(
-        _ keyPath: WritableKeyPath<AIKitConfiguration, Double?>
+    /// A text binding for an optional numeric config field: shows the value's
+    /// string form (empty when unset) and writes back the parsed value, or
+    /// `nil` when the text doesn't parse (empty field ⇒ "use the default").
+    private func optionalNumberBinding<Value: LosslessStringConvertible>(
+        _ keyPath: WritableKeyPath<AIKitConfiguration, Value?>
     ) -> Binding<String> {
         Binding(
-            get: {
-                guard let value = model.configuration[keyPath: keyPath] else { return "" }
-                return String(value)
-            },
-            set: { model.update(keyPath, to: Double($0)) }
-        )
-    }
-
-    private func optionalIntBinding(
-        _ keyPath: WritableKeyPath<AIKitConfiguration, Int?>
-    ) -> Binding<String> {
-        Binding(
-            get: {
-                guard let value = model.configuration[keyPath: keyPath] else { return "" }
-                return String(value)
-            },
-            set: { model.update(keyPath, to: Int($0)) }
+            get: { model.configuration[keyPath: keyPath]?.description ?? "" },
+            set: { model.update(keyPath, to: Value($0)) }
         )
     }
 
