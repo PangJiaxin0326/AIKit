@@ -17,16 +17,14 @@ public enum AIKitChatbotOverlayMode: Sendable {
 ///   capsule: a tap starts listening, silence fires the AI turn, and the
 ///   assistant speaks back when it needs a follow-up.
 public struct AIKitChatbotOverlay<DetailContent: View>: View {
-    public typealias Mode = AIKitChatbotOverlayMode
-
     private let orchestrator: Orchestrator
-    private let mode: Mode
+    private let mode: AIKitChatbotOverlayMode
     private let detailContent: @MainActor (AIKitOverlayContext) -> DetailContent
 
     @MainActor
     public init(
         orchestrator: Orchestrator,
-        mode: Mode = .assistant
+        mode: AIKitChatbotOverlayMode = .assistant
     ) where DetailContent == EmptyView {
         self.orchestrator = orchestrator
         self.mode = mode
@@ -36,7 +34,7 @@ public struct AIKitChatbotOverlay<DetailContent: View>: View {
     @MainActor
     public init(
         orchestrator: Orchestrator,
-        mode: Mode = .assistant,
+        mode: AIKitChatbotOverlayMode = .assistant,
         @ViewBuilder detailContent: @escaping @MainActor (AIKitOverlayContext) -> DetailContent
     ) {
         self.orchestrator = orchestrator

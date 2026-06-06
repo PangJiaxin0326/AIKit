@@ -463,17 +463,16 @@ private struct EchoTool: Tool {
         #expect(configuration.runtime.leanWorkflowSchema)
         #expect(configuration.runtime.twoRoundAutoBind)
         #expect(configuration.runtime.twoRoundStructuredPlannerOutput == false)
-        #expect(configuration.runtime.twoRoundStructuredBinderOutput == false)
     }
 
     @Test func runtimeDecodesMissingWorkflowFieldsWithDefaults() throws {
-        let data = """
+        let data = Data("""
         {
           "streamsResponses": false,
           "maxIterations": 3,
           "toolCallFallback": "automatic"
         }
-        """.data(using: .utf8)!
+        """.utf8)
 
         let runtime = try JSONDecoder().decode(AIKitConfiguration.Runtime.self, from: data)
 
@@ -483,7 +482,22 @@ private struct EchoTool: Tool {
         #expect(runtime.leanWorkflowSchema)
         #expect(runtime.twoRoundAutoBind)
         #expect(runtime.twoRoundStructuredPlannerOutput == false)
-        #expect(runtime.twoRoundStructuredBinderOutput == false)
+    }
+
+    @Test func runtimeDropsRemovedStructuredBinderField() throws {
+        let data = Data("""
+        {
+          "streamsResponses": true,
+          "twoRoundStructuredBinderOutput": true
+        }
+        """.utf8)
+
+        let runtime = try JSONDecoder().decode(AIKitConfiguration.Runtime.self, from: data)
+        let encodedData = try JSONEncoder().encode(runtime)
+        let encoded = try #require(String(data: encodedData, encoding: .utf8))
+
+        #expect(runtime.streamsResponses)
+        #expect(encoded.contains("twoRoundStructuredBinderOutput") == false)
     }
 
     @Test func configurationStoreAcceptsWorkflowRuntimeUpdates() async throws {

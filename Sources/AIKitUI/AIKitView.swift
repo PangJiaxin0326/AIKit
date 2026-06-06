@@ -1945,8 +1945,6 @@ struct AssistantChatbotOverlay<DetailContent: View>: View {
     }
 }
 
-public typealias ChatbotOverlay<DetailContent: View> = AIKitChatbotOverlay<DetailContent>
-
 public extension View {
     func aiChatbotOverlay(
         orchestrator: Orchestrator,

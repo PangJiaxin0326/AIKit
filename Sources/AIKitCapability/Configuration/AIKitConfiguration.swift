@@ -237,10 +237,6 @@ public struct AIKitConfiguration: Codable, Sendable, Hashable {
         public var leanWorkflowSchema: Bool
         public var twoRoundAutoBind: Bool
         public var twoRoundStructuredPlannerOutput: Bool
-        /// Legacy persisted setting kept for configuration compatibility. The
-        /// v2.1 two-round runner always keeps the Binder freeform and does not
-        /// read this value.
-        public var twoRoundStructuredBinderOutput: Bool
 
         private enum CodingKeys: String, CodingKey {
             case streamsResponses
@@ -251,7 +247,6 @@ public struct AIKitConfiguration: Codable, Sendable, Hashable {
             case leanWorkflowSchema
             case twoRoundAutoBind
             case twoRoundStructuredPlannerOutput
-            case twoRoundStructuredBinderOutput
         }
 
         public init(
@@ -262,8 +257,7 @@ public struct AIKitConfiguration: Codable, Sendable, Hashable {
             workflowPlanning: Bool = true,
             leanWorkflowSchema: Bool = true,
             twoRoundAutoBind: Bool = true,
-            twoRoundStructuredPlannerOutput: Bool = false,
-            twoRoundStructuredBinderOutput: Bool = false
+            twoRoundStructuredPlannerOutput: Bool = false
         ) {
             self.streamsResponses = streamsResponses
             self.maxIterations = maxIterations
@@ -273,7 +267,6 @@ public struct AIKitConfiguration: Codable, Sendable, Hashable {
             self.leanWorkflowSchema = leanWorkflowSchema
             self.twoRoundAutoBind = twoRoundAutoBind
             self.twoRoundStructuredPlannerOutput = twoRoundStructuredPlannerOutput
-            self.twoRoundStructuredBinderOutput = twoRoundStructuredBinderOutput
         }
 
         public init(from decoder: any Decoder) throws {
@@ -310,10 +303,6 @@ public struct AIKitConfiguration: Codable, Sendable, Hashable {
                 Bool.self,
                 forKey: .twoRoundStructuredPlannerOutput
             ) ?? false
-            self.twoRoundStructuredBinderOutput = try container.decodeIfPresent(
-                Bool.self,
-                forKey: .twoRoundStructuredBinderOutput
-            ) ?? false
         }
 
         public func encode(to encoder: any Encoder) throws {
@@ -328,10 +317,6 @@ public struct AIKitConfiguration: Codable, Sendable, Hashable {
             try container.encode(
                 twoRoundStructuredPlannerOutput,
                 forKey: .twoRoundStructuredPlannerOutput
-            )
-            try container.encode(
-                twoRoundStructuredBinderOutput,
-                forKey: .twoRoundStructuredBinderOutput
             )
         }
     }
@@ -585,10 +570,6 @@ extension AIKitConfiguration {
             runtime.twoRoundAutoBind = try value.bool(section: .runtime, key: originalKey)
         case "tworoundstructuredplanner", "tworoundstructuredplanneroutput", "structuredplanneroutput":
             runtime.twoRoundStructuredPlannerOutput = try value.bool(section: .runtime, key: originalKey)
-        case "tworoundstructuredbinder", "tworoundstructuredbinderoutput", "structuredbinderoutput":
-            // Accepted for older configuration payloads; the v2.1 runner never
-            // reads this value because the Binder is always freeform.
-            runtime.twoRoundStructuredBinderOutput = try value.bool(section: .runtime, key: originalKey)
         default:
             throw AIKitConfigurationError.unknownKey(section: .runtime, key: originalKey)
         }
