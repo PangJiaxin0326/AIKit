@@ -1925,3 +1925,109 @@ private struct SlowGuardrail: Guardrail {
         #expect(ContinuousClock.now - start < .seconds(3))
     }
 }
+
+/// Unit coverage for the string-aware JSON extraction the two-round runner
+/// relies on. The runner's integration tests only feed it clean JSON; these
+/// pin the documented edge cases — code fences, a stray trailing brace from a
+/// weak model's `{{slot}}` brace miscount, and `{{label}}` tokens inside string
+/// values — that the scanner exists to survive.
+@Suite struct WorkflowJSONExtractionTests {
+    // MARK: firstBalancedObject
+
+    @Test func returnsWholeObject() {
+        #expect(WorkflowTwoRoundRunner.firstBalancedObject(in: #"{"a":1}"#) == #"{"a":1}"#)
+    }
+
+    @Test func dropsStrayTrailingBrace() {
+        // Weak planners on the {{slot}} authoring path append an extra "}".
+        #expect(WorkflowTwoRoundRunner.firstBalancedObject(in: #"{"a":1}}"#) == #"{"a":1}"#)
+    }
+
+    @Test func ignoresBracesInsideStrings() {
+        let input = #"{"body":"Hi {{name}}!"}"#
+        #expect(WorkflowTwoRoundRunner.firstBalancedObject(in: input) == input)
+    }
+
+    @Test func honoursEscapedQuotes() {
+        let input = #"{"a":"say \"hi\""}"#
+        #expect(WorkflowTwoRoundRunner.firstBalancedObject(in: input) == input)
+    }
+
+    @Test func skipsLeadingProse() {
+        #expect(WorkflowTwoRoundRunner.firstBalancedObject(in: #"sure: {"a":1} done"#) == #"{"a":1}"#)
+    }
+
+    @Test func handlesNesting() {
+        let input = #"{"a":{"b":2}}"#
+        #expect(WorkflowTwoRoundRunner.firstBalancedObject(in: input) == input)
+    }
+
+    @Test func returnsNilWithoutBraces() {
+        #expect(WorkflowTwoRoundRunner.firstBalancedObject(in: "no json here") == nil)
+    }
+
+    // MARK: extractJSONObject
+
+    @Test func extractsToolUseInput() throws {
+        let response = LLMResponse(
+            content: [.toolUse(
+                id: "t1", name: "navigate",
+                input: .object(["destination": .string("settings")])
+            )],
+            stopReason: .toolUse
+        )
+        let value = try #require(WorkflowTwoRoundRunner.extractJSONObject(from: response))
+        guard case .object(let object) = value else {
+            Issue.record("expected object, got \(value)")
+            return
+        }
+        #expect(object["destination"]?.stringValue == "settings")
+    }
+
+    @Test func extractsFromFencedJSONBlock() throws {
+        let response = LLMResponse(
+            content: [.text("```json\n{\"k\":\"v\"}\n```")],
+            stopReason: .endTurn
+        )
+        let value = try #require(WorkflowTwoRoundRunner.extractJSONObject(from: response))
+        guard case .object(let object) = value else {
+            Issue.record("expected object, got \(value)")
+            return
+        }
+        #expect(object["k"]?.stringValue == "v")
+    }
+
+    @Test func extractsDespiteTrailingBrace() throws {
+        let response = LLMResponse(
+            content: [.text("{\"k\":\"v\"}}")],
+            stopReason: .endTurn
+        )
+        let value = try #require(WorkflowTwoRoundRunner.extractJSONObject(from: response))
+        guard case .object(let object) = value else {
+            Issue.record("expected object, got \(value)")
+            return
+        }
+        #expect(object["k"]?.stringValue == "v")
+    }
+
+    @Test func extractsAfterLeadingProse() throws {
+        let response = LLMResponse(
+            content: [.text("Here is the plan:\n{\"k\":\"v\"}")],
+            stopReason: .endTurn
+        )
+        let value = try #require(WorkflowTwoRoundRunner.extractJSONObject(from: response))
+        guard case .object(let object) = value else {
+            Issue.record("expected object, got \(value)")
+            return
+        }
+        #expect(object["k"]?.stringValue == "v")
+    }
+
+    @Test func returnsNilWhenNoJSONPresent() {
+        let response = LLMResponse(
+            content: [.text("just some prose, no json")],
+            stopReason: .endTurn
+        )
+        #expect(WorkflowTwoRoundRunner.extractJSONObject(from: response) == nil)
+    }
+}
