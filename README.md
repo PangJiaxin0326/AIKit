@@ -150,11 +150,10 @@ struct RootView: View {
 ```
 
 `AIKitView` renders the Core, Capability, Runtime, and Safety configuration
-dashboard. `AIKitChatbotOverlay` (also available as `ChatbotOverlay`) can be
-applied to any view with `.aiChatbotOverlay(orchestrator:)` when you want the
-assistant pet/dialog entry point without the dashboard. The compact capsule
-supports voice input through MultiModalKit's SpeechAnalyzer-backed
-transcription service.
+dashboard. `AIKitChatbotOverlay` can be applied to any view with
+`.aiChatbotOverlay(orchestrator:)` when you want the assistant pet/dialog
+entry point without the dashboard. The compact capsule supports voice input
+through MultiModalKit's SpeechAnalyzer-backed transcription service.
 
 ## Architecture
 
