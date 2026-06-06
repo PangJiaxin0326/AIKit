@@ -1247,7 +1247,6 @@ public actor Orchestrator {
             policy: WorkflowValidationPolicy(descriptors: manifest)
         )
         let tools = self.tools
-        let logger = self.logger
         let descriptorsByName = Dictionary(uniqueKeysWithValues: manifest.map { ($0.name, $0) })
         let toolContext = makeToolContext(viewID)
         let executor = WorkflowExecutor { node, resolvedInput, executionContext in
