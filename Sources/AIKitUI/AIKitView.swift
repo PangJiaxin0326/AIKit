@@ -98,6 +98,17 @@ public final class AIKitSession {
         var streamingBuffer = AIKitStreamingTextAccumulator()
         var reasoningBuffer = AIKitStreamingTextAccumulator()
 
+        // Surface whatever is still buffered before recording a terminal
+        // line, so a sub-flush-threshold tail isn't dropped when the turn ends.
+        func flushStreamingBuffers() {
+            if !streamingBuffer.isEmpty {
+                streamingText = streamingBuffer.flush()
+            }
+            if !reasoningBuffer.isEmpty {
+                reasoningText = reasoningBuffer.flush()
+            }
+        }
+
         do {
             for try await event in await orchestrator.run(trimmed) {
                 switch event {
@@ -131,33 +142,18 @@ public final class AIKitSession {
                         outputTokens: totalUsage.outputTokens + usage.outputTokens
                     )
                 case .finalAnswer(let text):
-                    if !streamingBuffer.isEmpty {
-                        streamingText = streamingBuffer.flush()
-                    }
-                    if !reasoningBuffer.isEmpty {
-                        reasoningText = reasoningBuffer.flush()
-                    }
+                    flushStreamingBuffers()
                     lines.append(Line(role: "assistant", text: text))
                     streamingText = ""
                     reasoningText = ""
                 case .failure(let reason):
-                    if !streamingBuffer.isEmpty {
-                        streamingText = streamingBuffer.flush()
-                    }
-                    if !reasoningBuffer.isEmpty {
-                        reasoningText = reasoningBuffer.flush()
-                    }
+                    flushStreamingBuffers()
                     lastError = reason
                     lines.append(Line(role: "failed", text: reason))
                     streamingText = ""
                     reasoningText = ""
                 case .error(let error):
-                    if !streamingBuffer.isEmpty {
-                        streamingText = streamingBuffer.flush()
-                    }
-                    if !reasoningBuffer.isEmpty {
-                        reasoningText = reasoningBuffer.flush()
-                    }
+                    flushStreamingBuffers()
                     let message = Self.describe(error)
                     lastError = message
                     lines.append(Line(role: "error", text: message))
@@ -166,12 +162,7 @@ public final class AIKitSession {
                 }
             }
         } catch {
-            if !streamingBuffer.isEmpty {
-                streamingText = streamingBuffer.flush()
-            }
-            if !reasoningBuffer.isEmpty {
-                reasoningText = reasoningBuffer.flush()
-            }
+            flushStreamingBuffers()
             let message = Self.describe(error)
             lastError = message
             lines.append(Line(role: "error", text: message))
