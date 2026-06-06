@@ -67,42 +67,12 @@ public actor SwiftDataSessionUsageStore: AIKitSessionUsageRecording {
         descriptor.fetchLimit = 1
 
         if let existing = try modelContext.fetch(descriptor).first {
-            apply(summary, to: existing)
+            existing.apply(summary)
         } else {
-            let record = AIKitSessionUsageRecord(
-                id: summary.id,
-                taskID: summary.taskID,
-                modelName: summary.modelName,
-                providerName: summary.providerName,
-                startedAt: summary.startedAt,
-                endedAt: summary.endedAt,
-                durationSeconds: summary.durationSeconds,
-                roundTripCount: summary.roundTripCount,
-                messageCount: summary.messageCount,
-                usage: summary.usage,
-                outcome: summary.outcome,
-                recordedAt: summary.recordedAt
-            )
+            let record = AIKitSessionUsageRecord(summary: summary)
             modelContext.insert(record)
         }
 
         try modelContext.save()
-    }
-
-    private func apply(
-        _ summary: AIKitSessionUsageSummary,
-        to record: AIKitSessionUsageRecord
-    ) {
-        record.taskID = summary.taskID
-        record.modelName = summary.modelName
-        record.providerName = summary.providerName
-        record.startedAt = summary.startedAt
-        record.endedAt = summary.endedAt
-        record.durationSeconds = summary.durationSeconds
-        record.roundTripCount = summary.roundTripCount
-        record.messageCount = summary.messageCount
-        record.usage = summary.usage
-        record.outcome = summary.outcome
-        record.recordedAt = summary.recordedAt
     }
 }

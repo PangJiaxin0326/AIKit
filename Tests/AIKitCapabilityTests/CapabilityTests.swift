@@ -219,6 +219,18 @@ private struct EchoTool: Tool {
         #expect(underscore.isEmpty)
     }
 
+    @Test func swiftDataStoreDoesNotFetchForNonPositiveLimits() async throws {
+        let store = try SwiftDataMemoryStore(path: nil)
+        try await store.append(UsageEvent(
+            viewID: .init("home"), kind: .toolResult, text: "visible"
+        ))
+
+        #expect(try await store.recent(limit: 0, view: nil).isEmpty)
+        #expect(try await store.recent(limit: -1, view: nil).isEmpty)
+        #expect(try await store.search(query: "visible", limit: 0).isEmpty)
+        #expect(try await store.search(query: "visible", limit: -1).isEmpty)
+    }
+
     @Test func swiftDataDeleteForgetsEntry() async throws {
         let store = try SwiftDataMemoryStore(path: nil)
         let keep = UsageEvent(viewID: .init("home"), kind: .toolResult, text: "keep me")

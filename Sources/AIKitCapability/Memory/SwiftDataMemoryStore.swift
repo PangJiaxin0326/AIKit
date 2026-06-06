@@ -90,6 +90,8 @@ public actor SwiftDataMemoryStore: MemoryStore {
     }
 
     public func recent(limit: Int, view: ViewContext.ID?) async throws -> [UsageEvent] {
+        let limit = max(0, limit)
+        guard limit > 0 else { return [] }
         let raw = view?.rawValue
         var descriptor = FetchDescriptor<StoredUsageEvent>(
             predicate: raw.map { value in
@@ -97,11 +99,13 @@ public actor SwiftDataMemoryStore: MemoryStore {
             },
             sortBy: [SortDescriptor(\.timestamp, order: .reverse)]
         )
-        descriptor.fetchLimit = max(0, limit)
+        descriptor.fetchLimit = limit
         return try modelContext.fetch(descriptor).map(\.asUsageEvent)
     }
 
     public func search(query: String, limit: Int) async throws -> [UsageEvent] {
+        let limit = max(0, limit)
+        guard limit > 0 else { return [] }
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return [] }
         var descriptor = FetchDescriptor<StoredUsageEvent>(
@@ -111,7 +115,7 @@ public actor SwiftDataMemoryStore: MemoryStore {
             },
             sortBy: [SortDescriptor(\.timestamp, order: .reverse)]
         )
-        descriptor.fetchLimit = max(0, limit)
+        descriptor.fetchLimit = limit
         return try modelContext.fetch(descriptor).map(\.asUsageEvent)
     }
 

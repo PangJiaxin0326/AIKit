@@ -96,6 +96,37 @@ public final class AIKitSessionUsageRecord {
         )
     }
 
+    convenience init(summary: AIKitSessionUsageSummary) {
+        self.init(
+            id: summary.id,
+            taskID: summary.taskID,
+            modelName: summary.modelName,
+            providerName: summary.providerName,
+            startedAt: summary.startedAt,
+            endedAt: summary.endedAt,
+            durationSeconds: summary.durationSeconds,
+            roundTripCount: summary.roundTripCount,
+            messageCount: summary.messageCount,
+            usage: summary.usage,
+            outcome: summary.outcome,
+            recordedAt: summary.recordedAt
+        )
+    }
+
+    func apply(_ summary: AIKitSessionUsageSummary) {
+        taskID = summary.taskID
+        modelName = summary.modelName
+        providerName = summary.providerName
+        startedAt = summary.startedAt
+        endedAt = summary.endedAt
+        durationSeconds = summary.durationSeconds
+        roundTripCount = summary.roundTripCount
+        messageCount = summary.messageCount
+        usage = summary.usage
+        outcome = summary.outcome
+        recordedAt = summary.recordedAt
+    }
+
     public var usage: TokenUsage {
         get {
             TokenUsage(
