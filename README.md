@@ -39,12 +39,13 @@ let llm = LLMClient(provider: provider)
 
 // 2. Tools available to the agent.
 let tools = ToolRegistry()
+let memory = try SwiftDataMemoryStore(path: dbPath)
 let configurationStore = AIKitConfigurationStore()
 await tools.register(NavigateTool { input, _ in
     router.go(to: input.destination)
     return .init(navigated: true)
 })
-await tools.register(SearchMemoryTool())
+await tools.register(SearchMemoryTool(memory: memory))
 await AIKitConfigurationTools.register(in: tools, store: configurationStore)
 
 // 3. View context — which prompt fragment and tools are live.
@@ -73,7 +74,7 @@ let policy = PolicyEngine(rails: [
 let orchestrator = Orchestrator(
     llm: llm,
     tools: tools,
-    memory: try SwiftDataMemoryStore(path: dbPath),
+    memory: memory,
     contextResolver: resolver,
     guardrails: policy,
     options: .init(model: "claude-opus-4-7")
