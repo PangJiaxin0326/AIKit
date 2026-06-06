@@ -1076,9 +1076,8 @@ public actor Orchestrator {
         var resolved: [ToolCall] = []
         resolved.reserveCapacity(calls.count)
         for call in calls {
-            let id = (call.id?.isEmpty == false)
-                ? call.id!
-                : "fallback-\(UUID().uuidString)"
+            let id = call.id.flatMap { $0.isEmpty ? nil : $0 }
+                ?? "fallback-\(UUID().uuidString)"
             var c = call
             c.id = id
             resolved.append(c)
