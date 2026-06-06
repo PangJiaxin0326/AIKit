@@ -210,14 +210,13 @@ public enum OutputParser {
         in text: String
     ) throws -> (spec: WorkflowSpec, remainingText: String)? {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        let looksLikeWorkflow = Self.looksLikeWorkflowJSON(trimmed)
         if trimmed.hasPrefix("{"),
            let data = trimmed.data(using: .utf8),
            let value = try? JSONValue(data: data) {
             if let plan = try Self.decodeWorkflowCandidate(value) {
                 return (plan, "")
             }
-            if looksLikeWorkflow {
+            if Self.looksLikeWorkflowJSON(trimmed) {
                 throw ParserError.malformedWorkflow(raw: trimmed)
             }
         }
