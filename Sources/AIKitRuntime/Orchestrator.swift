@@ -748,11 +748,7 @@ public actor Orchestrator {
                 temperature: options.temperature,
                 useStructuredPlannerOutput: useStructuredPlannerOutput,
                 autoBind: autoBind,
-                toolContext: ToolContext(
-                    viewID: viewID.rawValue,
-                    metadata: ["leafViewID": viewID.rawValue],
-                    logger: logger
-                )
+                toolContext: makeToolContext(viewID)
             ),
             planCache: planCache
         )
@@ -1103,6 +1099,17 @@ public actor Orchestrator {
         let inputData: Data
     }
 
+    /// Ambient context handed to a tool for the current leaf view. The
+    /// `leafViewID` metadata mirrors `viewID` so tools that read either key
+    /// see the same value.
+    private func makeToolContext(_ viewID: ViewContext.ID) -> ToolContext {
+        ToolContext(
+            viewID: viewID.rawValue,
+            metadata: ["leafViewID": viewID.rawValue],
+            logger: logger
+        )
+    }
+
     private func prepareToolCall(
         _ call: ToolCall,
         viewID: ViewContext.ID,
@@ -1242,11 +1249,7 @@ public actor Orchestrator {
         let tools = self.tools
         let logger = self.logger
         let descriptorsByName = Dictionary(uniqueKeysWithValues: manifest.map { ($0.name, $0) })
-        let toolContext = ToolContext(
-            viewID: viewID.rawValue,
-            metadata: ["leafViewID": viewID.rawValue],
-            logger: logger
-        )
+        let toolContext = makeToolContext(viewID)
         let executor = WorkflowExecutor { node, resolvedInput, executionContext in
             guard let tool = node.tool else {
                 throw WorkflowError.missingTool(nodeID: node.id)
@@ -1345,11 +1348,7 @@ public actor Orchestrator {
         transcript: inout [TranscriptEntry],
         emit: @Sendable (OrchestratorEvent) -> Void
     ) async throws -> Data {
-        let context = ToolContext(
-            viewID: viewID.rawValue,
-            metadata: ["leafViewID": viewID.rawValue],
-            logger: logger
-        )
+        let context = makeToolContext(viewID)
         let prepared = try await prepareToolCall(
             call,
             viewID: viewID,
