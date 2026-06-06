@@ -133,6 +133,10 @@ public struct OllamaProvider: LLMProvider {
             "model": .string(request.model),
             "stream": .bool(stream),
             "messages": .array(try Self.wireMessages(request)),
+            // Ollama thinking-capable models may enable thinking by default.
+            // Keep agent/planner calls deterministic unless the host overrides
+            // this top-level key through `extraBody`.
+            "think": .bool(false),
         ]
         if !request.tools.isEmpty {
             body["tools"] = .array(request.tools.map(Self.wireTool))
@@ -147,8 +151,7 @@ public struct OllamaProvider: LLMProvider {
         }
         // These are top-level Ollama keys; everything else flows into
         // `options` (num_ctx, top_p, seed, stop, …) unless it shadows a
-        // reserved key the encoder already set. `think: false` is important
-        // for small reasoning models used as low-latency workflow planners.
+        // reserved key the encoder already set.
         for (key, value) in request.extraBody {
             if ["keep_alive", "format", "think"].contains(key) {
                 body[key] = value

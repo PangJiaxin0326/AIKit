@@ -620,7 +620,6 @@ import AIKitTestSupport
         _ = try await provider.complete(LLMRequest(
             model: "gemma4:e4b",
             extraBody: [
-                "think": .bool(false),
                 "format": .string("json"),
                 "keep_alive": .string("5m"),
                 "num_ctx": .int(4096),
@@ -635,6 +634,22 @@ import AIKitTestSupport
         #expect(options["num_ctx"] == .int(4096))
         #expect(options["think"] == nil)
         #expect(options["format"] == nil)
+    }
+
+    @Test func ollamaExtraBodyCanOverrideDefaultThinking() async throws {
+        let body = """
+        {"model":"qwen3","message":{"role":"assistant","content":"ok"},\
+        "done":true,"done_reason":"stop"}
+        """.data(using: .utf8)!
+        URLProtocolStub.setStub(.init(body: body))
+        let provider = OllamaProvider(session: URLProtocolStub.makeSession())
+        _ = try await provider.complete(LLMRequest(
+            model: "qwen3",
+            extraBody: ["think": .bool(true)]
+        ))
+
+        let sent = try recordedRequestJSON()
+        #expect(sent["think"] == .bool(true))
     }
 
     /// REVIEW2 finding **F2**: tool calls mean `.toolUse` regardless of
@@ -802,6 +817,26 @@ import AIKitTestSupport
         #expect(response.text == "ark path")
         let request = try #require(URLProtocolStub.recordedRequests.last)
         #expect(request.url?.absoluteString == endpoint.absoluteString)
+        let sent = try recordedRequestJSON()
+        #expect(sent["thinking"] == .object(["type": .string("disabled")]))
+    }
+
+    @Test func openAIProviderDoesNotAddArkThinkingForRegularEndpoints() async throws {
+        let body = """
+        {"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}]}
+        """.data(using: .utf8)!
+        URLProtocolStub.setStub(.init(body: body))
+        let provider = OpenAIProvider(
+            apiKey: "test-key",
+            session: URLProtocolStub.makeSession()
+        )
+
+        _ = try await provider.complete(
+            LLMRequest(model: "gpt-4o", messages: [.init(role: .user, text: "hi")])
+        )
+
+        let sent = try recordedRequestJSON()
+        #expect(sent["thinking"] == nil)
     }
 
     @Test func openAIEncodesImageAudioAndDecodesVoiceOutput() async throws {

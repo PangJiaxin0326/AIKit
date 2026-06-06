@@ -130,9 +130,12 @@ public struct OpenAIProvider: LLMProvider {
         }
         do {
             let wire = try WireRequest(request: request, model: request.model, stream: stream)
+            let extraBody = Self.defaultExtraBody(for: url).merging(request.extraBody) {
+                _, override in override
+            }
             urlRequest.httpBody = try mergedRequestBody(
                 encoded: JSONEncoder().encode(wire),
-                extraBody: request.extraBody,
+                extraBody: extraBody,
                 reservedKeys: Self.reservedBodyKeys
             )
         } catch let error as LLMError {
@@ -141,6 +144,16 @@ public struct OpenAIProvider: LLMProvider {
             throw LLMError.encodingFailed(String(describing: error))
         }
         return urlRequest
+    }
+
+    private static func defaultExtraBody(for url: URL) -> [String: JSONValue] {
+        guard isVolcengineArkEndpoint(url) else { return [:] }
+        return ["thinking": .object(["type": .string("disabled")])]
+    }
+
+    private static func isVolcengineArkEndpoint(_ url: URL) -> Bool {
+        guard let host = url.host()?.lowercased() else { return false }
+        return host.hasSuffix("volces.com")
     }
 }
 

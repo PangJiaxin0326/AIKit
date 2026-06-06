@@ -5,7 +5,8 @@ This is a reproduction guide. Following it, a capable agent can stand up the
 personal-assistant domain and reach the same success and token numbers — without
 re-deriving any of it. It is AIKit-centric (the **runner**); the planner/binder
 prompt + schema contract lives in the sibling package **AIToolKit**
-(`WORKFLOW_GUIDANCE.md` §4b, `WORKFLOW_HOWTO.md`). Both are on GitHub; clone both.
+(`Sources/AIToolKit/WorkflowTwoRoundPrompt.swift` and
+`Sources/AIToolKit/WorkflowTwoRoundSchema.swift`). Both are on GitHub; clone both.
 
 > The one rule: **freeform planner + the built-in brace-balanced JSON extractor +
 > auto-bind, at temperature 0.2.** That configuration is the proven best across
@@ -62,9 +63,12 @@ Pipeline: **Plan (isolated)** → local validate → deterministic **harvest** (
 → **auto-bind** (skip round 2 when unambiguous) *or* **Bind (isolated)** → execute
 the DAG. Round 1 never sees private ids; Round 2 never sees the full tool universe.
 
-`disableThinking`: turn the model's thinking OFF (no reliability gain at these task
-sizes, large token/latency cost). The wire key is provider-specific — pass it via
-`extraBody`.
+Thinking should be OFF (no reliability gain at these task sizes, large
+token/latency cost). AIKit hardcodes the known deterministic provider toggles by
+default: Ollama native chat sends top-level `"think": false`, and Volcengine Ark
+chat-completions sends `"thinking": {"type": "disabled"}`. Use `extraBody` only
+to override those defaults or to supply the equivalent key for another
+OpenAI-compatible provider.
 
 ## 3. The planner output contract (lean — `two_round.planner.v2.1`)
 
@@ -148,7 +152,8 @@ sequential there.
       context-reading tool (local state is a `$slot`, not a tool node).
 - [ ] Use the AIToolKit lean prompt/schema as-is; keep the **two** worked examples
       and the three guard-rail clauses. Don't tailor the example per task.
-- [ ] `temperature 0.2`, thinking off, `autoBind: true`, `attemptsPerRound: 2`,
+- [ ] `temperature 0.2`, thinking off (handled by built-in provider defaults
+      where the wire key is known), `autoBind: true`, `attemptsPerRound: 2`,
       **freeform** (no structured planner output).
 - [ ] Implement `ContextHarvesting` deterministically: rank the current/foreground
       candidate first, cap the count, **report missing — never fabricate**.
@@ -158,7 +163,11 @@ sequential there.
 - [ ] Score by **side effects**, not the model's prose.
 
 ## Pointers
-- AIToolKit `WORKFLOW_GUIDANCE.md` (§4b compaction + guard rails; §1–§3 paradigm
-  choice, scaling, schema), `WORKFLOW_HOWTO.md` (value algebra, end-to-end code).
-- AIKit `README.md` ("Two-round-trip runner recipe"), `Sources/AIKitRuntime/`
-  `WorkflowTwoRoundRunner.swift`.
+- This file is the single source of truth for the current two-round-trip
+  reproduction recipe. AIKit `README.md` and AIToolKit `WORKFLOW_GUIDANCE.md` /
+  `WORKFLOW_HOWTO.md` intentionally point back here instead of restating it.
+- Runner implementation: AIKit `Sources/AIKitRuntime/WorkflowTwoRoundRunner.swift`.
+- Prompt/schema/value-algebra implementation: AIToolKit
+  `Sources/AIToolKit/WorkflowTwoRoundPrompt.swift`,
+  `Sources/AIToolKit/WorkflowTwoRoundSchema.swift`, and
+  `Sources/AIToolKit/WorkflowTwoRound.swift`.

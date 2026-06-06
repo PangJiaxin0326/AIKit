@@ -9,10 +9,8 @@ import AIKitCore
 /// the LLM calls, the deterministic harvest, the optional plan cache, and DAG
 /// execution through `ToolRegistry`.
 ///
-/// Best-practice recipe (auto-bind, tier-matched structured output, temperature)
-/// and the brace-balanced JSON extraction it relies on are in this package's
-/// `README.md` ("Two-round-trip runner recipe"); the lean planner/binder prompt
-/// contract + guard rails are in AIToolKit's `WORKFLOW_GUIDANCE.md` §4b.
+/// The current reproduction recipe is documented in this package's `AGENTS.md`,
+/// which is the single source of truth for two-round settings and guard rails.
 ///
 /// It is provider- and domain-agnostic: the local context is read through a
 /// `ContextHarvesting` you supply, not a concrete store. Token budgets are the
@@ -23,8 +21,10 @@ public struct WorkflowTwoRoundRunner: Sendable {
         public var temperature: Double?
         public var extraBody: [String: JSONValue]
         /// Constrain the planner round with provider `response_format`
-        /// json_schema. This is most useful for weak/mid planners where the
-        /// nested `$ref` shape otherwise causes malformed JSON.
+        /// json_schema. The validated v2.1 recipe leaves this false and relies
+        /// on freeform output plus brace-balanced extraction; use this only as an
+        /// experimental host override after extending the schema enough to
+        /// enforce the relevant tool input requirements.
         public var useStructuredPlannerOutput: Bool
         // The Binder is always freeform (v2.1): a strict schema on the binder
         // round only tempts it to mutate the graph and never measurably helps, so

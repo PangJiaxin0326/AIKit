@@ -1129,10 +1129,6 @@ public struct AIKitView: View {
                 "Structured planner output",
                 isOn: binding(\.runtime.twoRoundStructuredPlannerOutput)
             )
-            Toggle(
-                "Structured binder output",
-                isOn: binding(\.runtime.twoRoundStructuredBinderOutput)
-            )
         }
     }
 

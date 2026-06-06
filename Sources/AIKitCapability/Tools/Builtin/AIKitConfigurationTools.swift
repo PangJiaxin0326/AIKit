@@ -102,8 +102,8 @@ public struct SetAIKitConfigurationTool: Tool {
     Anthropic, Ollama, Apple Intelligence, or Ark), availableModels, \
     endpointURL, enabledToolNames, systemPromptFragment, maxIterations, \
     streamsResponses, toolCallFallback, workflowPlanning, leanWorkflowSchema, \
-    twoRoundAutoBind, twoRoundStructuredPlannerOutput, \
-    twoRoundStructuredBinderOutput, enabledGuardrailIDs, and outputLengthLimit.
+    twoRoundAutoBind, twoRoundStructuredPlannerOutput, enabledGuardrailIDs, and \
+    outputLengthLimit.
     """
     public static let inputSchema = ToolSchema(json: .object([
         "type": .string("object"),

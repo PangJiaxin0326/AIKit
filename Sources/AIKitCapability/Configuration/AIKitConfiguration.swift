@@ -237,6 +237,9 @@ public struct AIKitConfiguration: Codable, Sendable, Hashable {
         public var leanWorkflowSchema: Bool
         public var twoRoundAutoBind: Bool
         public var twoRoundStructuredPlannerOutput: Bool
+        /// Legacy persisted setting kept for configuration compatibility. The
+        /// v2.1 two-round runner always keeps the Binder freeform and does not
+        /// read this value.
         public var twoRoundStructuredBinderOutput: Bool
 
         private enum CodingKeys: String, CodingKey {
@@ -583,6 +586,8 @@ extension AIKitConfiguration {
         case "tworoundstructuredplanner", "tworoundstructuredplanneroutput", "structuredplanneroutput":
             runtime.twoRoundStructuredPlannerOutput = try value.bool(section: .runtime, key: originalKey)
         case "tworoundstructuredbinder", "tworoundstructuredbinderoutput", "structuredbinderoutput":
+            // Accepted for older configuration payloads; the v2.1 runner never
+            // reads this value because the Binder is always freeform.
             runtime.twoRoundStructuredBinderOutput = try value.bool(section: .runtime, key: originalKey)
         default:
             throw AIKitConfigurationError.unknownKey(section: .runtime, key: originalKey)

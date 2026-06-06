@@ -368,10 +368,8 @@ private struct FixedHarvester: ContextHarvesting {
             .init(navigated: input.destination == "settings")
         })
         let plan = """
-        {"outcome":"requires_binding","intent_summary":"open destination",
-         "nodes":[{"id":"go","tool":"navigate","input":{"destination":{"$slot":"destination"}}}],
-         "context_slots":[{"slot_id":"destination","source":"current_destination","reason":"target screen","required":true}],
-         "message":null}
+        {"nodes":[{"id":"go","tool":"navigate","input":{"destination":{"$slot":"destination"}}}],
+         "context_slots":[{"slot_id":"destination","source":"current_destination"}]}
         """
         let binding = """
         {"binding_status":"complete",
@@ -429,10 +427,8 @@ private struct FixedHarvester: ContextHarvesting {
             return .init(navigated: true)
         })
         let plan = """
-        {"outcome":"requires_binding","intent_summary":"open current destination",
-         "nodes":[{"id":"go","tool":"navigate","input":{"destination":{"$slot":"destination"}}}],
-         "context_slots":[{"slot_id":"destination","source":"current_destination","reason":"target screen","required":true}],
-         "message":null}
+        {"nodes":[{"id":"go","tool":"navigate","input":{"destination":{"$slot":"destination"}}}],
+         "context_slots":[{"slot_id":"destination","source":"current_destination"}]}
         """
         let provider = MockProvider(responses: [
             LLMResponse(content: [.text(plan)], stopReason: .endTurn),
@@ -476,9 +472,8 @@ private struct FixedHarvester: ContextHarvesting {
         let registry = ToolRegistry()
         await registry.register(ApprovalRequiredTool(flag: flag))
         let plan = """
-        {"outcome":"self_contained","intent_summary":"dangerous action",
-         "nodes":[{"id":"act","tool":"approvalRequired","input":{}}],
-         "context_slots":[],"message":null}
+        {"nodes":[{"id":"act","tool":"approvalRequired","input":{}}],
+         "context_slots":[]}
         """
         let provider = MockProvider(responses: [
             LLMResponse(content: [.text(plan)], stopReason: .endTurn),
@@ -652,8 +647,8 @@ private struct FixedHarvester: ContextHarvesting {
         // A self-contained plan: the runner executes the DAG locally without a
         // binder round, so one scripted planner response is enough.
         let planJSON = """
-        {"outcome":"self_contained","intent_summary":"open settings",
-         "nodes":[{"id":"go","tool":"navigate","input":{"destination":"settings"}}]}
+        {"nodes":[{"id":"go","tool":"navigate","input":{"destination":"settings"}}],
+         "context_slots":[]}
         """
         let provider = MockProvider(responses: [
             LLMResponse(content: [.text(planJSON)], stopReason: .endTurn),

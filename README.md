@@ -176,35 +176,9 @@ For local/private context tasks, use `runWorkflowTask(...)` or
 trusted local candidates, auto-bind skips the binder when the result is
 unambiguous, and `WorkflowPlanCache` can skip repeated planner calls.
 
-### Two-round-trip runner recipe (v2.1)
-
-`WorkflowTwoRoundRunner` is the orchestration half (the two isolated LLM calls +
-the deterministic harvest + DAG execution); the lean planner/binder prompt
-contract and the guard rails live in AIToolKit (`WorkflowTwoRoundPrompt` /
-`WorkflowTwoRoundSchema`, documented in AIToolKit `WORKFLOW_GUIDANCE.md` §4b).
-The current best-practice configuration — reproducible with no host context:
-
-- **`autoBind: true` (default).** Collapses to **one** LLM call whenever the
-  harvest is unambiguous (a sole/current candidate per referenced slot, nothing
-  to author); ambiguity and label-authoring fall through to a second isolated
-  Binder call. Round 1 never sees private ids; Round 2 never sees the full tool
-  universe — the injection boundary and the cost win at once.
-- **`temperature: 0.2`, thinking off.** At 0.0 a malformed-JSON loop can't
-  self-correct.
-- **Tier-matched structured output, planner only.** A *strong* planner runs
-  freeform (≈0 malformed JSON); a *weak/mid* planner sets
-  `useStructuredPlannerOutput: true` (the json_schema makes the nested-`$ref`
-  malformed shape unrepresentable). The binder round is always freeform (there
-  is no binder structured-output knob) — a strict schema there only tempts the
-  binder to mutate the graph.
-- **String-aware, brace-balanced JSON extraction (built in).** Weak planners on
-  the `{{slot}}` authoring path append a stray `}` (the `{{ }}` token in a body
-  string mis-counts their braces); `extractJSONObject` scans string-aware and
-  stops at the first depth-0 close, so the otherwise-valid object parses with no
-  retry. This — not structured output — is what makes the authoring path robust;
-  it is always on, every tier.
-- **The runtime validates, resolves, and executes — the model only proposes.** A
-  clean `cannot_bind` / required-missing is a *success* (refusing beats guessing).
+The current two-round-trip reproduction recipe is intentionally not duplicated
+here. Treat [AGENTS.md](AGENTS.md) as the single source of truth for paradigm
+choice, prompt/schema contract, model settings, and measured expectations.
 
 ## Testing
 
