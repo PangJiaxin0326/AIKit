@@ -67,6 +67,9 @@ let package = Package(
                     condition: .when(platforms: [.iOS])
                 )
             ],
+            resources: [
+                .process("Resources")
+            ],
             swiftSettings: swiftSettings
         ),
         .target(

@@ -14,6 +14,10 @@ import AIKitRuntime
 import AIKitSafety
 import MultiModalKit
 
+private func aiKitText(_ key: LocalizedStringKey) -> Text {
+    Text(key, bundle: .module)
+}
+
 private struct AIKitStreamingTextAccumulator {
     private var renderedText = ""
     private var pendingChunks: [String] = []
@@ -70,13 +74,19 @@ public final class AIKitSession {
     /// voice mode can reuse it off the main actor.
     nonisolated static func describe(_ error: any Error) -> String {
         if let violation = error as? GuardrailViolation {
-            return "Blocked by \(violation.railID) at \(violation.stage.rawValue): \(violation.reason)"
+            return AIKitUILocalization.string(
+                "Blocked by \(violation.railID) at \(violation.stage.rawValue): \(violation.reason)"
+            )
         }
         if let iteration = error as? IterationLimitExceeded {
-            return "Stopped after reaching the \(iteration.limit)-iteration limit."
+            return AIKitUILocalization.string(
+                "Stopped after reaching the \(iteration.limit)-iteration limit."
+            )
         }
         if let deadline = error as? TurnDeadlineExceeded {
-            return "Stopped after exceeding the \(Int(deadline.budget))s turn budget."
+            return AIKitUILocalization.string(
+                "Stopped after exceeding the \(Int(deadline.budget))s turn budget."
+            )
         }
         if let llmError = error as? LLMError {
             return llmError.errorDescription ?? "\(llmError)"
@@ -825,24 +835,29 @@ public struct AIKitView: View {
 
     private var headerTitle: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("AIKit")
+            aiKitText("AIKit")
                 .font(.largeTitle)
                 .bold()
-            Text("Core · Capability · Runtime · Safety")
+            aiKitText("Core · Capability · Runtime · Safety")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
         }
     }
 
     private var statusBadge: some View {
-        let status = model.status ?? "Ready"
-        let tint: Color = model.status == "Reset" ? .orange : .green
+        let tint: Color = model.status == AIKitUILocalization.string("Reset") ? .orange : .green
         return HStack(spacing: 7) {
             Image(systemName: model.status == nil ? "circle.fill" : "checkmark.circle.fill")
                 .font(.footnote)
                 .foregroundStyle(tint)
-            Text(status)
-                .foregroundStyle(.secondary)
+            Group {
+                if let status = model.status {
+                    Text(status)
+                } else {
+                    aiKitText("Ready")
+                }
+            }
+            .foregroundStyle(.secondary)
         }
         .font(.footnote)
         .padding(.horizontal, 12)
@@ -926,8 +941,10 @@ public struct AIKitView: View {
 
         return HStack(spacing: 8) {
             Menu {
-                Button("None") {
+                Button {
                     model.selectModel(nil, for: selectedProvider)
+                } label: {
+                    aiKitText("None")
                 }
                 Divider()
                 ForEach(modelOptions, id: \.self) { modelName in
@@ -953,7 +970,11 @@ public struct AIKitView: View {
                     Task { await refreshModelCatalog() }
                 } label: {
                     ZStack {
-                        Label("Refresh models", systemImage: "arrow.clockwise")
+                        Label {
+                            aiKitText("Refresh models")
+                        } icon: {
+                            Image(systemName: "arrow.clockwise")
+                        }
                             .labelStyle(.iconOnly)
                             .font(.footnote)
                             .opacity(isRefreshingModels ? 0 : 1)
@@ -1004,22 +1025,40 @@ public struct AIKitView: View {
                     .aiKitContainerStyle()
             }
 
-            LabeledContent("Timeout") {
-                TextField("Seconds", text: optionalNumberBinding(\.core.timeout))
+            LabeledContent {
+                TextField(
+                    AIKitUILocalization.string("Seconds"),
+                    text: optionalNumberBinding(\.core.timeout),
+                    prompt: aiKitText("Seconds")
+                )
                     .multilineTextAlignment(.trailing)
                     .aiKitFieldStyle()
+            } label: {
+                aiKitText("Timeout")
             }
             .aiKitTextFieldRowStyle()
-            LabeledContent("Temperature") {
-                TextField("Default", text: optionalNumberBinding(\.core.temperature))
+            LabeledContent {
+                TextField(
+                    AIKitUILocalization.string("Default"),
+                    text: optionalNumberBinding(\.core.temperature),
+                    prompt: aiKitText("Default")
+                )
                     .multilineTextAlignment(.trailing)
                     .aiKitFieldStyle()
+            } label: {
+                aiKitText("Temperature")
             }
             .aiKitTextFieldRowStyle()
-            LabeledContent("Max tokens") {
-                TextField("Default", text: optionalNumberBinding(\.core.maxTokens))
+            LabeledContent {
+                TextField(
+                    AIKitUILocalization.string("Default"),
+                    text: optionalNumberBinding(\.core.maxTokens),
+                    prompt: aiKitText("Default")
+                )
                     .multilineTextAlignment(.trailing)
                     .aiKitFieldStyle()
+            } label: {
+                aiKitText("Max tokens")
             }
             .aiKitTextFieldRowStyle()
         }
@@ -1028,8 +1067,12 @@ public struct AIKitView: View {
     @ViewBuilder
     private var providerCredentialRow: some View {
         if selectedProviderDefinition.apiKeyStrategy.requiresCredential {
-            LabeledContent("API key") {
-                SecureField("API key", text: providerAPIKeyBinding)
+            LabeledContent {
+                SecureField(
+                    AIKitUILocalization.string("API key"),
+                    text: providerAPIKeyBinding,
+                    prompt: aiKitText("API key")
+                )
                     .multilineTextAlignment(.trailing)
                     .autocorrectionDisabled()
                     #if os(iOS)
@@ -1037,6 +1080,8 @@ public struct AIKitView: View {
                     #endif
                     .textContentType(.password)
                     .aiKitFieldStyle()
+            } label: {
+                aiKitText("API key")
             }
             .aiKitTextFieldRowStyle()
         }
@@ -1044,14 +1089,20 @@ public struct AIKitView: View {
 
     private var capabilitySection: some View {
         AIKitConfigurationSection(title: "Capability", systemImage: "slider.horizontal.3", tint: .purple) {
-            LabeledContent("Context") {
-                TextField("Display name", text: binding(\.capability.contextDisplayName))
+            LabeledContent {
+                TextField(
+                    AIKitUILocalization.string("Display name"),
+                    text: binding(\.capability.contextDisplayName),
+                    prompt: aiKitText("Display name")
+                )
                     .multilineTextAlignment(.trailing)
                     .aiKitFieldStyle()
+            } label: {
+                aiKitText("Context")
             }
             .aiKitTextFieldRowStyle()
             VStack(alignment: .leading, spacing: 8) {
-                Text("System prompt")
+                aiKitText("System prompt")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                 TextEditor(text: binding(\.capability.systemPromptFragment))
@@ -1061,26 +1112,31 @@ public struct AIKitView: View {
                     .frame(minHeight: 92)
                     .aiKitContainerStyle()
             }
-            LabeledContent("Memory window") {
+            LabeledContent {
                 Stepper(
                     "\(model.configuration.capability.memoryLimit)",
                     value: binding(\.capability.memoryLimit),
                     in: 0...500
                 )
+            } label: {
+                aiKitText("Memory window")
             }
             if model.availableTools.isEmpty {
-                LabeledContent("Enabled tools") {
+                LabeledContent {
                     TextField(
-                        "Comma-separated",
-                        text: setBinding(\.capability.enabledToolNames)
+                        AIKitUILocalization.string("Comma-separated"),
+                        text: setBinding(\.capability.enabledToolNames),
+                        prompt: aiKitText("Comma-separated")
                     )
                     .multilineTextAlignment(.trailing)
                     .aiKitFieldStyle()
+                } label: {
+                    aiKitText("Enabled tools")
                 }
                 .aiKitTextFieldRowStyle()
             } else {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("Enabled tools")
+                    aiKitText("Enabled tools")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                     ForEach(model.availableTools) { tool in
@@ -1093,56 +1149,95 @@ public struct AIKitView: View {
 
     private var runtimeSection: some View {
         AIKitConfigurationSection(title: "Runtime", systemImage: "point.3.connected.trianglepath.dotted", tint: .teal) {
-            Toggle("Stream responses", isOn: binding(\.runtime.streamsResponses))
-            LabeledContent("Max iterations") {
+            Toggle(isOn: binding(\.runtime.streamsResponses)) {
+                aiKitText("Stream responses")
+            }
+            LabeledContent {
                 Stepper(
                     "\(model.configuration.runtime.maxIterations)",
                     value: binding(\.runtime.maxIterations),
                     in: 1...50
                 )
+            } label: {
+                aiKitText("Max iterations")
             }
-            LabeledContent("Turn budget") {
-                TextField("Seconds", text: optionalNumberBinding(\.runtime.maxTurnDuration))
+            LabeledContent {
+                TextField(
+                    AIKitUILocalization.string("Seconds"),
+                    text: optionalNumberBinding(\.runtime.maxTurnDuration),
+                    prompt: aiKitText("Seconds")
+                )
                     .multilineTextAlignment(.trailing)
                     .aiKitFieldStyle()
+            } label: {
+                aiKitText("Turn budget")
             }
             .aiKitTextFieldRowStyle()
-            Picker("Tool fallback", selection: binding(\.runtime.toolCallFallback)) {
+            Picker(selection: binding(\.runtime.toolCallFallback)) {
                 ForEach(AIKitConfiguration.ToolCallFallbackMode.allCases, id: \.self) { mode in
-                    Text(mode.label).tag(mode)
+                    Text(mode.localizedLabel, bundle: .module).tag(mode)
                 }
+            } label: {
+                aiKitText("Tool fallback")
             }
             .pickerStyle(.segmented)
-            Toggle("Workflow planning", isOn: binding(\.runtime.workflowPlanning))
-            Toggle("Lean workflow schema", isOn: binding(\.runtime.leanWorkflowSchema))
-            Toggle("Two-round auto-bind", isOn: binding(\.runtime.twoRoundAutoBind))
-            Toggle(
-                "Structured planner output",
-                isOn: binding(\.runtime.twoRoundStructuredPlannerOutput)
-            )
+            Toggle(isOn: binding(\.runtime.workflowPlanning)) {
+                aiKitText("Workflow planning")
+            }
+            Toggle(isOn: binding(\.runtime.leanWorkflowSchema)) {
+                aiKitText("Lean workflow schema")
+            }
+            Toggle(isOn: binding(\.runtime.twoRoundAutoBind)) {
+                aiKitText("Two-round auto-bind")
+            }
+            Toggle(isOn: binding(\.runtime.twoRoundStructuredPlannerOutput)) {
+                aiKitText("Structured planner output")
+            }
         }
     }
 
     private var safetySection: some View {
         AIKitConfigurationSection(title: "Safety", systemImage: "shield.lefthalf.filled", tint: .green) {
-            Toggle("PII redaction", isOn: binding(\.safety.piiRedactionEnabled))
-            Toggle("Injection sniffing", isOn: binding(\.safety.injectionSniffingEnabled))
-            LabeledContent("Output cap") {
-                TextField("Characters", text: optionalNumberBinding(\.safety.outputLengthLimit))
+            Toggle(isOn: binding(\.safety.piiRedactionEnabled)) {
+                aiKitText("PII redaction")
+            }
+            Toggle(isOn: binding(\.safety.injectionSniffingEnabled)) {
+                aiKitText("Injection sniffing")
+            }
+            LabeledContent {
+                TextField(
+                    AIKitUILocalization.string("Characters"),
+                    text: optionalNumberBinding(\.safety.outputLengthLimit),
+                    prompt: aiKitText("Characters")
+                )
                     .multilineTextAlignment(.trailing)
                     .aiKitFieldStyle()
+            } label: {
+                aiKitText("Output cap")
             }
             .aiKitTextFieldRowStyle()
-            LabeledContent("Guardrails") {
-                TextField("Comma-separated", text: setBinding(\.safety.enabledGuardrailIDs))
+            LabeledContent {
+                TextField(
+                    AIKitUILocalization.string("Comma-separated"),
+                    text: setBinding(\.safety.enabledGuardrailIDs),
+                    prompt: aiKitText("Comma-separated")
+                )
                     .multilineTextAlignment(.trailing)
                     .aiKitFieldStyle()
+            } label: {
+                aiKitText("Guardrails")
             }
             .aiKitTextFieldRowStyle()
-            LabeledContent("Tool allowlist") {
-                TextField("Comma-separated", text: setBinding(\.safety.allowlistedToolNames))
+            LabeledContent {
+                TextField(
+                    AIKitUILocalization.string("Comma-separated"),
+                    text: setBinding(\.safety.allowlistedToolNames),
+                    prompt: aiKitText("Comma-separated")
+                )
                     .multilineTextAlignment(.trailing)
                     .aiKitFieldStyle()
+            } label: {
+                aiKitText("Tool allowlist")
             }
             .aiKitTextFieldRowStyle()
         }
@@ -1184,7 +1279,11 @@ public struct AIKitView: View {
                 Button(role: .destructive) {
                     model.resetToDefaults()
                 } label: {
-                    Label("Reset to defaults", systemImage: "arrow.counterclockwise")
+                    Label {
+                        aiKitText("Reset to defaults")
+                    } icon: {
+                        Image(systemName: "arrow.counterclockwise")
+                    }
                         .font(.callout)
                 }
                 .buttonStyle(.glass)
@@ -1446,9 +1545,13 @@ struct AssistantChatbotOverlay<DetailContent: View>: View {
     }
 
     private var petAccessibilityLabel: String {
-        if activity.hasFailed { return "AIKit assistant, failed" }
-        if activity.isBusy { return "AIKit assistant, \(activity.statusText)" }
-        return "AIKit assistant"
+        if activity.hasFailed {
+            return AIKitUILocalization.string("AIKit assistant, failed")
+        }
+        if activity.isBusy {
+            return AIKitUILocalization.string("AIKit assistant, \(activity.aiKitLocalizedStatusText)")
+        }
+        return AIKitUILocalization.string("AIKit assistant")
     }
 
     // MARK: - Pet placement
@@ -1836,7 +1939,7 @@ struct AssistantChatbotOverlay<DetailContent: View>: View {
                     Color.accentColor.gradient,
                     in: RoundedRectangle(cornerRadius: 7, style: .continuous)
                 )
-            Text("AIKit Assistant")
+            aiKitText("AIKit Assistant")
                 .font(.headline)
             Spacer(minLength: 8)
             Button {
@@ -1849,7 +1952,7 @@ struct AssistantChatbotOverlay<DetailContent: View>: View {
                     .background(.background.secondary, in: Circle())
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("Refresh")
+            .accessibilityLabel(aiKitText("Refresh"))
             Button {
                 withAnimation(.spring(duration: 0.24)) { isDialogPresented = false }
             } label: {
@@ -1860,7 +1963,7 @@ struct AssistantChatbotOverlay<DetailContent: View>: View {
                     .background(.background.secondary, in: Circle())
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("Close")
+            .accessibilityLabel(aiKitText("Close"))
         }
     }
 
@@ -1892,7 +1995,12 @@ struct AssistantChatbotOverlay<DetailContent: View>: View {
 
     private var dialogInput: some View {
         HStack(alignment: .bottom, spacing: 8) {
-            TextField("Prompt", text: $draft, axis: .vertical)
+            TextField(
+                AIKitUILocalization.string("Prompt"),
+                text: $draft,
+                prompt: aiKitText("Prompt"),
+                axis: .vertical
+            )
                 .textFieldStyle(.plain)
                 .lineLimit(1...4)
                 .disabled(input.session.isRunning)
@@ -1906,7 +2014,7 @@ struct AssistantChatbotOverlay<DetailContent: View>: View {
             .disabled(input.session.isRunning || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             .buttonStyle(.borderedProminent)
             .buttonBorderShape(.circle)
-            .accessibilityLabel("Send")
+            .accessibilityLabel(aiKitText("Send"))
         }
     }
 
@@ -2016,9 +2124,9 @@ public struct AssistantRuntimeDetailView: View {
                 .background(Color.accentColor.gradient, in: RoundedRectangle(cornerRadius: 8))
 
             VStack(alignment: .leading, spacing: 2) {
-                Text(title)
+                Text(LocalizedStringKey(title), bundle: .module)
                     .font(.headline)
-                Text(activity.statusText)
+                Text(activity.aiKitLocalizedStatusText)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -2033,7 +2141,7 @@ public struct AssistantRuntimeDetailView: View {
                     .frame(width: 28, height: 28)
             }
             .buttonStyle(.borderless)
-            .help("Refresh runtime details")
+            .help(AIKitUILocalization.string("Refresh runtime details"))
         }
     }
 
@@ -2166,8 +2274,8 @@ private final class AIKitConfigurationViewModel {
             )
             updateModelCatalogState(provider) { state in
                 state.status = models.isEmpty
-                    ? "No models returned."
-                    : "Loaded \(models.count) models."
+                    ? AIKitUILocalization.string("No models returned.")
+                    : AIKitUILocalization.string("Loaded \(models.count) models.")
                 state.statusIsError = false
             }
             var providerConfiguration = configuration.core.providerConfiguration(for: provider)
@@ -2191,7 +2299,7 @@ private final class AIKitConfigurationViewModel {
         modelCatalogStates[provider] = state
     }
 
-    private func saveCurrentConfiguration(status: String) {
+    private func saveCurrentConfiguration(status: String.LocalizationValue) {
         saveTask?.cancel()
 
         let configuration = configuration
@@ -2204,7 +2312,7 @@ private final class AIKitConfigurationViewModel {
             guard !Task.isCancelled else { return }
 
             self.recentChanges = recentChanges
-            self.status = status
+            self.status = AIKitUILocalization.string(status)
         }
     }
 
@@ -2214,7 +2322,7 @@ private final class AIKitConfigurationViewModel {
 }
 
 private struct AIKitConfigurationSection<Content: View>: View {
-    let title: String
+    let title: LocalizedStringKey
     let systemImage: String
     var tint: Color = .accentColor
     @ViewBuilder var content: Content
@@ -2244,7 +2352,7 @@ private struct AIKitConfigurationSection<Content: View>: View {
                 .foregroundStyle(tint)
                 .frame(width: AIKitMetrics.badgeSize, height: AIKitMetrics.badgeSize)
                 .background(tint.opacity(0.12), in: .rect(cornerRadius: AIKitMetrics.badgeRadius))
-            Text(title)
+            aiKitText(title)
                 .font(.headline)
                 .bold()
             Spacer(minLength: 0)
@@ -2275,7 +2383,7 @@ private struct AIKitTextFieldRowStyle: LabeledContentStyle {
 }
 
 private struct AIKitSummaryChip: View {
-    let title: String
+    let title: LocalizedStringKey
     let value: String
     let systemImage: String
     let tint: Color
@@ -2287,7 +2395,7 @@ private struct AIKitSummaryChip: View {
                 .foregroundStyle(tint)
                 .frame(width: 22)
             VStack(alignment: .leading, spacing: 1) {
-                Text(title)
+                aiKitText(title)
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                 Text(value)
@@ -2310,7 +2418,7 @@ private struct AIKitSummaryChip: View {
 }
 
 private struct AIKitPickerCapsule: View {
-    let title: String
+    let title: LocalizedStringKey
     let value: String
     let systemImage: String
     let tint: Color
@@ -2334,7 +2442,7 @@ private struct AIKitPickerCapsule: View {
 }
 
 private struct AIKitPickerCapsuleLabel: View {
-    let title: String
+    let title: LocalizedStringKey
     let value: String
     let systemImage: String
     let tint: Color
@@ -2347,7 +2455,7 @@ private struct AIKitPickerCapsuleLabel: View {
                 .frame(width: 22)
 
             VStack(alignment: .leading, spacing: 1) {
-                Text(title)
+                aiKitText(title)
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                 Text(value)
@@ -2423,7 +2531,11 @@ private struct AIKitTabFabPanel<CustomContent: View>: View {
                         showsRuntimeDetails = true
                     }
                 } label: {
-                    Label("AI details", systemImage: "sparkles")
+                    Label {
+                        aiKitText("AI details")
+                    } icon: {
+                        Image(systemName: "sparkles")
+                    }
                 }
                 .buttonStyle(.bordered)
             }
@@ -2489,11 +2601,17 @@ private struct AIKitTabFabPanel<CustomContent: View>: View {
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("Back")
+            .accessibilityLabel(aiKitText("Back"))
 
-            Text(context.currentViewContext?.displayName ?? "AI Details")
-                .font(.subheadline.weight(.semibold))
-                .lineLimit(1)
+            if let displayName = context.currentViewContext?.displayName {
+                Text(displayName)
+                    .font(.subheadline.weight(.semibold))
+                    .lineLimit(1)
+            } else {
+                aiKitText("AI Details")
+                    .font(.subheadline.weight(.semibold))
+                    .lineLimit(1)
+            }
             Spacer(minLength: 0)
         }
     }
@@ -2632,10 +2750,12 @@ private struct AssistantRuntimeDetailContent: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Picker("Menu", selection: $selectedMenu) {
+            Picker(selection: $selectedMenu) {
                 ForEach(ChatbotMenu.allCases) { menu in
-                    Text(menu.rawValue).tag(menu)
+                    Text(menu.title, bundle: .module).tag(menu)
                 }
+            } label: {
+                aiKitText("Menu")
             }
             .pickerStyle(.segmented)
 
@@ -2743,19 +2863,28 @@ private struct AssistantRuntimeDetailContent: View {
                         .frame(width: 24, height: 24)
                         .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Back")
+            .buttonStyle(.plain)
+                .accessibilityLabel(aiKitText("Back"))
             }
 
             VStack(alignment: .leading, spacing: 3) {
                 switch activityDisplay {
                 case .tasks:
-                    Text("Tasks")
+                    aiKitText("Tasks")
                         .font(.subheadline.weight(.semibold))
                         .foregroundStyle(.primary)
-                    Text(activityTaskGroups.isEmpty ? "No recent activity" : "\(activityTaskGroups.count) recent")
+                    if activityTaskGroups.isEmpty {
+                        aiKitText("No recent activity")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Text(String(
+                            localized: "\(activityTaskGroups.count) recent",
+                            bundle: .module
+                        ))
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                    }
                 case .task(let id):
                     if let task = activityTask(id: id) {
                         Text(task.instruction)
@@ -2764,7 +2893,7 @@ private struct AssistantRuntimeDetailContent: View {
                             .lineLimit(2)
                         activityStatusText(for: task)
                     } else {
-                        Text("Task unavailable")
+                        aiKitText("Task unavailable")
                             .font(.subheadline.weight(.semibold))
                             .foregroundStyle(.primary)
                     }
@@ -2777,7 +2906,7 @@ private struct AssistantRuntimeDetailContent: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     } else {
-                        Text("Detail unavailable")
+                        aiKitText("Detail unavailable")
                             .font(.subheadline.weight(.semibold))
                             .foregroundStyle(.primary)
                     }
@@ -2953,9 +3082,13 @@ private struct AssistantInputBar: View {
             VoiceWaveformView(level: voiceLevel)
                 .frame(maxWidth: .infinity, alignment: .leading)
         } else if isVoiceTranscribing {
-            statusRow(systemImage: nil, text: "Transcribing", showsProgress: true)
+            statusRow(
+                systemImage: nil,
+                text: AIKitUILocalization.string("Transcribing"),
+                showsProgress: true
+            )
         } else if activity.isBusy {
-            statusRow(systemImage: nil, text: activity.statusText, showsProgress: true)
+            statusRow(systemImage: nil, text: activity.aiKitLocalizedStatusText, showsProgress: true)
         } else if let voiceError {
             statusRow(
                 systemImage: "exclamationmark.triangle.fill",
@@ -2965,8 +3098,13 @@ private struct AssistantInputBar: View {
             .onTapGesture(perform: onClearVoiceError)
         } else {
             TextField(
-                activity.hasFailed ? "Add a clarification…" : "Ask the assistant…",
+                activity.hasFailed
+                    ? AIKitUILocalization.string("Add a clarification…")
+                    : AIKitUILocalization.string("Ask the assistant…"),
                 text: $text,
+                prompt: activity.hasFailed
+                    ? aiKitText("Add a clarification…")
+                    : aiKitText("Ask the assistant…"),
                 axis: .vertical
             )
             .textFieldStyle(.plain)
@@ -3010,7 +3148,7 @@ private struct AssistantInputBar: View {
             .tint(.red)
             .buttonStyle(.borderedProminent)
             .buttonBorderShape(.circle)
-            .accessibilityLabel("Stop recording")
+            .accessibilityLabel(aiKitText("Stop recording"))
         } else if isVoiceTranscribing {
             EmptyView()
         } else if activity.isBusy {
@@ -3020,14 +3158,14 @@ private struct AssistantInputBar: View {
             .tint(.red)
             .buttonStyle(.borderedProminent)
             .buttonBorderShape(.circle)
-            .accessibilityLabel("Cancel")
+            .accessibilityLabel(aiKitText("Cancel"))
         } else if activity.hasFailed && trimmedTextIsEmpty {
             Button(action: onDismissFailure) {
                 Image(systemName: "xmark")
             }
             .buttonStyle(.bordered)
             .buttonBorderShape(.circle)
-            .accessibilityLabel("Dismiss")
+            .accessibilityLabel(aiKitText("Dismiss"))
         } else if trimmedTextIsEmpty {
             Button(action: onStartVoiceRecording) {
                 Image(systemName: "mic.fill")
@@ -3037,14 +3175,14 @@ private struct AssistantInputBar: View {
             .buttonBorderShape(.circle)
             .tint(.accentColor)
             .disabled(activity.isBusy || isVoiceTranscribing)
-            .accessibilityLabel("Start recording")
+            .accessibilityLabel(aiKitText("Start recording"))
         } else {
             Button(action: onSubmit) {
                 Image(systemName: "paperplane.fill")
             }
             .buttonStyle(.borderedProminent)
             .buttonBorderShape(.circle)
-            .accessibilityLabel("Send")
+            .accessibilityLabel(aiKitText("Send"))
         }
     }
 }
@@ -3075,7 +3213,7 @@ private struct VoiceWaveformView: View {
                 .frame(maxWidth: .infinity, minHeight: 34, maxHeight: 34, alignment: .center)
             }
             .frame(maxWidth: .infinity, minHeight: 34, maxHeight: 34, alignment: .center)
-            .accessibilityLabel("Recording voice")
+            .accessibilityLabel(aiKitText("Recording voice"))
         }
     }
 
@@ -3131,9 +3269,9 @@ private struct OverlayActivityTaskRow: View {
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(.primary)
                     .lineLimit(2)
-                Text(task.isRunning ? task.phase.activityLabel : "Completed")
-                    .font(.caption)
-                    .foregroundStyle(task.isRunning ? Color.accentColor : .secondary)
+            Text(task.isRunning ? task.phase.activityLabel : AIKitUILocalization.string("Completed"))
+                .font(.caption)
+                .foregroundStyle(task.isRunning ? Color.accentColor : .secondary)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
@@ -3185,7 +3323,7 @@ private struct OverlayActivityRawPayload: View {
             Text(event.timestamp.formatted(date: .abbreviated, time: .standard))
                 .font(.caption2.monospacedDigit())
                 .foregroundStyle(.secondary)
-            Text(event.payloadText.isEmpty ? "Empty payload" : event.payloadText)
+            Text(event.payloadText.isEmpty ? AIKitUILocalization.string("Empty payload") : event.payloadText)
                 .font(.caption.monospaced())
                 .foregroundStyle(.primary)
                 .textSelection(.enabled)
@@ -3230,7 +3368,7 @@ private struct OverlayActivityStat: View {
         HStack(spacing: 4) {
             Image(systemName: systemImage)
                 .font(.caption2.weight(.semibold))
-            Text(title)
+            Text(LocalizedStringKey(title), bundle: .module)
                 .font(.caption2.weight(.semibold))
             Text(value)
                 .font(.caption.monospacedDigit())
@@ -3251,7 +3389,7 @@ private struct OverlayEmptyState: View {
             Image(systemName: systemImage)
                 .font(.title2)
                 .foregroundStyle(.tertiary)
-            Text(message)
+            Text(LocalizedStringKey(message), bundle: .module)
                 .font(.callout)
                 .foregroundStyle(.secondary)
         }
@@ -3260,12 +3398,20 @@ private struct OverlayEmptyState: View {
     }
 }
 
-private enum ChatbotMenu: String, CaseIterable, Identifiable {
-    case context = "Memory"
-    case tools = "Tools"
-    case activity = "Activity"
+private enum ChatbotMenu: CaseIterable, Identifiable {
+    case context
+    case tools
+    case activity
 
-    var id: String { rawValue }
+    var id: Self { self }
+
+    var title: LocalizedStringKey {
+        switch self {
+        case .context: "Memory"
+        case .tools: "Tools"
+        case .activity: "Activity"
+        }
+    }
 }
 
 private enum OverlayActivityDisplay: Hashable {
@@ -3298,14 +3444,35 @@ private func formattedActivityDuration(_ interval: TimeInterval) -> String {
     return "\(seconds)s"
 }
 
+private extension OrchestratorActivity {
+    var aiKitLocalizedStatusText: String {
+        if isBusy {
+            switch phase {
+            case .idle, .preparing:
+                return AIKitUILocalization.string("Preparing…")
+            case .thinking:
+                return AIKitUILocalization.string("Thinking…")
+            case .callingTool(let name):
+                return AIKitUILocalization.string("Calling \(name)…")
+            case .verifying:
+                return AIKitUILocalization.string("Checking the result…")
+            }
+        }
+        if let failureReason {
+            return failureReason
+        }
+        return AIKitUILocalization.string("Idle")
+    }
+}
+
 private extension OrchestratorPhase {
     var activityLabel: String {
         switch self {
-        case .idle: return "Idle"
-        case .preparing: return "Preparing"
-        case .thinking: return "Thinking"
-        case .callingTool(let name): return "Calling \(name)"
-        case .verifying: return "Checking result"
+        case .idle: return AIKitUILocalization.string("Idle")
+        case .preparing: return AIKitUILocalization.string("Preparing")
+        case .thinking: return AIKitUILocalization.string("Thinking")
+        case .callingTool(let name): return AIKitUILocalization.string("Calling \(name)")
+        case .verifying: return AIKitUILocalization.string("Checking result")
         }
     }
 }
@@ -3313,21 +3480,21 @@ private extension OrchestratorPhase {
 private extension UsageEvent.Kind {
     var detailLabel: String {
         switch self {
-        case .userInstruction: return "userIntent"
-        case .toolInvoked: return "toolCalling"
-        case .toolResult: return "toolResult"
-        case .llmResponse: return "llmResponse"
-        case .error: return "error"
+        case .userInstruction: return AIKitUILocalization.string("User intent")
+        case .toolInvoked: return AIKitUILocalization.string("Tool call")
+        case .toolResult: return AIKitUILocalization.string("Tool result")
+        case .llmResponse: return AIKitUILocalization.string("LLM response")
+        case .error: return AIKitUILocalization.string("Error")
         }
     }
 
     var rawDetailTitle: String {
         switch self {
-        case .llmResponse: return "Raw LLM Response"
-        case .toolInvoked: return "Raw Tool Call"
-        case .toolResult: return "Raw Tool Result"
-        case .userInstruction: return "Raw User Intent"
-        case .error: return "Raw Error"
+        case .llmResponse: return AIKitUILocalization.string("Raw LLM Response")
+        case .toolInvoked: return AIKitUILocalization.string("Raw Tool Call")
+        case .toolResult: return AIKitUILocalization.string("Raw Tool Result")
+        case .userInstruction: return AIKitUILocalization.string("Raw User Intent")
+        case .error: return AIKitUILocalization.string("Raw Error")
         }
     }
 
@@ -3343,11 +3510,11 @@ private extension UsageEvent.Kind {
 }
 
 private extension AIKitConfiguration.ToolCallFallbackMode {
-    var label: String {
+    var localizedLabel: LocalizedStringKey {
         switch self {
-        case .automatic: return "Auto"
-        case .enabled: return "On"
-        case .disabled: return "Off"
+        case .automatic: "Auto"
+        case .enabled: "On"
+        case .disabled: "Off"
         }
     }
 }
@@ -3358,9 +3525,9 @@ private extension AIKitConfigurationChange {
         if let section, let key {
             target = "\(section.rawValue).\(key)"
         } else {
-            target = "all"
+            target = AIKitUILocalization.string("all")
         }
-        return "\(source) updated \(target)"
+        return AIKitUILocalization.string("\(source) updated \(target)")
     }
 }
 
