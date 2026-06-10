@@ -4,7 +4,7 @@ import AIToolKit
 import AIKitCore
 
 /// Built-in tool: reads the shared AIKit configuration state.
-public struct GetAIKitConfigurationTool: Tool, ToolMetadataProviding {
+public struct GetAIKitConfigurationTool: Tool {
     @Generable
     public struct Input: Codable, Sendable {
         public var includeRecentChanges: Bool?
@@ -32,20 +32,8 @@ public struct GetAIKitConfigurationTool: Tool, ToolMetadataProviding {
     public static let toolDescription = """
     Read AIKit's current Core, Capability, Runtime, and Safety configuration.
     """
-    public static let toolAnnotations = ToolAnnotations(
-        isReadOnly: true,
-        isIdempotent: true,
-        sideEffect: .none,
-        sensitiveOutput: .privateContent
-    )
-    public static let toolArgumentExamples: [GeneratedContent] = [
-        .object(["includeRecentChanges": .bool(true)]),
-    ]
-
     public var name: String { Self.toolName }
     public var description: String { Self.toolDescription }
-    public var annotations: ToolAnnotations { Self.toolAnnotations }
-    public var argumentExamples: [GeneratedContent] { Self.toolArgumentExamples }
 
     private let store: AIKitConfigurationStore
 
@@ -69,7 +57,7 @@ public struct GetAIKitConfigurationTool: Tool, ToolMetadataProviding {
 }
 
 /// Built-in tool: mutates one field in the shared AIKit configuration state.
-public struct SetAIKitConfigurationTool: Tool, ToolMetadataProviding {
+public struct SetAIKitConfigurationTool: Tool {
     @Generable
     public struct Input: Sendable {
         @Guide(description: "Configuration section: core, capability, runtime, or safety")
@@ -125,22 +113,8 @@ public struct SetAIKitConfigurationTool: Tool, ToolMetadataProviding {
     twoRoundAutoBind, twoRoundStructuredPlannerOutput, enabledGuardrailIDs, and \
     outputLengthLimit.
     """
-    public static let toolAnnotations = ToolAnnotations(
-        sideEffect: .localWrite,
-        sensitiveOutput: .privateContent
-    )
-    public static let toolArgumentExamples: [GeneratedContent] = [
-        .object([
-            "section": .string(AIKitConfiguration.Section.runtime.rawValue),
-            "key": .string("maxIterations"),
-            "value": .int(4),
-        ]),
-    ]
-
     public var name: String { Self.toolName }
     public var description: String { Self.toolDescription }
-    public var annotations: ToolAnnotations { Self.toolAnnotations }
-    public var argumentExamples: [GeneratedContent] { Self.toolArgumentExamples }
 
     private let store: AIKitConfigurationStore
     private let source: String

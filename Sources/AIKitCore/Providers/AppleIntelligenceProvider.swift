@@ -231,14 +231,8 @@ private enum AppleFoundationModels {
                 message: "Apple Intelligence is unavailable: \(model.availability)"
             )
         }
-
         let rendered = AppleIntelligenceProvider.renderedPrompt(for: request)
-        let session: LanguageModelSession
-        if let instructions = rendered.instructions {
-            session = LanguageModelSession(model: model, instructions: instructions)
-        } else {
-            session = LanguageModelSession(model: model)
-        }
+        let session = makeSession(model: model, rendered: rendered, request: request)
         return try await respond(session: session, prompt: rendered.prompt, request: request)
     }
 
@@ -253,23 +247,43 @@ private enum AppleFoundationModels {
             )
         }
         let rendered = AppleIntelligenceProvider.renderedPrompt(for: request)
-        let session = makeSession(
-            model: model,
-            rendered: rendered
-        )
+        let session = makeProfileSession(model: model, rendered: rendered, request: request)
         return try await respond(session: session, prompt: rendered.prompt, request: request)
     }
 
-    @available(iOS 27.0, macOS 27.0, visionOS 27.0, watchOS 27.0, *)
+    /// Builds the per-request session. On OS 27 the session is declared with
+    /// the official `DynamicProfile` DSL (instructions + generation knobs as
+    /// profile modifiers); earlier systems fall back to the plain initializer
+    /// and pass the knobs per call instead.
     private static func makeSession(
-        model: some LanguageModel,
-        rendered: AppleIntelligenceProvider.RenderedPrompt
+        model: SystemLanguageModel,
+        rendered: AppleIntelligenceProvider.RenderedPrompt,
+        request: LLMRequest
     ) -> LanguageModelSession {
-        if let instructions = rendered.instructions {
-            LanguageModelSession(model: model, instructions: instructions)
-        } else {
-            LanguageModelSession(model: model)
+        if #available(iOS 27.0, macOS 27.0, visionOS 27.0, watchOS 27.0, *) {
+            return makeProfileSession(model: model, rendered: rendered, request: request)
         }
+        if let instructions = rendered.instructions {
+            return LanguageModelSession(model: model, instructions: instructions)
+        }
+        return LanguageModelSession(model: model)
+    }
+
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, watchOS 27.0, *)
+    private static func makeProfileSession(
+        model: some LanguageModel,
+        rendered: AppleIntelligenceProvider.RenderedPrompt,
+        request: LLMRequest
+    ) -> LanguageModelSession {
+        let profile = LanguageModelSession.Profile {
+            if let instructions = rendered.instructions {
+                Instructions(instructions)
+            }
+        }
+        .model(model)
+        .temperature(request.temperature)
+        .maximumResponseTokens(request.maxTokens)
+        return LanguageModelSession(profile: profile)
     }
 
     private static func respond(
@@ -284,6 +298,20 @@ private enum AppleFoundationModels {
         )
 
         do {
+            // A response schema rides Foundation Models guided generation, the
+            // official structured-output path; the constrained JSON value is
+            // returned to the runtime as text.
+            if let schema = request.responseSchema {
+                let response = try await session.respond(
+                    to: prompt,
+                    schema: schema,
+                    options: options
+                )
+                return LLMResponse(
+                    content: [.text(response.content.jsonString)],
+                    stopReason: .endTurn
+                )
+            }
             let response = try await session.respond(
                 to: prompt,
                 options: options

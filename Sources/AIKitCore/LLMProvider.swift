@@ -90,29 +90,3 @@ public extension LLMProvider {
 
     var providerName: String { String(describing: Self.self) }
 }
-
-/// Merges provider-specific `extraBody` keys into an already-encoded request
-/// body. Uses `JSONSerialization` so the encoder's original numeric types
-/// (e.g. an integer `max_tokens`) survive — round-tripping through a `Double`
-/// representation can make strict providers reject the request.
-///
-/// Reserved keys (owned by the wire encoder) are never overwritten.
-func mergedRequestBody(
-    encoded: Data,
-    extraBody: [String: GeneratedContent],
-    reservedKeys: Set<String>
-) throws -> Data {
-    guard !extraBody.isEmpty else { return encoded }
-    guard var object = try JSONSerialization.jsonObject(
-        with: encoded
-    ) as? [String: Any] else {
-        return encoded
-    }
-    for (key, value) in extraBody where !reservedKeys.contains(key) {
-        object[key] = try JSONSerialization.jsonObject(
-            with: Data(value.jsonString.utf8),
-            options: [.fragmentsAllowed]
-        )
-    }
-    return try JSONSerialization.data(withJSONObject: object)
-}

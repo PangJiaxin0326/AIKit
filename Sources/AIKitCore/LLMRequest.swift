@@ -3,6 +3,11 @@ import FoundationModels
 import AIToolKit
 
 /// A stateless request to an LLM provider. Carries no memory or retry policy.
+///
+/// Provider-specific wire configuration (reasoning effort, thinking switches,
+/// vendor body extensions) is owned by the provider package, not this request:
+/// AIKit describes *what* to generate — messages, tools, and an optional
+/// `responseSchema` — and each provider maps that onto its own transport.
 public struct LLMRequest: Sendable, Hashable {
     public var model: String
     public var system: String?
@@ -10,14 +15,15 @@ public struct LLMRequest: Sendable, Hashable {
     public var tools: [ToolDescriptor]
     public var temperature: Double?
     public var maxTokens: Int?
+    /// Constrains the response to one JSON value matching this schema
+    /// (FoundationModels guided generation). Apple-backed providers pass it to
+    /// `LanguageModelSession.respond(to:schema:)`; OpenAI-compatible providers
+    /// map it to a `response_format` JSON-schema constraint. Providers that
+    /// support neither ignore it and return freeform text.
+    public var responseSchema: GenerationSchema?
     /// Requests generated voice/audio output from providers that support it.
     /// Providers that do not support audio output throw `LLMError.unsupported`.
     public var audioOutput: AudioOutputOptions?
-    /// Provider-specific knobs merged into the request body. Use this for
-    /// provider extensions and overrides (`thinking`, `top_p`, `seed`, `stop`,
-    /// …). Reserved keys owned by the wire encoder (`model`, `messages`,
-    /// `stream`, …) are never overwritten by these values.
-    public var extraBody: [String: GeneratedContent]
 
     public init(
         model: String,
@@ -26,8 +32,8 @@ public struct LLMRequest: Sendable, Hashable {
         tools: [ToolDescriptor] = [],
         temperature: Double? = nil,
         maxTokens: Int? = nil,
-        audioOutput: AudioOutputOptions? = nil,
-        extraBody: [String: GeneratedContent] = [:]
+        responseSchema: GenerationSchema? = nil,
+        audioOutput: AudioOutputOptions? = nil
     ) {
         self.model = model
         self.system = system
@@ -35,8 +41,8 @@ public struct LLMRequest: Sendable, Hashable {
         self.tools = tools
         self.temperature = temperature
         self.maxTokens = maxTokens
+        self.responseSchema = responseSchema
         self.audioOutput = audioOutput
-        self.extraBody = extraBody
     }
 
     public static func == (lhs: Self, rhs: Self) -> Bool {
@@ -46,8 +52,8 @@ public struct LLMRequest: Sendable, Hashable {
         lhs.tools.map(\.aikitHashSignature) == rhs.tools.map(\.aikitHashSignature) &&
         lhs.temperature == rhs.temperature &&
         lhs.maxTokens == rhs.maxTokens &&
-        lhs.audioOutput == rhs.audioOutput &&
-        lhs.extraBody.aikitGeneratedContentSignature == rhs.extraBody.aikitGeneratedContentSignature
+        lhs.responseSchema.aikitSchemaSignature == rhs.responseSchema.aikitSchemaSignature &&
+        lhs.audioOutput == rhs.audioOutput
     }
 
     public func hash(into hasher: inout Hasher) {
@@ -57,8 +63,8 @@ public struct LLMRequest: Sendable, Hashable {
         hasher.combine(tools.map(\.aikitHashSignature))
         hasher.combine(temperature)
         hasher.combine(maxTokens)
+        hasher.combine(responseSchema.aikitSchemaSignature)
         hasher.combine(audioOutput)
-        hasher.combine(extraBody.aikitGeneratedContentSignature)
     }
 }
 
@@ -67,13 +73,6 @@ private struct ToolDescriptorHashSignature: Sendable, Hashable {
     var description: String
     var argumentsSchema: String
     var outputSchema: String?
-    var annotations: ToolAnnotations?
-    var argumentExamples: [String]?
-}
-
-private struct GeneratedContentHashSignature: Sendable, Hashable {
-    var key: String
-    var json: String
 }
 
 private extension ToolDescriptor {
@@ -90,17 +89,15 @@ private extension ToolDescriptor {
             name: name,
             description: description,
             argumentsSchema: argumentsJSON,
-            outputSchema: outputJSON,
-            annotations: annotations,
-            argumentExamples: argumentExamples?.map(\.jsonString)
+            outputSchema: outputJSON
         )
     }
 }
 
-private extension Dictionary where Key == String, Value == GeneratedContent {
-    var aikitGeneratedContentSignature: [GeneratedContentHashSignature] {
-        map { GeneratedContentHashSignature(key: $0.key, json: $0.value.jsonString) }
-            .sorted { lhs, rhs in lhs.key < rhs.key }
+private extension GenerationSchema? {
+    var aikitSchemaSignature: String? {
+        guard let schema = self else { return nil }
+        return (try? schema.jsonString()) ?? schema.debugDescription
     }
 }
 

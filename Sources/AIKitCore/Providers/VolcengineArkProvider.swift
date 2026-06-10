@@ -98,13 +98,21 @@ public struct VolcengineArkProvider: LLMProvider {
         if request.audioOutput != nil {
             throw LLMError.unsupported("VolcengineArkProvider does not support generated audio output.")
         }
+        // Provider wire configuration (thinking, reasoning effort, …) is owned
+        // by the VolcengineArkFoundationModels package via its configuration's
+        // `defaultExtraBody`; the only request-derived body extension is the
+        // guided-generation schema, mapped to a `response_format` constraint.
+        var extraBody: [String: VolcengineArkJSONValue] = [:]
+        if let schema = request.responseSchema {
+            extraBody["response_format"] = try VolcengineArkJSONValue.responseFormat(for: schema)
+        }
         return VolcengineArkRequest(
             model: request.model,
             messages: try arkMessages(from: request),
             tools: try request.tools.map(VolcengineArkToolDefinition.init),
             temperature: request.temperature,
             maxTokens: request.maxTokens,
-            extraBody: try request.extraBody.mapValues(VolcengineArkJSONValue.init)
+            extraBody: extraBody
         )
     }
 

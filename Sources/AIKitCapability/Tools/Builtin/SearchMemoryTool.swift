@@ -3,10 +3,9 @@ import FoundationModels
 import AIToolKit
 
 /// Built-in tool: searches the durable memory log. The memory store is
-/// injected at init time — the tool standard's `ToolContext` deliberately does
-/// not carry a memory handle so AIToolKit can stand alone for non-Capability
-/// packages.
-public struct SearchMemoryTool: Tool, ToolMetadataProviding {
+/// injected at init time, matching the official `Tool` shape — dependencies
+/// live on the conforming type, not in a per-call context.
+public struct SearchMemoryTool: Tool {
     @Generable
     public struct Input: Codable, Sendable {
         @Guide(description: "Keyword query")
@@ -39,21 +38,9 @@ public struct SearchMemoryTool: Tool, ToolMetadataProviding {
 
     public static let toolName = "searchMemory"
     public static let toolDescription = "Search the user's interaction history by keyword."
-    public static let toolAnnotations = ToolAnnotations(
-        isReadOnly: true,
-        isIdempotent: true,
-        sideEffect: .none,
-        sensitiveOutput: .privateContent,
-        cachePolicy: .memory
-    )
-    public static let toolArgumentExamples: [GeneratedContent] = [
-        .object(["query": .string("passport renewal"), "limit": .int(5)]),
-    ]
 
     public var name: String { Self.toolName }
     public var description: String { Self.toolDescription }
-    public var annotations: ToolAnnotations { Self.toolAnnotations }
-    public var argumentExamples: [GeneratedContent] { Self.toolArgumentExamples }
 
     private let memory: any MemoryStore
 

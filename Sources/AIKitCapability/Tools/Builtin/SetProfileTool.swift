@@ -4,7 +4,7 @@ import AIToolKit
 import AIKitCore
 
 /// Built-in tool: mutates a key on the user's profile. Effect supplied by host.
-public struct SetProfileTool: Tool, ToolMetadataProviding {
+public struct SetProfileTool: Tool {
     @Generable
     public struct Input: Codable, Sendable {
         @Guide(description: "Profile field name")
@@ -24,19 +24,10 @@ public struct SetProfileTool: Tool, ToolMetadataProviding {
     }
 
     public static let toolName = "setProfile"
-    public static let toolDescription = "Set a key/value pair on the user's profile."
-    public static let toolAnnotations = ToolAnnotations(
-        sideEffect: .localWrite,
-        sensitiveOutput: .none
-    )
-    public static let toolArgumentExamples: [GeneratedContent] = [
-        .object(["key": .string("theme"), "value": .string("dark")]),
-    ]
+    public static let toolDescription = "Set a key/value pair on the user's profile, e.g. key \"theme\" value \"dark\"."
 
     public var name: String { Self.toolName }
     public var description: String { Self.toolDescription }
-    public var annotations: ToolAnnotations { Self.toolAnnotations }
-    public var argumentExamples: [GeneratedContent] { Self.toolArgumentExamples }
 
     private let handler: @Sendable (Input) async throws -> Output
 

@@ -318,9 +318,6 @@ public actor Orchestrator {
         public var memoryWindow: Int
         public var temperature: Double?
         public var maxTokens: Int?
-        /// Provider-specific request knobs (`thinking`, `top_p`, `seed`,
-        /// `stop`, …) forwarded on every LLM call this turn.
-        public var extraBody: [String: GeneratedContent]
         /// Controls the fenced-```tool``` fallback (prompt instruction +
         /// recovery parsing). `nil` (the default) auto-resolves per turn:
         /// enabled only when the provider does not support native function
@@ -350,7 +347,6 @@ public actor Orchestrator {
             memoryWindow: Int = 20,
             temperature: Double? = 0.2,
             maxTokens: Int? = nil,
-            extraBody: [String: GeneratedContent] = [:],
             toolCallFallback: Bool? = nil,
             workflowPlanning: Bool = true,
             leanWorkflowSchema: Bool = true
@@ -363,7 +359,6 @@ public actor Orchestrator {
             self.memoryWindow = memoryWindow
             self.temperature = temperature
             self.maxTokens = maxTokens
-            self.extraBody = extraBody
             self.toolCallFallback = toolCallFallback
             self.workflowPlanning = workflowPlanning
             self.leanWorkflowSchema = leanWorkflowSchema
@@ -801,8 +796,7 @@ public actor Orchestrator {
                 sources: sources,
                 temperature: options.temperature,
                 useStructuredPlannerOutput: useStructuredPlannerOutput,
-                autoBind: autoBind,
-                toolContext: makeToolContext(viewID)
+                autoBind: autoBind
             ),
             guardrails: guardrails,
             planCache: planCache
@@ -960,7 +954,6 @@ public actor Orchestrator {
                     model: selectedModel,
                     temperature: options.temperature,
                     maxTokens: options.maxTokens,
-                    extraBody: options.extraBody,
                     toolCallFallbackHint: useFallback,
                     workflowPlanningHint: options.workflowPlanning,
                     leanWorkflowSchemaHint: options.leanWorkflowSchema
@@ -1154,17 +1147,6 @@ public actor Orchestrator {
         let inputData: Data
     }
 
-    /// Ambient context handed to a tool for the current leaf view. The
-    /// `leafViewID` metadata mirrors `viewID` so tools that read either key
-    /// see the same value.
-    private func makeToolContext(_ viewID: ViewContext.ID) -> ToolContext {
-        ToolContext(
-            viewID: viewID.rawValue,
-            metadata: ["leafViewID": viewID.rawValue],
-            logger: logger
-        )
-    }
-
     private func prepareToolCall(
         _ call: ToolCall,
         viewID: ViewContext.ID,
@@ -1212,12 +1194,7 @@ public actor Orchestrator {
         emit: @Sendable (OrchestratorEvent) -> Void
     ) async throws {
         try await verifyPostToolUse(
-            call,
-            rawOutput: output,
-            diagnosticOutput: output,
-            isError: true,
-            deadline: deadline,
-            emit: emit
+            call, output: output, isError: true, deadline: deadline, emit: emit
         )
         emit(.toolResult(name: call.name, output: output))
         await recordActivity(
@@ -1230,62 +1207,41 @@ public actor Orchestrator {
 
     private func finishToolCallSuccess(
         _ call: ToolCall,
-        rawOutput: Data,
-        diagnosticOutput: Data,
+        output: Data,
         viewID: ViewContext.ID,
         turnID: Int,
         deadline: ContinuousClock.Instant?,
         emit: @Sendable (OrchestratorEvent) -> Void
     ) async throws {
         try await verifyPostToolUse(
-            call,
-            rawOutput: rawOutput,
-            diagnosticOutput: diagnosticOutput,
-            isError: false,
-            deadline: deadline,
-            emit: emit
+            call, output: output, isError: false, deadline: deadline, emit: emit
         )
-        emit(.toolResult(name: call.name, output: diagnosticOutput))
+        emit(.toolResult(name: call.name, output: output))
         await recordActivity(
             viewID: viewID,
             kind: .toolResult,
-            text: "\(call.name) -> \(String(decoding: diagnosticOutput, as: UTF8.self))",
+            text: "\(call.name) -> \(String(decoding: output, as: UTF8.self))",
             turn: turnID
         )
     }
 
     private func verifyPostToolUse(
         _ call: ToolCall,
-        rawOutput: Data,
-        diagnosticOutput: Data,
+        output: Data,
         isError: Bool,
         deadline: ContinuousClock.Instant?,
         emit: @Sendable (OrchestratorEvent) -> Void
     ) async throws {
-        for (output, kind) in [
-            (rawOutput, PostToolUsePayloadKind.raw),
-            (diagnosticOutput, PostToolUsePayloadKind.diagnostic),
-        ] {
-            let warnings = try await withTurnDeadline(deadline) {
-                try await self.guardrails.verify(
-                    .postToolUse,
-                    .postToolUse(
-                        name: call.name,
-                        output: output,
-                        isError: isError,
-                        kind: kind
-                    )
-                )
-            }
-            for warning in warnings {
-                emit(.verification(stage: .postToolUse, outcome: .warn(reason: warning)))
-            }
-            emit(.verification(stage: .postToolUse, outcome: .pass))
+        let warnings = try await withTurnDeadline(deadline) {
+            try await self.guardrails.verify(
+                .postToolUse,
+                .postToolUse(name: call.name, output: output, isError: isError)
+            )
         }
-    }
-
-    private static func data(forToolOutput value: GeneratedContent) -> Data {
-        value.data()
+        for warning in warnings {
+            emit(.verification(stage: .postToolUse, outcome: .warn(reason: warning)))
+        }
+        emit(.verification(stage: .postToolUse, outcome: .pass))
     }
 
     private func executeBatch(
@@ -1335,10 +1291,8 @@ public actor Orchestrator {
             policy: WorkflowValidationPolicy(descriptors: manifest)
         )
         let tools = self.tools
-        let descriptorsByName = Dictionary(uniqueKeysWithValues: manifest.map { ($0.name, $0) })
-        let toolContext = makeToolContext(viewID)
         let workflowGuardrailViolations = WorkflowGuardrailViolationBox()
-        let executor = WorkflowExecutor { node, resolvedInput, executionContext in
+        let executor = WorkflowExecutor { node, resolvedInput, _ in
             do {
                 guard let tool = node.tool else {
                     throw WorkflowError.missingTool(nodeID: node.id)
@@ -1358,10 +1312,7 @@ public actor Orchestrator {
 
                 let outputValue: GeneratedContent
                 do {
-                    outputValue = try await tools.call(
-                        prepared.call,
-                        context: executionContext.toolContext
-                    )
+                    outputValue = try await tools.call(prepared.call)
                 } catch {
                     let output = Self.toolErrorOutput(error)
                     try await self.finishToolCallFailure(
@@ -1375,17 +1326,9 @@ public actor Orchestrator {
                     throw error
                 }
 
-                let diagnosticValue = WorkflowOutputRedactor.diagnosticValue(
-                    outputValue,
-                    node: node,
-                    descriptor: descriptorsByName[prepared.call.name]
-                )
-                let diagnosticOutput = Self.data(forToolOutput: diagnosticValue)
-                let rawOutput = Self.data(forToolOutput: outputValue)
                 try await self.finishToolCallSuccess(
                     prepared.call,
-                    rawOutput: rawOutput,
-                    diagnosticOutput: diagnosticOutput,
+                    output: outputValue.data(),
                     viewID: viewID,
                     turnID: turnID,
                     deadline: deadline,
@@ -1403,7 +1346,7 @@ public actor Orchestrator {
             result = try await withTurnDeadline(deadline) {
                 try await executor.execute(
                     validated,
-                    context: WorkflowExecutionContext(toolContext: toolContext)
+                    context: WorkflowExecutionContext()
                 )
             }
         } catch {
@@ -1454,7 +1397,6 @@ public actor Orchestrator {
         transcript: inout [TranscriptEntry],
         emit: @Sendable (OrchestratorEvent) -> Void
     ) async throws -> Data {
-        let context = makeToolContext(viewID)
         let prepared = try await prepareToolCall(
             call,
             viewID: viewID,
@@ -1467,7 +1409,7 @@ public actor Orchestrator {
             // A hung or slow tool must not be able to overrun the turn budget,
             // so the invocation is raced against the deadline too.
             outputValue = try await withTurnDeadline(deadline) {
-                try await self.tools.call(prepared.call, context: context)
+                try await self.tools.call(prepared.call)
             }
         } catch {
             let output = Self.toolErrorOutput(error)
@@ -1490,11 +1432,10 @@ public actor Orchestrator {
             throw error
         }
 
-        let output = Self.data(forToolOutput: outputValue)
+        let output = outputValue.data()
         try await finishToolCallSuccess(
             prepared.call,
-            rawOutput: output,
-            diagnosticOutput: output,
+            output: output,
             viewID: viewID,
             turnID: turnID,
             deadline: deadline,

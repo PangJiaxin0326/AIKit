@@ -4,7 +4,7 @@ import AIToolKit
 import AIKitCore
 
 /// Built-in tool: mutates an app setting. Effect supplied by host.
-public struct SetSettingTool: Tool, ToolMetadataProviding {
+public struct SetSettingTool: Tool {
     @Generable
     public struct Input: Codable, Sendable {
         @Guide(description: "Setting key")
@@ -24,19 +24,10 @@ public struct SetSettingTool: Tool, ToolMetadataProviding {
     }
 
     public static let toolName = "setSetting"
-    public static let toolDescription = "Set an application setting key to a value."
-    public static let toolAnnotations = ToolAnnotations(
-        sideEffect: .localWrite,
-        sensitiveOutput: .none
-    )
-    public static let toolArgumentExamples: [GeneratedContent] = [
-        .object(["key": .string("notifications"), "value": .string("enabled")]),
-    ]
+    public static let toolDescription = "Set an application setting key to a value, e.g. key \"notifications\" value \"enabled\"."
 
     public var name: String { Self.toolName }
     public var description: String { Self.toolDescription }
-    public var annotations: ToolAnnotations { Self.toolAnnotations }
-    public var argumentExamples: [GeneratedContent] { Self.toolArgumentExamples }
 
     private let handler: @Sendable (Input) async throws -> Output
 

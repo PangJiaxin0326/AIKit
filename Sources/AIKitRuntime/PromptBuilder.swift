@@ -33,7 +33,6 @@ public enum PromptBuilder {
         model: String,
         temperature: Double? = nil,
         maxTokens: Int? = nil,
-        extraBody: [String: GeneratedContent] = [:],
         toolCallFallbackHint: Bool = false,
         workflowPlanningHint: Bool = false,
         leanWorkflowSchemaHint: Bool = true
@@ -73,8 +72,7 @@ public enum PromptBuilder {
             messages: messages,
             tools: tools,
             temperature: temperature,
-            maxTokens: maxTokens,
-            extraBody: extraBody
+            maxTokens: maxTokens
         )
     }
 

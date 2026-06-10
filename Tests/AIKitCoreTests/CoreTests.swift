@@ -62,14 +62,16 @@ import AIKitTestSupport
         #expect(GeneratedContent.string("x").intValue == nil)
     }
 
-    @Test func requestEqualityUsesGeneratedContentJSON() {
-        let built = LLMRequest(model: "m", extraBody: ["seed": .int(4096)])
-        let decoded = LLMRequest(
+    @Test func requestEqualityIncludesResponseSchema() {
+        let plain = LLMRequest(model: "m")
+        #expect(plain == LLMRequest(model: "m"))
+        #expect(plain.hashValue == LLMRequest(model: "m").hashValue)
+
+        let constrained = LLMRequest(
             model: "m",
-            extraBody: ["seed": try! GeneratedContent(json: "4096")]
+            responseSchema: GeneratedContent.generationSchema
         )
-        #expect(built == decoded)
-        #expect(built.hashValue == decoded.hashValue)
+        #expect(plain != constrained)
     }
 }
 
@@ -482,12 +484,15 @@ import AIKitTestSupport
         )
         #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer test-key")
         let sent = try recordedRequestJSON()
+        // The provider package owns the wire defaults: thinking off,
+        // reasoning effort minimal.
         #expect(sent["thinking"]?.objectValue?["type"]?.stringValue == "disabled")
+        #expect(sent["reasoning_effort"]?.stringValue == "minimal")
     }
 
-    @Test func arkExtraBodyCanOverrideDefaultThinking() async throws {
+    @Test func arkMapsResponseSchemaToResponseFormat() async throws {
         let body = """
-        {"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}]}
+        {"choices":[{"message":{"content":"{}"},"finish_reason":"stop"}]}
         """.data(using: .utf8)!
         URLProtocolStub.setStub(.init(body: body))
         let provider = VolcengineArkProvider(
@@ -500,12 +505,15 @@ import AIKitTestSupport
             LLMRequest(
                 model: "ep-test",
                 messages: [.init(role: .user, text: "hi")],
-                extraBody: ["thinking": .object(["type": .string("enabled")])]
+                responseSchema: GeneratedContent.generationSchema
             )
         )
 
         let sent = try recordedRequestJSON()
-        #expect(sent["thinking"]?.objectValue?["type"]?.stringValue == "enabled")
+        let format = sent["response_format"]?.objectValue
+        #expect(format?["type"]?.stringValue == "json_schema")
+        #expect(format?["json_schema"]?.objectValue?["strict"]?.boolValue == true)
+        #expect(format?["json_schema"]?.objectValue?["schema"] != nil)
     }
 
     @Test func arkProviderUsesCustomChatCompletionsPath() async throws {

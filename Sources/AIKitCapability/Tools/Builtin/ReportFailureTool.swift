@@ -7,7 +7,7 @@ import AIKitCore
 /// confidently complete (too vague, ambiguous, or out of scope). The
 /// `Orchestrator` intercepts it by name and ends the turn in a failure
 /// state carrying `reason`, so it never actually runs `invoke`.
-public struct ReportFailureTool: Tool, ToolMetadataProviding {
+public struct ReportFailureTool: Tool {
     @Generable
     public struct Input: Codable, Sendable {
         @Guide(description: "Why you can't confidently proceed")
@@ -29,20 +29,8 @@ public struct ReportFailureTool: Tool, ToolMetadataProviding {
         plain reason the user can act on (what is unclear or missing). Do not \
         call any other tool in the same turn.
         """
-    public static let toolAnnotations = ToolAnnotations(
-        isReadOnly: true,
-        isIdempotent: true,
-        sideEffect: .none,
-        sensitiveOutput: .none
-    )
-    public static let toolArgumentExamples: [GeneratedContent] = [
-        .object(["reason": .string("I need the destination before I can continue.")]),
-    ]
-
     public var name: String { Self.toolName }
     public var description: String { Self.toolDescription }
-    public var annotations: ToolAnnotations { Self.toolAnnotations }
-    public var argumentExamples: [GeneratedContent] { Self.toolArgumentExamples }
 
     public init() {}
 

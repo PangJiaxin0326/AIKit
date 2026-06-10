@@ -355,7 +355,7 @@ private struct FixedHarvester: ContextHarvesting {
         #expect(await flag.didInvoke == false)
     }
 
-    @Test func workflowPostToolUseReceivesRawAndDiagnosticOutputs() async throws {
+    @Test func workflowPostToolUseReceivesToolOutput() async throws {
         let recorder = PostToolUseOutputRecorder()
         let registry = ToolRegistry()
         await registry.register(SensitiveOutputTool())
@@ -394,10 +394,8 @@ private struct FixedHarvester: ContextHarvesting {
             }
         }
         let entries = await recorder.entries
-        #expect(entries.map(\.kind) == [.raw, .diagnostic])
+        #expect(entries.count == 1)
         #expect(entries.first?.text.contains("top-secret") == true)
-        #expect(entries.last?.text.contains("[REDACTED]") == true)
-        #expect(entries.last?.text.contains("top-secret") == false)
     }
 
     @Test func promptBuilderCanExposeWorkflowSchema() {
@@ -512,8 +510,8 @@ private struct FixedHarvester: ContextHarvesting {
 
         let requests = provider.receivedRequests
         #expect(requests.count == 2)
-        #expect(requests[0].extraBody["response_format"] != nil)
-        #expect(requests[1].extraBody["response_format"] == nil)
+        #expect(requests[0].responseSchema != nil)
+        #expect(requests[1].responseSchema == nil)
     }
 
     @Test func planCacheAndAutoBindSkipPlannerOnRepeat() async throws {
@@ -562,34 +560,6 @@ private struct FixedHarvester: ContextHarvesting {
         #expect(provider.receivedRequests.count == 1)
         #expect(await cache.hits == 1)
         #expect(await invocations.destinations == ["settings", "settings"])
-    }
-
-    @Test func approvalRequiredToolsAreRejectedByDefault() async throws {
-        let flag = InvocationFlag()
-        let registry = ToolRegistry()
-        await registry.register(ApprovalRequiredTool(flag: flag))
-        let plan = """
-        {"nodes":[{"id":"act","tool":"approvalRequired","input":{}}],
-         "context_slots":[]}
-        """
-        let provider = MockProvider(responses: [
-            LLMResponse(content: [.text(plan)], stopReason: .endTurn),
-        ])
-        let subject = WorkflowTwoRoundRunner(
-            llm: LLMClient(provider: provider),
-            tools: registry,
-            harvester: StubHarvester(),
-            plannerToolNames: ["approvalRequired"],
-            options: .init(model: "test", sources: [])
-        )
-
-        let result = await subject.run(intent: "do it")
-        guard case .failed(let reason) = result.outcome else {
-            Issue.record("expected failure")
-            return
-        }
-        #expect(reason.contains("unavailableTool") || reason.contains("unavailable"))
-        #expect(await flag.didInvoke == false)
     }
 
     @Test func safetyRedactsToolInputBeforeTwoRoundExecution() async throws {
@@ -1237,7 +1207,7 @@ private struct FixedHarvester: ContextHarvesting {
             if case .error(let error) = event { caught = error }
         }
         #expect(caught is GenericToolError)
-        #expect(await recorder.values == [true, true])
+        #expect(await recorder.values == [true])
     }
 
     @Test func postToolUseBlockSuppressesFailedToolResultEvent() async throws {
@@ -1614,16 +1584,14 @@ private actor PostToolUseRecorder {
 }
 
 private struct PostToolUseOutputEntry: Sendable, Equatable {
-    let kind: PostToolUsePayloadKind
     let text: String
 }
 
 private actor PostToolUseOutputRecorder {
     private(set) var entries: [PostToolUseOutputEntry] = []
 
-    func record(kind: PostToolUsePayloadKind, output: Data) {
+    func record(output: Data) {
         entries.append(PostToolUseOutputEntry(
-            kind: kind,
             text: String(decoding: output, as: UTF8.self)
         ))
     }
@@ -1635,7 +1603,7 @@ private struct RecordingPostToolUseRail: Guardrail {
     let recorder: PostToolUseRecorder
 
     func evaluate(_ payload: GuardrailPayload) async -> Verifier.Outcome {
-        if case .postToolUse(_, _, let isError, _) = payload {
+        if case .postToolUse(_, _, let isError) = payload {
             await recorder.record(isError)
         }
         return .pass
@@ -1648,8 +1616,8 @@ private struct RecordingPostToolUseOutputRail: Guardrail {
     let recorder: PostToolUseOutputRecorder
 
     func evaluate(_ payload: GuardrailPayload) async -> Verifier.Outcome {
-        if case .postToolUse(_, let output, false, let kind) = payload {
-            await recorder.record(kind: kind, output: output)
+        if case .postToolUse(_, let output, false) = payload {
+            await recorder.record(output: output)
         }
         return .pass
     }
@@ -1660,7 +1628,7 @@ private struct BlockingPostToolUseRail: Guardrail {
     let stages: Set<Verifier.Stage> = [.postToolUse]
 
     func evaluate(_ payload: GuardrailPayload) async -> Verifier.Outcome {
-        if case .postToolUse(_, _, true, _) = payload {
+        if case .postToolUse(_, _, true) = payload {
             return .block(reason: "blocked failed tool output")
         }
         return .pass
@@ -1775,32 +1743,7 @@ private struct EmptyInputTool: Tool {
     }
 }
 
-private struct ApprovalRequiredTool: Tool, ToolMetadataProviding {
-    @Generable
-    struct Input: Codable, Sendable {
-        init() {}
-    }
-    @Generable
-    struct Output: Codable, Sendable {
-        var ok: Bool
-    }
-
-    static let toolName = "approvalRequired"
-    let name = Self.toolName
-    let description = "A side-effecting tool that requires approval."
-    let annotations = ToolAnnotations(
-        sideEffect: .destructive,
-        requiresUserApproval: true
-    )
-    let flag: InvocationFlag
-
-    func call(arguments input: Input) async throws -> Output {
-        await flag.mark()
-        return Output(ok: true)
-    }
-}
-
-private struct SensitiveOutputTool: Tool, ToolMetadataProviding {
+private struct SensitiveOutputTool: Tool {
     @Generable
     struct Input: Codable, Sendable {
         init() {}
@@ -1813,7 +1756,6 @@ private struct SensitiveOutputTool: Tool, ToolMetadataProviding {
     static let toolName = "sensitiveOutput"
     let name = Self.toolName
     let description = "Returns sensitive content for guardrail tests."
-    let annotations = ToolAnnotations(sensitiveOutput: .privateContent)
 
     func call(arguments input: Input) async throws -> Output {
         Output(secret: "top-secret")

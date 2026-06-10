@@ -5,7 +5,7 @@ import AIKitCore
 
 /// Built-in tool: requests navigation to a named destination. The host app
 /// supplies the effect via the injected handler.
-public struct NavigateTool: Tool, ToolMetadataProviding {
+public struct NavigateTool: Tool {
     @Generable
     public struct Input: Codable, Sendable {
         @Guide(description: "Destination identifier")
@@ -20,19 +20,10 @@ public struct NavigateTool: Tool, ToolMetadataProviding {
     }
 
     public static let toolName = "navigate"
-    public static let toolDescription = "Navigate the app to a named destination/screen."
-    public static let toolAnnotations = ToolAnnotations(
-        sideEffect: .localWrite,
-        sensitiveOutput: .none
-    )
-    public static let toolArgumentExamples: [GeneratedContent] = [
-        .object(["destination": .string("settings")]),
-    ]
+    public static let toolDescription = "Navigate the app to a named destination/screen, e.g. destination \"settings\"."
 
     public var name: String { Self.toolName }
     public var description: String { Self.toolDescription }
-    public var annotations: ToolAnnotations { Self.toolAnnotations }
-    public var argumentExamples: [GeneratedContent] { Self.toolArgumentExamples }
 
     private let handler: @Sendable (Input) async throws -> Output
 

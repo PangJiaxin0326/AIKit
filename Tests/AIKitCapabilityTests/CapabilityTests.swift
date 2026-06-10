@@ -43,12 +43,8 @@ private func generatedValue<Value: ConvertibleFromGeneratedContent>(
         let registry = ToolRegistry()
         let memory = InMemoryMemoryStore()
         await registry.register(EchoTool(memory: memory))
-        let context = ToolContext(viewID: "home")
-
         let input = jsonData(EchoTool.Input(text: "hi"))
-        let outData = try await registry.call(
-            name: "echo", jsonArguments: input, context: context
-        )
+        let outData = try await registry.call(name: "echo", jsonArguments: input)
         let output = try generatedValue(EchoTool.Output.self, from: outData)
         #expect(output.echoed == "hi")
 
@@ -84,14 +80,9 @@ private func generatedValue<Value: ConvertibleFromGeneratedContent>(
     @Test func builtInDescriptorsExposeWorkflowMetadata() {
         let navigate = NavigateTool { _ in .init(navigated: true) }.descriptor
         #expect(navigate.outputSchema != nil)
-        #expect(navigate.annotations?.sideEffect == .localWrite)
-        #expect(navigate.annotations?.sensitiveOutput == ToolAnnotations.SensitiveOutput.none)
-        #expect(navigate.argumentExamples?.isEmpty == false)
 
         let search = SearchMemoryTool(memory: InMemoryMemoryStore()).descriptor
         #expect(search.outputSchema != nil)
-        #expect(search.annotations?.isReadOnly == true)
-        #expect(search.annotations?.sensitiveOutput == .privateContent)
     }
 
     @Test func unknownToolThrows() async {
@@ -99,8 +90,7 @@ private func generatedValue<Value: ConvertibleFromGeneratedContent>(
         await #expect(throws: ToolRegistryError.self) {
             try await registry.call(
                 name: "nope",
-                jsonArguments: Data("{}".utf8),
-                context: ToolContext(viewID: "v")
+                jsonArguments: Data("{}".utf8)
             )
         }
     }
@@ -428,7 +418,6 @@ private func generatedValue<Value: ConvertibleFromGeneratedContent>(
         #expect(names.contains(GetAIKitConfigurationTool.toolName))
         #expect(names.contains(SetAIKitConfigurationTool.toolName))
 
-        let context = ToolContext(viewID: "settings")
         let setInput = SetAIKitConfigurationTool.Input(
             section: .runtime,
             key: "maxIterations",
@@ -437,8 +426,7 @@ private func generatedValue<Value: ConvertibleFromGeneratedContent>(
         let setData = jsonData(setInput)
         let outputData = try await registry.call(
             name: SetAIKitConfigurationTool.toolName,
-            jsonArguments: setData,
-            context: context
+            jsonArguments: setData
         )
         let output = try generatedValue(SetAIKitConfigurationTool.Output.self, from: outputData)
 
@@ -451,8 +439,7 @@ private func generatedValue<Value: ConvertibleFromGeneratedContent>(
         let getData = jsonData(GetAIKitConfigurationTool.Input())
         let readData = try await registry.call(
             name: GetAIKitConfigurationTool.toolName,
-            jsonArguments: getData,
-            context: context
+            jsonArguments: getData
         )
         let read = try generatedValue(GetAIKitConfigurationTool.Output.self, from: readData)
         #expect(read.configuration.objectValue?["runtime"]?.objectValue?["maxIterations"]?.intValue == 4)

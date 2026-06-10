@@ -17,15 +17,24 @@ public struct VolcengineArkConfiguration: Sendable, Hashable, Codable {
     public var extraHeaders: [String: String]
     public var capabilities: Set<VolcengineArkModelCapability>
 
+    /// The package-owned wire defaults: thinking OFF and reasoning effort
+    /// pinned to minimal. Provider configuration lives here — hosts describe
+    /// requests (messages, tools, an optional response schema) and the
+    /// provider package decides the vendor body extensions. The official
+    /// `ContextOptions.reasoningLevel` overrides these per request on the
+    /// FoundationModels executor path.
+    public static let defaultWireExtraBody: [String: VolcengineArkJSONValue] = [
+        "thinking": .object(["type": .string("disabled")]),
+        "reasoning_effort": .string("minimal"),
+    ]
+
     public init(
         apiKey: String,
         model: String,
         baseURL: URL = Self.defaultBaseURL,
         chatCompletionsPath: String = Self.defaultChatCompletionsPath,
         timeout: TimeInterval? = nil,
-        defaultExtraBody: [String: VolcengineArkJSONValue] = [
-            "thinking": .object(["type": .string("disabled")]),
-        ],
+        defaultExtraBody: [String: VolcengineArkJSONValue] = Self.defaultWireExtraBody,
         extraHeaders: [String: String] = [:],
         capabilities: Set<VolcengineArkModelCapability> = [.toolCalling, .reasoning]
     ) {
@@ -447,6 +456,35 @@ public enum VolcengineArkJSONValue: Sendable, Hashable, Codable {
         }
     }
 }
+
+#if canImport(FoundationModels)
+extension VolcengineArkJSONValue {
+    /// The Ark `response_format` body extension for a Foundation Models
+    /// guided-generation schema: a strict OpenAI-compatible `json_schema`
+    /// constraint built from the schema's official JSON encoding.
+    public static func responseFormat(
+        for schema: GenerationSchema,
+        name: String = "response"
+    ) throws -> VolcengineArkJSONValue {
+        let encoded: VolcengineArkJSONValue
+        do {
+            encoded = try VolcengineArkJSONValue(data: JSONEncoder().encode(schema))
+        } catch {
+            throw VolcengineArkError.encodingFailed(
+                "Couldn't encode GenerationSchema for response_format: \(error)"
+            )
+        }
+        return .object([
+            "type": .string("json_schema"),
+            "json_schema": .object([
+                "name": .string(name),
+                "schema": encoded,
+                "strict": .bool(true),
+            ]),
+        ])
+    }
+}
+#endif
 
 public enum VolcengineArkError: Error, Sendable, Hashable {
     case httpStatus(code: Int, body: String)
@@ -917,16 +955,15 @@ extension VolcengineArkLanguageModelExecutor: FoundationModels.LanguageModelExec
         model: VolcengineArkLanguageModel,
         streamingInto channel: LanguageModelExecutorGenerationChannel
     ) async throws {
-        if request.schema != nil {
-            throw VolcengineArkError.unsupported(
-                "VolcengineArkLanguageModel does not yet adapt Foundation Models guided generation schemas."
-            )
-        }
-
         let messages = Self.messages(from: request.transcript)
         var extraBody = Self.extraBody(for: request.contextOptions)
         if extraBody.isEmpty {
             extraBody = configuration.defaultExtraBody
+        }
+        if let schema = request.schema {
+            // Foundation Models guided generation maps onto Ark's
+            // `response_format` JSON-schema constraint.
+            extraBody["response_format"] = try VolcengineArkJSONValue.responseFormat(for: schema)
         }
         let arkRequest = VolcengineArkRequest(
             model: model.configuration.model,
