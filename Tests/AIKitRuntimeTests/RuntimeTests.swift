@@ -1,4 +1,5 @@
 import Foundation
+import FoundationModels
 import Testing
 import AIToolKit
 @testable import AIKitRuntime
@@ -43,8 +44,8 @@ private struct FixedHarvester: ContextHarvesting {
             memory: memory,
             transcript: [],
             toolManifest: [
-                ToolDescriptor(name: "navigate", description: "nav", inputSchema: .object([:])),
-                ToolDescriptor(name: "other", description: "x", inputSchema: .object([:])),
+                ToolDescriptor(name: "navigate", description: "nav", argumentsSchema: GeneratedContent.generationSchema),
+                ToolDescriptor(name: "other", description: "x", argumentsSchema: GeneratedContent.generationSchema),
             ],
             model: "test-model"
         )
@@ -62,7 +63,7 @@ private struct FixedHarvester: ContextHarvesting {
             memory: [],
             transcript: [],
             toolManifest: [
-                ToolDescriptor(name: "navigate", description: "nav", inputSchema: .object([:])),
+                ToolDescriptor(name: "navigate", description: "nav", argumentsSchema: GeneratedContent.generationSchema),
             ],
             model: "test-model",
             toolCallFallbackHint: true
@@ -84,7 +85,7 @@ private struct FixedHarvester: ContextHarvesting {
             memory: [],
             transcript: [],
             toolManifest: [
-                ToolDescriptor(name: "navigate", description: "nav", inputSchema: .object([:])),
+                ToolDescriptor(name: "navigate", description: "nav", argumentsSchema: GeneratedContent.generationSchema),
             ],
             model: "test-model",
             workflowPlanningHint: true
@@ -94,9 +95,10 @@ private struct FixedHarvester: ContextHarvesting {
         #expect(request.system?.contains("Example WorkflowSpec") == true)
         #expect(request.tools.map(\.name) == [WorkflowSpec.toolName])
 
-        let schemaObject = try #require(request.tools.first?.inputSchema.objectValue)
+        let schemaJSON = try #require(try request.tools.first?.argumentsSchema.jsonString())
+        let schemaObject = try #require(GeneratedContent(json: schemaJSON).objectValue)
         let required = try #require(schemaObject["required"]?.arrayValue)
-        #expect(required == [.string("schema_version"), .string("nodes")])
+        #expect(required.compactMap(\.stringValue) == ["schema_version", "nodes"])
         let properties = try #require(schemaObject["properties"]?.objectValue)
         #expect(properties["final"] == nil)
         #expect(properties["limits"] == nil)
@@ -111,7 +113,7 @@ private struct FixedHarvester: ContextHarvesting {
 
     @Test func parsesToolCalls() throws {
         let response = LLMResponse(
-            content: [.toolUse(id: "1", name: "navigate", input: .object(["to": .string("x")]))],
+            content: [.toolUse(id: "1", name: "navigate", arguments: .object(["to": .string("x")]))],
             stopReason: .toolUse
         )
         guard case .toolCalls(let calls) = try OutputParser.parse(response) else {
@@ -129,7 +131,7 @@ private struct FixedHarvester: ContextHarvesting {
 
     @Test func recoversFencedToolCallFallback() throws {
         let text = "I'll handle that.\n```tool\n"
-            + "{\"name\":\"navigate\",\"input\":{\"destination\":\"home\"}}\n```"
+            + "{\"name\":\"navigate\",\"arguments\":{\"destination\":\"home\"}}\n```"
         let response = LLMResponse(content: [.text(text)], stopReason: .endTurn)
         guard case .mixed(let narration, let calls) = try OutputParser.parse(
             response, allowToolCallFallback: true
@@ -139,11 +141,11 @@ private struct FixedHarvester: ContextHarvesting {
         }
         #expect(narration == "I'll handle that.")
         #expect(calls.first?.name == "navigate")
-        #expect(calls.first?.input.objectValue?["destination"]?.stringValue == "home")
+        #expect(calls.first?.arguments.objectValue?["destination"]?.stringValue == "home")
     }
 
     @Test func fallbackDisabledTreatsFenceAsText() throws {
-        let text = "```tool\n{\"name\":\"x\",\"input\":{}}\n```"
+        let text = "```tool\n{\"name\":\"x\",\"arguments\":{}}\n```"
         let response = LLMResponse(content: [.text(text)], stopReason: .endTurn)
         guard case .final = try OutputParser.parse(response) else {
             Issue.record("expected final text when fallback is off")
@@ -165,7 +167,7 @@ private struct FixedHarvester: ContextHarvesting {
             content: [.toolUse(
                 id: "t1",
                 name: "navigate",
-                input: .object(["__aikit_malformed_tool_input_raw": .string(raw)])
+                arguments: .object(["__aikit_malformed_tool_input_raw": .string(raw)])
             )],
             stopReason: .toolUse
         )
@@ -184,12 +186,12 @@ private struct FixedHarvester: ContextHarvesting {
     @Test func roundTripRandomToolCalls() throws {
         for _ in 0..<50 {
             let name = "tool_\(Int.random(in: 0...999))"
-            let input: JSONValue = .object([
+            let input: GeneratedContent = .object([
                 "n": .number(Double(Int.random(in: 0...100))),
                 "s": .string(UUID().uuidString),
             ])
             let response = LLMResponse(
-                content: [.toolUse(id: UUID().uuidString, name: name, input: input)],
+                content: [.toolUse(id: UUID().uuidString, name: name, arguments: input)],
                 stopReason: .toolUse
             )
             guard case .toolCalls(let calls) = try OutputParser.parse(response) else {
@@ -197,7 +199,7 @@ private struct FixedHarvester: ContextHarvesting {
                 return
             }
             #expect(calls.first?.name == name)
-            #expect(calls.first?.input == input)
+            #expect(calls.first?.arguments == input)
         }
     }
 }
@@ -291,9 +293,9 @@ private struct FixedHarvester: ContextHarvesting {
             ],
             final: .nodeOutput("open_settings")
         )
-        let input = try JSONValue(data: workflowJSONString(spec).data(using: .utf8)!)
+        let input = try GeneratedContent(json: workflowJSONString(spec))
         let response = LLMResponse(
-            content: [.toolUse(id: "wf", name: WorkflowSpec.toolName, input: input)],
+            content: [.toolUse(id: "wf", name: WorkflowSpec.toolName, arguments: input)],
             stopReason: .toolUse
         )
         guard case .workflow(let plan) = try OutputParser.parse(response) else {
@@ -301,6 +303,101 @@ private struct FixedHarvester: ContextHarvesting {
             return
         }
         #expect(plan.nodes.compactMap(\.tool) == ["navigate"])
+    }
+
+    @Test func workflowGuardrailViolationIgnoresContinueWithNullPolicy() async throws {
+        let flag = InvocationFlag()
+        let registry = ToolRegistry()
+        await registry.register(NavigateTool { _ in
+            await flag.mark()
+            return .init(navigated: true)
+        })
+        let resolver = ContextResolver()
+        await resolver.push(ViewContext(
+            id: .init("home"), displayName: "Home", toolNames: ["navigate"]
+        ))
+        let spec = WorkflowSpec(
+            workflowID: "wf_guardrail_terminal",
+            intent: "Prove guardrails cannot be swallowed by node policy.",
+            nodes: [
+                WorkflowNode(
+                    id: "go",
+                    tool: "navigate",
+                    input: .object(["destination": .string("email me at a@b.com")]),
+                    policy: WorkflowNodePolicy(onError: .continueWithNull)
+                ),
+            ],
+            final: .message("done")
+        )
+        let provider = MockProvider(responses: [
+            LLMResponse(
+                content: [.text(try workflowJSONString(spec))],
+                stopReason: .endTurn
+            ),
+        ])
+        let orchestrator = Orchestrator(
+            llm: LLMClient(provider: provider),
+            tools: registry,
+            memory: InMemoryMemoryStore(),
+            contextResolver: resolver,
+            guardrails: PolicyEngine(rails: [PIIRedactor()]),
+            options: .init(model: "test", stream: false)
+        )
+
+        var caught: (any Error)?
+        var final: String?
+        for try await event in await orchestrator.run("open it") {
+            if case .error(let error) = event { caught = error }
+            if case .finalAnswer(let text) = event { final = text }
+        }
+        #expect(caught is GuardrailViolation)
+        #expect(final == nil)
+        #expect(await flag.didInvoke == false)
+    }
+
+    @Test func workflowPostToolUseReceivesRawAndDiagnosticOutputs() async throws {
+        let recorder = PostToolUseOutputRecorder()
+        let registry = ToolRegistry()
+        await registry.register(SensitiveOutputTool())
+        let resolver = ContextResolver()
+        await resolver.push(ViewContext(
+            id: .init("home"), displayName: "Home", toolNames: [SensitiveOutputTool.toolName]
+        ))
+        let spec = WorkflowSpec(
+            workflowID: "wf_post_outputs",
+            intent: "Inspect post-tool output payloads.",
+            nodes: [
+                WorkflowNode(id: "read", tool: SensitiveOutputTool.toolName),
+            ],
+            final: .message("done")
+        )
+        let provider = MockProvider(responses: [
+            LLMResponse(
+                content: [.text(try workflowJSONString(spec))],
+                stopReason: .endTurn
+            ),
+        ])
+        let orchestrator = Orchestrator(
+            llm: LLMClient(provider: provider),
+            tools: registry,
+            memory: InMemoryMemoryStore(),
+            contextResolver: resolver,
+            guardrails: PolicyEngine(rails: [
+                RecordingPostToolUseOutputRail(recorder: recorder)
+            ]),
+            options: .init(model: "test", stream: false)
+        )
+
+        for try await event in await orchestrator.run("read") {
+            if case .error(let error) = event {
+                Issue.record("unexpected error: \(error)")
+            }
+        }
+        let entries = await recorder.entries
+        #expect(entries.map(\.kind) == [.raw, .diagnostic])
+        #expect(entries.first?.text.contains("top-secret") == true)
+        #expect(entries.last?.text.contains("[REDACTED]") == true)
+        #expect(entries.last?.text.contains("top-secret") == false)
     }
 
     @Test func promptBuilderCanExposeWorkflowSchema() {
@@ -316,15 +413,15 @@ private struct FixedHarvester: ContextHarvesting {
             memory: [],
             transcript: [],
             toolManifest: [
-                ToolDescriptor(name: "navigate", description: "nav", inputSchema: .object([:])),
-                ToolDescriptor(name: "setProfile", description: "profile", inputSchema: .object([:])),
+                ToolDescriptor(name: "navigate", description: "nav", argumentsSchema: GeneratedContent.generationSchema),
+                ToolDescriptor(name: "setProfile", description: "profile", argumentsSchema: GeneratedContent.generationSchema),
             ],
             model: "test-model",
             workflowPlanningHint: true
         )
         #expect(request.system?.contains("WorkflowSpec is a topological DAG") == true)
         #expect(request.system?.contains("- navigate: nav") == true)
-        #expect(request.system?.contains("Input schema:") == true)
+        #expect(request.system?.contains("Arguments schema:") == true)
         #expect(request.system?.contains("- setProfile: profile") == true)
         #expect(request.tools.map { $0.name } == [WorkflowSpec.toolName])
     }
@@ -364,7 +461,7 @@ private struct FixedHarvester: ContextHarvesting {
 
     @Test func structuredOutputCanBePlannerOnly() async throws {
         let registry = ToolRegistry()
-        await registry.register(NavigateTool { input, _ in
+        await registry.register(NavigateTool { input in
             .init(navigated: input.destination == "settings")
         })
         let plan = """
@@ -422,7 +519,7 @@ private struct FixedHarvester: ContextHarvesting {
     @Test func planCacheAndAutoBindSkipPlannerOnRepeat() async throws {
         let invocations = ToolInvocationRecorder()
         let registry = ToolRegistry()
-        await registry.register(NavigateTool { input, _ in
+        await registry.register(NavigateTool { input in
             await invocations.record(input.destination)
             return .init(navigated: true)
         })
@@ -494,6 +591,39 @@ private struct FixedHarvester: ContextHarvesting {
         #expect(reason.contains("unavailableTool") || reason.contains("unavailable"))
         #expect(await flag.didInvoke == false)
     }
+
+    @Test func safetyRedactsToolInputBeforeTwoRoundExecution() async throws {
+        let seen = SeenInput()
+        let registry = ToolRegistry()
+        await registry.register(NavigateTool { input in
+            await seen.record(input.destination)
+            return .init(navigated: true)
+        })
+        let plan = """
+        {"nodes":[{"id":"go","tool":"navigate","input":{"destination":"email me at a@b.com"}}],
+         "context_slots":[]}
+        """
+        let provider = MockProvider(responses: [
+            LLMResponse(content: [.text(plan)], stopReason: .endTurn),
+        ])
+        let subject = WorkflowTwoRoundRunner(
+            llm: LLMClient(provider: provider),
+            tools: registry,
+            harvester: StubHarvester(),
+            plannerToolNames: ["navigate"],
+            options: .init(model: "test", sources: []),
+            guardrails: PolicyEngine(rails: [PIIRedactor(mode: .redact)])
+        )
+
+        let result = await subject.run(intent: "open it")
+        guard case .executed = result.outcome else {
+            Issue.record("expected execution, got \(result.outcome)")
+            return
+        }
+        let destination = await seen.value
+        #expect(destination?.contains("[REDACTED]") == true)
+        #expect(destination?.contains("a@b.com") == false)
+    }
 }
 
 @Suite struct RetryPolicyTests {
@@ -548,7 +678,7 @@ private struct FixedHarvester: ContextHarvesting {
         usageRecorder: (any AIKitSessionUsageRecording)? = nil
     ) async -> Orchestrator {
         let registry = ToolRegistry()
-        await registry.register(NavigateTool { input, _ in
+        await registry.register(NavigateTool { input in
             .init(navigated: input.destination == "settings")
         })
         let resolver = ContextResolver()
@@ -574,7 +704,7 @@ private struct FixedHarvester: ContextHarvesting {
             LLMResponse(
                 content: [.toolUse(
                     id: "t1", name: "navigate",
-                    input: .object(["destination": .string("settings")])
+                    arguments: .object(["destination": .string("settings")])
                 )],
                 stopReason: .toolUse
             ),
@@ -601,7 +731,7 @@ private struct FixedHarvester: ContextHarvesting {
             LLMResponse(
                 content: [.toolUse(
                     id: "t1", name: "navigate",
-                    input: .object(["destination": .string("settings")])
+                    arguments: .object(["destination": .string("settings")])
                 )],
                 stopReason: .toolUse,
                 usage: TokenUsage(inputTokens: 10, outputTokens: 2)
@@ -638,7 +768,7 @@ private struct FixedHarvester: ContextHarvesting {
             LLMResponse(
                 content: [.toolUse(
                     id: "t1", name: "navigate",
-                    input: .object(["destination": .string("settings")])
+                    arguments: .object(["destination": .string("settings")])
                 )],
                 stopReason: .toolUse,
                 usage: TokenUsage(inputTokens: 10, outputTokens: 2)
@@ -703,7 +833,7 @@ private struct FixedHarvester: ContextHarvesting {
 
     @Test func runWorkflowTaskHostsTwoRoundAsTrackedTurn() async throws {
         let registry = ToolRegistry()
-        await registry.register(NavigateTool { input, _ in
+        await registry.register(NavigateTool { input in
             .init(navigated: input.destination == "settings")
         })
         let resolver = ContextResolver()
@@ -762,10 +892,51 @@ private struct FixedHarvester: ContextHarvesting {
         #expect(activity.recentActivities.isEmpty == false)
     }
 
+    @Test func runWorkflowTaskAppliesFinalResultGuardrail() async throws {
+        let registry = ToolRegistry()
+        await registry.register(NavigateTool { _ in
+            .init(navigated: true)
+        })
+        let resolver = ContextResolver()
+        await resolver.push(ViewContext(
+            id: .init("home"), displayName: "Home", toolNames: ["navigate"]
+        ))
+        let planJSON = """
+        {"nodes":[{"id":"go","tool":"navigate","input":{"destination":"settings"}}],
+         "context_slots":[]}
+        """
+        let provider = MockProvider(responses: [
+            LLMResponse(content: [.text(planJSON)], stopReason: .endTurn),
+        ])
+        let orchestrator = Orchestrator(
+            llm: LLMClient(provider: provider),
+            tools: registry,
+            memory: InMemoryMemoryStore(),
+            contextResolver: resolver,
+            guardrails: PolicyEngine(rails: [OutputLengthCap(maxCharacters: 1)]),
+            options: .init(model: "test", stream: false, workflowPlanning: false)
+        )
+
+        var final: String?
+        var failure: String?
+        for try await event in await orchestrator.runWorkflowTask(
+            intent: "open settings",
+            harvester: StubHarvester(),
+            plannerToolNames: ["navigate"],
+            sources: []
+        ) {
+            if case .finalAnswer(let text) = event { final = text }
+            if case .failure(let reason) = event { failure = reason }
+            if case .error(let error) = event { Issue.record("unexpected error: \(error)") }
+        }
+        #expect(final == nil)
+        #expect(failure?.contains("builtin.outputLengthCap") == true)
+    }
+
     @Test func workflowPlanningRejectsDirectToolCallsWithoutInvokingTool() async throws {
         let flag = InvocationFlag()
         let registry = ToolRegistry()
-        await registry.register(NavigateTool { _, _ in
+        await registry.register(NavigateTool { _ in
             await flag.mark()
             return .init(navigated: true)
         })
@@ -777,7 +948,7 @@ private struct FixedHarvester: ContextHarvesting {
             LLMResponse(
                 content: [.toolUse(
                     id: "t1", name: "navigate",
-                    input: .object(["destination": .string("settings")])
+                    arguments: .object(["destination": .string("settings")])
                 )],
                 stopReason: .toolUse
             ),
@@ -802,7 +973,7 @@ private struct FixedHarvester: ContextHarvesting {
 
     @Test func malformedToolInputCorrectedOnSecondAttemptWithoutOrphanToolMessage() async throws {
         let registry = ToolRegistry()
-        await registry.register(NavigateTool { input, _ in
+        await registry.register(NavigateTool { input in
             .init(navigated: input.destination == "settings")
         })
         let resolver = ContextResolver()
@@ -812,11 +983,11 @@ private struct FixedHarvester: ContextHarvesting {
         let provider = MockProvider(responses: [
             LLMResponse(content: [.toolUse(
                 id: "bad", name: "navigate",
-                input: .object(["destination": .number(42)])
+                arguments: .object(["destination": .number(42)])
             )], stopReason: .toolUse),
             LLMResponse(content: [.toolUse(
                 id: "good", name: "navigate",
-                input: .object(["destination": .string("settings")])
+                arguments: .object(["destination": .string("settings")])
             )], stopReason: .toolUse),
             LLMResponse(content: [.text("Recovered.")], stopReason: .endTurn),
         ])
@@ -859,7 +1030,7 @@ private struct FixedHarvester: ContextHarvesting {
     @Test func malformedNativeToolInputCorrectedWithoutInvokingTool() async throws {
         let invocations = ToolInvocationRecorder()
         let registry = ToolRegistry()
-        await registry.register(NavigateTool { input, _ in
+        await registry.register(NavigateTool { input in
             await invocations.record(input.destination)
             return .init(navigated: input.destination == "settings")
         })
@@ -871,11 +1042,11 @@ private struct FixedHarvester: ContextHarvesting {
         let provider = MockProvider(responses: [
             LLMResponse(content: [.toolUse(
                 id: "bad", name: "navigate",
-                input: .object(["__aikit_malformed_tool_input_raw": .string(raw)])
+                arguments: .object(["__aikit_malformed_tool_input_raw": .string(raw)])
             )], stopReason: .toolUse),
             LLMResponse(content: [.toolUse(
                 id: "good", name: "navigate",
-                input: .object(["destination": .string("settings")])
+                arguments: .object(["destination": .string("settings")])
             )], stopReason: .toolUse),
             LLMResponse(content: [.text("Recovered.")], stopReason: .endTurn),
         ])
@@ -911,7 +1082,7 @@ private struct FixedHarvester: ContextHarvesting {
     @Test func retriableToolFailureCreatesErrorToolResultAndRecovers() async throws {
         let attempts = ToolAttemptCounter()
         let registry = ToolRegistry()
-        await registry.register(NavigateTool { _, _ in
+        await registry.register(NavigateTool { _ in
             if await attempts.shouldFailOnce() {
                 throw GenericToolError(message: "temporary navigation failure", isRetriable: true)
             }
@@ -924,11 +1095,11 @@ private struct FixedHarvester: ContextHarvesting {
         let provider = MockProvider(responses: [
             LLMResponse(content: [.toolUse(
                 id: "first", name: "navigate",
-                input: .object(["destination": .string("settings")])
+                arguments: .object(["destination": .string("settings")])
             )], stopReason: .toolUse),
             LLMResponse(content: [.toolUse(
                 id: "retry", name: "navigate",
-                input: .object(["destination": .string("settings")])
+                arguments: .object(["destination": .string("settings")])
             )], stopReason: .toolUse),
             LLMResponse(content: [.text("Recovered.")], stopReason: .endTurn),
         ])
@@ -970,7 +1141,7 @@ private struct FixedHarvester: ContextHarvesting {
         let attempts = ToolAttemptCounter()
         let skippedFlag = InvocationFlag()
         let registry = ToolRegistry()
-        await registry.register(NavigateTool { _, _ in
+        await registry.register(NavigateTool { _ in
             if await attempts.shouldFailOnce() {
                 throw GenericToolError(message: "temporary navigation failure", isRetriable: true)
             }
@@ -983,19 +1154,19 @@ private struct FixedHarvester: ContextHarvesting {
         await resolver.push(ViewContext(
             id: .init("home"),
             displayName: "Home",
-            toolNames: ["navigate", EmptyInputTool.name]
+            toolNames: ["navigate", EmptyInputTool.toolName]
         ))
         let provider = MockProvider(responses: [
             LLMResponse(content: [
                 .toolUse(
                     id: "first", name: "navigate",
-                    input: .object(["destination": .string("settings")])
+                    arguments: .object(["destination": .string("settings")])
                 ),
-                .toolUse(id: "second", name: EmptyInputTool.name, input: .object([:])),
+                .toolUse(id: "second", name: EmptyInputTool.toolName, arguments: .object([:])),
             ], stopReason: .toolUse),
             LLMResponse(content: [.toolUse(
                 id: "retry", name: "navigate",
-                input: .object(["destination": .string("settings")])
+                arguments: .object(["destination": .string("settings")])
             )], stopReason: .toolUse),
             LLMResponse(content: [.text("Recovered.")], stopReason: .endTurn),
         ])
@@ -1035,7 +1206,7 @@ private struct FixedHarvester: ContextHarvesting {
     @Test func postToolUseReceivesIsErrorTrueForToolFailure() async throws {
         let recorder = PostToolUseRecorder()
         let registry = ToolRegistry()
-        await registry.register(NavigateTool { _, _ in
+        await registry.register(NavigateTool { _ in
             throw GenericToolError(message: "permanent navigation failure")
         })
         let resolver = ContextResolver()
@@ -1045,7 +1216,7 @@ private struct FixedHarvester: ContextHarvesting {
         let provider = MockProvider(responses: [
             LLMResponse(content: [.toolUse(
                 id: "failed", name: "navigate",
-                input: .object(["destination": .string("settings")])
+                arguments: .object(["destination": .string("settings")])
             )], stopReason: .toolUse),
         ])
         let orchestrator = Orchestrator(
@@ -1066,12 +1237,12 @@ private struct FixedHarvester: ContextHarvesting {
             if case .error(let error) = event { caught = error }
         }
         #expect(caught is GenericToolError)
-        #expect(await recorder.values == [true])
+        #expect(await recorder.values == [true, true])
     }
 
     @Test func postToolUseBlockSuppressesFailedToolResultEvent() async throws {
         let registry = ToolRegistry()
-        await registry.register(NavigateTool { _, _ in
+        await registry.register(NavigateTool { _ in
             throw GenericToolError(message: "contains blocked output")
         })
         let resolver = ContextResolver()
@@ -1081,7 +1252,7 @@ private struct FixedHarvester: ContextHarvesting {
         let provider = MockProvider(responses: [
             LLMResponse(content: [.toolUse(
                 id: "failed", name: "navigate",
-                input: .object(["destination": .string("settings")])
+                arguments: .object(["destination": .string("settings")])
             )], stopReason: .toolUse),
         ])
         let orchestrator = Orchestrator(
@@ -1137,7 +1308,7 @@ private struct FixedHarvester: ContextHarvesting {
         })
         let resolver = ContextResolver()
         await resolver.push(ViewContext(
-            id: .init("v"), displayName: "V", toolNames: [EmptyInputTool.name]
+            id: .init("v"), displayName: "V", toolNames: [EmptyInputTool.toolName]
         ))
         let orchestrator = Orchestrator(
             llm: LLMClient(provider: MalformedStreamingToolProvider()),
@@ -1164,7 +1335,7 @@ private struct FixedHarvester: ContextHarvesting {
                 .text("Let me open that for you."),
                 .toolUse(
                     id: "t1", name: "navigate",
-                    input: .object(["destination": .string("settings")])
+                    arguments: .object(["destination": .string("settings")])
                 ),
             ], stopReason: .toolUse),
             LLMResponse(content: [.text("Done.")], stopReason: .endTurn),
@@ -1203,7 +1374,7 @@ private struct FixedHarvester: ContextHarvesting {
     @Test func piiRedactorRedactsToolInputBeforeInvocation() async throws {
         let seen = SeenInput()
         let registry = ToolRegistry()
-        await registry.register(NavigateTool { input, _ in
+        await registry.register(NavigateTool { input in
             await seen.record(input.destination)
             return .init(navigated: true)
         })
@@ -1214,7 +1385,7 @@ private struct FixedHarvester: ContextHarvesting {
         let provider = MockProvider(responses: [
             LLMResponse(content: [.toolUse(
                 id: "t1", name: "navigate",
-                input: .object(["destination": .string("email me at a@b.com")])
+                arguments: .object(["destination": .string("email me at a@b.com")])
             )], stopReason: .toolUse),
             LLMResponse(content: [.text("ok")], stopReason: .endTurn),
         ])
@@ -1239,7 +1410,7 @@ private struct FixedHarvester: ContextHarvesting {
         let registry = ToolRegistry()
         await registry.register(FindContactTool(recorder: recorder))
         await registry.register(CreateReminderTool(recorder: recorder))
-        await registry.register(NavigateTool { input, _ in
+        await registry.register(NavigateTool { input in
             await recorder.record("navigate:\(input.destination)")
             return .init(navigated: true)
         })
@@ -1310,11 +1481,86 @@ private struct FixedHarvester: ContextHarvesting {
 }
 
 private func workflowJSONString(_ spec: WorkflowSpec) throws -> String {
-    let data = try JSONEncoder().encode(spec)
-    return String(decoding: data, as: UTF8.self)
+    workflowContent(spec).jsonString
 }
 
-private func workflowRef(node: String, path: String) -> JSONValue {
+private func workflowContent(_ spec: WorkflowSpec) -> GeneratedContent {
+    .object([
+        "schema_version": .string(spec.schemaVersion),
+        "workflow_id": .string(spec.workflowID),
+        "intent": .string(spec.intent),
+        "mode": .string(spec.mode.rawValue),
+        "nodes": .array(spec.nodes.map(workflowNodeContent)),
+        "final": workflowFinalContent(spec.final),
+    ])
+}
+
+private func workflowNodeContent(_ node: WorkflowNode) -> GeneratedContent {
+    var object: [String: GeneratedContent] = [
+        "id": .string(node.id),
+        "kind": .string(node.kind.rawValue),
+        "input": node.input,
+    ]
+    if let tool = node.tool {
+        object["tool"] = .string(tool)
+    }
+    if !node.dependsOn.isEmpty {
+        object["depends_on"] = .array(node.dependsOn.map { .string($0) })
+    }
+    if node.policy != .default {
+        object["policy"] = workflowNodePolicyContent(node.policy)
+    }
+    return .object(object)
+}
+
+private func workflowNodePolicyContent(_ policy: WorkflowNodePolicy) -> GeneratedContent {
+    var object: [String: GeneratedContent] = [
+        "on_error": .string(policy.onError.rawValue),
+    ]
+    if policy.timeoutMS != WorkflowNodePolicy.defaultTimeoutMS {
+        object["timeout_ms"] = .int(policy.timeoutMS)
+    }
+    if policy.retry != .default {
+        object["retry"] = .object([
+            "max_attempts": .int(policy.retry.maxAttempts),
+            "backoff_ms": .int(policy.retry.backoffMS),
+            "retry_only_if_tool_error_is_retriable": .bool(
+                policy.retry.retryOnlyIfToolErrorIsRetriable
+            ),
+        ])
+    }
+    if let defaultOutput = policy.defaultOutput {
+        object["default_output"] = defaultOutput
+    }
+    return .object(object)
+}
+
+private func workflowFinalContent(_ final: WorkflowFinal) -> GeneratedContent {
+    var object: [String: GeneratedContent] = [
+        "kind": .string(final.kind.rawValue),
+    ]
+    if let value = final.value {
+        object["value"] = value
+    }
+    if let template = final.template {
+        object["template"] = .string(template)
+    }
+    if !final.bindings.isEmpty {
+        object["bindings"] = .object(final.bindings)
+    }
+    if let node = final.node {
+        object["node"] = .string(node)
+    }
+    if let path = final.path {
+        object["path"] = .string(path)
+    }
+    if let message = final.message {
+        object["message"] = .string(message)
+    }
+    return .object(object)
+}
+
+private func workflowRef(node: String, path: String) -> GeneratedContent {
     .object([
         "$ref": .object([
             "source": .string("node"),
@@ -1367,14 +1613,43 @@ private actor PostToolUseRecorder {
     }
 }
 
+private struct PostToolUseOutputEntry: Sendable, Equatable {
+    let kind: PostToolUsePayloadKind
+    let text: String
+}
+
+private actor PostToolUseOutputRecorder {
+    private(set) var entries: [PostToolUseOutputEntry] = []
+
+    func record(kind: PostToolUsePayloadKind, output: Data) {
+        entries.append(PostToolUseOutputEntry(
+            kind: kind,
+            text: String(decoding: output, as: UTF8.self)
+        ))
+    }
+}
+
 private struct RecordingPostToolUseRail: Guardrail {
     let id = "record-post-tool-use"
     let stages: Set<Verifier.Stage> = [.postToolUse]
     let recorder: PostToolUseRecorder
 
     func evaluate(_ payload: GuardrailPayload) async -> Verifier.Outcome {
-        if case .postToolUse(_, _, let isError) = payload {
+        if case .postToolUse(_, _, let isError, _) = payload {
             await recorder.record(isError)
+        }
+        return .pass
+    }
+}
+
+private struct RecordingPostToolUseOutputRail: Guardrail {
+    let id = "record-post-tool-use-output"
+    let stages: Set<Verifier.Stage> = [.postToolUse]
+    let recorder: PostToolUseOutputRecorder
+
+    func evaluate(_ payload: GuardrailPayload) async -> Verifier.Outcome {
+        if case .postToolUse(_, let output, false, let kind) = payload {
+            await recorder.record(kind: kind, output: output)
         }
         return .pass
     }
@@ -1385,7 +1660,7 @@ private struct BlockingPostToolUseRail: Guardrail {
     let stages: Set<Verifier.Stage> = [.postToolUse]
 
     func evaluate(_ payload: GuardrailPayload) async -> Verifier.Outcome {
-        if case .postToolUse(_, _, true) = payload {
+        if case .postToolUse(_, _, true, _) = payload {
             return .block(reason: "blocked failed tool output")
         }
         return .pass
@@ -1424,55 +1699,48 @@ private func hasOnlyMatchedToolResults(in messages: [Message]) -> Bool {
 }
 
 private struct FindContactTool: Tool {
+    @Generable
     struct Input: Codable, Sendable {
-        let query: String
+        var query: String
     }
 
+    @Generable
     struct Output: Codable, Sendable {
-        let contactID: String
-        let displayName: String
+        var contactID: String
+        var displayName: String
     }
 
-    static let name = "findContact"
-    static let description = "Find a contact by name."
-    static let inputSchema = ToolSchema.object(
-        properties: ["query": .string(description: "Contact name")],
-        required: ["query"]
-    )
-
+    static let toolName = "findContact"
+    let name = Self.toolName
+    let description = "Find a contact by name."
     let recorder: WorkflowRecorder
 
-    func call(_ input: Input, in context: ToolContext) async throws -> Output {
+    func call(arguments input: Input) async throws -> Output {
         await recorder.record("find:\(input.query)")
         return Output(contactID: "contact-alex", displayName: input.query)
     }
 }
 
 private struct CreateReminderTool: Tool {
+    @Generable
     struct Input: Codable, Sendable {
-        let title: String
-        let contactID: String
+        var title: String
+        var contactID: String
     }
 
+    @Generable
     struct Output: Codable, Sendable {
-        let reminderID: String
-        let title: String
-        let contactID: String
+        var reminderID: String
+        var title: String
+        var contactID: String
     }
 
-    static let name = "createReminder"
-    static let description = "Create a reminder, optionally attached to a contact."
-    static let inputSchema = ToolSchema.object(
-        properties: [
-            "title": .string(description: "Reminder title"),
-            "contactID": .string(description: "Contact identifier"),
-        ],
-        required: ["title", "contactID"]
-    )
-
+    static let toolName = "createReminder"
+    let name = Self.toolName
+    let description = "Create a reminder, optionally attached to a contact."
     let recorder: WorkflowRecorder
 
-    func call(_ input: Input, in context: ToolContext) async throws -> Output {
+    func call(arguments input: Input) async throws -> Output {
         await recorder.record("reminder:\(input.title):\(input.contactID)")
         return Output(
             reminderID: "reminder-1",
@@ -1483,46 +1751,72 @@ private struct CreateReminderTool: Tool {
 }
 
 private struct EmptyInputTool: Tool {
-    struct Input: Codable, Sendable {}
+    @Generable
+    struct Input: Codable, Sendable {
+        init() {}
+    }
+    @Generable
     struct Output: Codable, Sendable {
-        let ok: Bool
+        var ok: Bool
     }
 
-    static let name = "emptyInput"
-    static let description = "A no-input test tool."
-    static let inputSchema = ToolSchema.object(properties: [:])
-
+    static let toolName = "emptyInput"
+    let name = Self.toolName
+    let description = "A no-input test tool."
     let handler: @Sendable () async -> Void
 
     init(handler: @escaping @Sendable () async -> Void) {
         self.handler = handler
     }
 
-    func call(_ input: Input, in context: ToolContext) async throws -> Output {
+    func call(arguments input: Input) async throws -> Output {
         await handler()
         return Output(ok: true)
     }
 }
 
-private struct ApprovalRequiredTool: Tool {
-    struct Input: Codable, Sendable {}
+private struct ApprovalRequiredTool: Tool, ToolMetadataProviding {
+    @Generable
+    struct Input: Codable, Sendable {
+        init() {}
+    }
+    @Generable
     struct Output: Codable, Sendable {
-        let ok: Bool
+        var ok: Bool
     }
 
-    static let name = "approvalRequired"
-    static let description = "A side-effecting tool that requires approval."
-    static let inputSchema = ToolSchema.object(properties: [:])
-    static let annotations = ToolAnnotations(
+    static let toolName = "approvalRequired"
+    let name = Self.toolName
+    let description = "A side-effecting tool that requires approval."
+    let annotations = ToolAnnotations(
         sideEffect: .destructive,
         requiresUserApproval: true
     )
-
     let flag: InvocationFlag
 
-    func call(_ input: Input, in context: ToolContext) async throws -> Output {
+    func call(arguments input: Input) async throws -> Output {
         await flag.mark()
         return Output(ok: true)
+    }
+}
+
+private struct SensitiveOutputTool: Tool, ToolMetadataProviding {
+    @Generable
+    struct Input: Codable, Sendable {
+        init() {}
+    }
+    @Generable
+    struct Output: Codable, Sendable {
+        var secret: String
+    }
+
+    static let toolName = "sensitiveOutput"
+    let name = Self.toolName
+    let description = "Returns sensitive content for guardrail tests."
+    let annotations = ToolAnnotations(sensitiveOutput: .privateContent)
+
+    func call(arguments input: Input) async throws -> Output {
+        Output(secret: "top-secret")
     }
 }
 
@@ -1541,7 +1835,7 @@ private struct MalformedStreamingToolProvider: LLMProvider {
         _ request: LLMRequest
     ) -> AsyncThrowingStream<LLMResponseChunk, any Error> {
         AsyncThrowingStream { continuation in
-            continuation.yield(.toolUseStart(id: "bad_1", name: EmptyInputTool.name))
+            continuation.yield(.toolUseStart(id: "bad_1", name: EmptyInputTool.toolName))
             continuation.yield(.toolUseInputDelta(id: "bad_1", json: "{\"unterminated\":"))
             continuation.yield(.toolUseStop(id: "bad_1"))
             continuation.yield(.stop(.toolUse))
@@ -1585,12 +1879,11 @@ private final class SlowProvider: LLMProvider, @unchecked Sendable {
 }
 
 @Suite struct FallbackTranscriptTests {
-    /// REVIEW2 finding **A**: a fenced-fallback recovery must be recorded as a
-    /// structured `tool_use` block, with the following `tool_result` carrying
-    /// the matching id — not the raw JSON as assistant text.
+    /// A fenced-fallback recovery must be recorded as a structured `tool_use`
+    /// block, with the following `tool_result` carrying the matching id.
     @Test func fencedFallbackRecordsStructuredToolUse() async throws {
         let registry = ToolRegistry()
-        await registry.register(NavigateTool { input, _ in
+        await registry.register(NavigateTool { input in
             .init(navigated: input.destination == "settings")
         })
         let resolver = ContextResolver()
@@ -1599,7 +1892,7 @@ private final class SlowProvider: LLMProvider, @unchecked Sendable {
             systemPromptFragment: "You can navigate.", toolNames: ["navigate"]
         ))
         let fenced = "Working on it.\n```tool\n"
-            + "{\"name\":\"navigate\",\"input\":{\"destination\":\"settings\"}}\n```"
+            + "{\"name\":\"navigate\",\"arguments\":{\"destination\":\"settings\"}}\n```"
         let provider = MockProvider(responses: [
             LLMResponse(content: [.text(fenced)], stopReason: .endTurn),
             LLMResponse(content: [.text("Done.")], stopReason: .endTurn),
@@ -1648,8 +1941,8 @@ private final class SlowProvider: LLMProvider, @unchecked Sendable {
         #expect(resultID == toolUseID)
     }
 
-    /// REVIEW2 finding **B**: the fenced-fallback prompt instruction is gated
-    /// on provider capability when `toolCallFallback` is left unset.
+    /// The fenced-fallback prompt instruction is gated on provider capability
+    /// when `toolCallFallback` is left unset.
     @Test func fallbackHintGatedByProviderCapability() async throws {
         func systemPrompt(nativeTools: Bool) async throws -> String {
             let resolver = ContextResolver()
@@ -1657,7 +1950,7 @@ private final class SlowProvider: LLMProvider, @unchecked Sendable {
                 id: .init("v"), displayName: "V", toolNames: ["navigate"]
             ))
             let registry = ToolRegistry()
-            await registry.register(NavigateTool { _, _ in .init(navigated: true) })
+            await registry.register(NavigateTool { _ in .init(navigated: true) })
             let provider = MockProvider(
                 responses: [LLMResponse(content: [.text("ok")], stopReason: .endTurn)],
                 supportsNativeTools: nativeTools
@@ -1680,8 +1973,8 @@ private final class SlowProvider: LLMProvider, @unchecked Sendable {
     }
 }
 
-/// A guardrail that sleeps before answering, to prove the turn deadline races
-/// guardrail passes too (REVIEW3 #2).
+/// A guardrail that sleeps before answering, proving turn deadlines also race
+/// guardrail passes.
 private struct SlowGuardrail: Guardrail {
     let id = "slow"
     let stages: Set<Verifier.Stage>
@@ -1693,21 +1986,20 @@ private struct SlowGuardrail: Guardrail {
 }
 
 @Suite struct ToolCallFallbackMatrixTests {
-    /// REVIEW3 finding **#1**: the fenced fallback must fire exactly when
-    /// intended across `supportsNativeTools` × `toolCallFallback`. The model
-    /// emits *only* a fenced ```tool block (no native tool_use), so the tool
-    /// runs iff the fallback is active.
+    /// The fenced fallback must fire exactly when intended across
+    /// `supportsNativeTools` × `toolCallFallback`. The model emits only a fenced
+    /// ```tool block, so the tool runs iff the fallback is active.
     private func run(
         nativeTools: Bool, fallback: Bool?
     ) async throws -> (toolRan: Bool, final: String?) {
         let registry = ToolRegistry()
-        await registry.register(NavigateTool { _, _ in .init(navigated: true) })
+        await registry.register(NavigateTool { _ in .init(navigated: true) })
         let resolver = ContextResolver()
         await resolver.push(ViewContext(
             id: .init("home"), displayName: "Home", toolNames: ["navigate"]
         ))
         let fenced = "```tool\n{\"name\":\"navigate\","
-            + "\"input\":{\"destination\":\"home\"}}\n```"
+            + "\"arguments\":{\"destination\":\"home\"}}\n```"
         let provider = MockProvider(
             responses: [
                 LLMResponse(content: [.text(fenced)], stopReason: .endTurn),
@@ -1784,7 +2076,7 @@ private struct SlowGuardrail: Guardrail {
         )
     }
 
-    /// REVIEW3 finding **#3**: reasoning is surfaced as a distinct event.
+    /// Reasoning is surfaced as a distinct event.
     @Test func nonStreamingEmitsReasoningOnce() async throws {
         let orchestrator = await session(stream: false)
         var reasoning = ""
@@ -1821,10 +2113,10 @@ private struct SlowGuardrail: Guardrail {
 @Suite struct NearMissDiagnosticTests {
     @Test func detectsMistaggedFencedToolCall() {
         let json = "Here you go:\n```json\n"
-            + "{\"name\":\"navigate\",\"input\":{\"destination\":\"home\"}}\n```"
+            + "{\"name\":\"navigate\",\"arguments\":{\"destination\":\"home\"}}\n```"
         #expect(OutputParser.nearMissFencedToolBlock(in: json))
         // A correctly tagged block is not a near-miss (it gets recovered).
-        let tagged = "```tool\n{\"name\":\"x\",\"input\":{}}\n```"
+        let tagged = "```tool\n{\"name\":\"x\",\"arguments\":{}}\n```"
         #expect(!OutputParser.nearMissFencedToolBlock(in: tagged))
         // Prose with no tool-shaped JSON is not a near-miss.
         #expect(!OutputParser.nearMissFencedToolBlock(in: "All done, no tools."))
@@ -1833,12 +2125,12 @@ private struct SlowGuardrail: Guardrail {
         ))
     }
 
-    /// REVIEW3 minor: a ```json-fenced tool call is delivered as the final
-    /// answer (never executed) but a diagnostic warning is surfaced.
+    /// A ```json-fenced tool call is delivered as the final answer and not
+    /// executed, but a diagnostic warning is surfaced.
     @Test func emitsWarningAndDoesNotExecute() async throws {
         let flag = InvocationFlag()
         let registry = ToolRegistry()
-        await registry.register(NavigateTool { _, _ in
+        await registry.register(NavigateTool { _ in
             await flag.mark()
             return .init(navigated: true)
         })
@@ -1847,7 +2139,7 @@ private struct SlowGuardrail: Guardrail {
             id: .init("home"), displayName: "Home", toolNames: ["navigate"]
         ))
         let mistagged = "```json\n"
-            + "{\"name\":\"navigate\",\"input\":{\"destination\":\"home\"}}\n```"
+            + "{\"name\":\"navigate\",\"arguments\":{\"destination\":\"home\"}}\n```"
         let provider = MockProvider(responses: [
             LLMResponse(content: [.text(mistagged)], stopReason: .endTurn)
         ])
@@ -1880,7 +2172,7 @@ private struct SlowGuardrail: Guardrail {
 }
 
 @Suite struct TurnDeadlineTests {
-    /// REVIEW2 finding **E**: a zero budget aborts before any work.
+    /// A zero budget aborts before any work.
     @Test func zeroBudgetAbortsImmediately() async throws {
         let resolver = ContextResolver()
         await resolver.push(ViewContext(id: .init("v"), displayName: "V"))
@@ -1924,11 +2216,11 @@ private struct SlowGuardrail: Guardrail {
         #expect(elapsed < .seconds(3))
     }
 
-    /// REVIEW3 finding **#2**: a hung tool must not be able to overrun the
-    /// budget — the invocation is raced against the deadline too.
+    /// A hung tool must not be able to overrun the budget; the invocation is
+    /// raced against the deadline too.
     @Test func deadlineInterruptsHangingTool() async throws {
         let registry = ToolRegistry()
-        await registry.register(NavigateTool { _, _ in
+        await registry.register(NavigateTool { _ in
             try await Task.sleep(for: .seconds(5))
             return .init(navigated: true)
         })
@@ -1939,7 +2231,7 @@ private struct SlowGuardrail: Guardrail {
         let provider = MockProvider(responses: [
             LLMResponse(content: [.toolUse(
                 id: "t1", name: "navigate",
-                input: .object(["destination": .string("home")])
+                arguments: .object(["destination": .string("home")])
             )], stopReason: .toolUse),
             LLMResponse(content: [.text("late")], stopReason: .endTurn),
         ])
@@ -2037,15 +2329,12 @@ private struct SlowGuardrail: Guardrail {
         let response = LLMResponse(
             content: [.toolUse(
                 id: "t1", name: "navigate",
-                input: .object(["destination": .string("settings")])
+                arguments: .object(["destination": .string("settings")])
             )],
             stopReason: .toolUse
         )
         let value = try #require(WorkflowTwoRoundRunner.extractJSONObject(from: response))
-        guard case .object(let object) = value else {
-            Issue.record("expected object, got \(value)")
-            return
-        }
+        let object = try #require(value.objectValue)
         #expect(object["destination"]?.stringValue == "settings")
     }
 
@@ -2055,10 +2344,7 @@ private struct SlowGuardrail: Guardrail {
             stopReason: .endTurn
         )
         let value = try #require(WorkflowTwoRoundRunner.extractJSONObject(from: response))
-        guard case .object(let object) = value else {
-            Issue.record("expected object, got \(value)")
-            return
-        }
+        let object = try #require(value.objectValue)
         #expect(object["k"]?.stringValue == "v")
     }
 
@@ -2068,10 +2354,7 @@ private struct SlowGuardrail: Guardrail {
             stopReason: .endTurn
         )
         let value = try #require(WorkflowTwoRoundRunner.extractJSONObject(from: response))
-        guard case .object(let object) = value else {
-            Issue.record("expected object, got \(value)")
-            return
-        }
+        let object = try #require(value.objectValue)
         #expect(object["k"]?.stringValue == "v")
     }
 
@@ -2081,10 +2364,7 @@ private struct SlowGuardrail: Guardrail {
             stopReason: .endTurn
         )
         let value = try #require(WorkflowTwoRoundRunner.extractJSONObject(from: response))
-        guard case .object(let object) = value else {
-            Issue.record("expected object, got \(value)")
-            return
-        }
+        let object = try #require(value.objectValue)
         #expect(object["k"]?.stringValue == "v")
     }
 

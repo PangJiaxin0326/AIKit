@@ -1,12 +1,12 @@
 import Foundation
+import FoundationModels
 import AIToolKit
 
 /// Configuration shared by built-in providers. The host app owns the API key;
 /// the package never reads environment variables.
 public struct LLMProviderConfiguration: Sendable {
     /// API credential. An empty string means "no auth" — the provider omits the
-    /// auth header entirely, which is what local backends (Ollama, llama.cpp,
-    /// vLLM in no-auth mode) expect.
+    /// auth header entirely. Volcengine Ark requires a non-empty bearer token.
     public var apiKey: String
     public var baseURL: URL
     /// The model selected most recently by the host. `nil` means no model is
@@ -59,8 +59,8 @@ public protocol LLMProvider: Sendable {
     var configuration: LLMProviderConfiguration { get }
 
     /// Stable, human-readable provider label for telemetry and usage records.
-    /// Wrappers should forward or override this so hosts do not leak adapter
-    /// type names into persisted history.
+    /// Decorators should forward or override this so hosts persist the
+    /// underlying provider label instead of an implementation type name.
     var providerName: String { get }
 
     /// Whether the Runtime can rely on native function calling for **every**
@@ -76,12 +76,9 @@ public protocol LLMProvider: Sendable {
     /// `false` provider is unaffected.
     ///
     /// Because the fallback is additive, a provider whose tool support varies
-    /// **per model** (Ollama: `llama3.1` calls tools natively, `gemma`/`phi`
-    /// don't) must report `false` — it cannot truthfully guarantee native tool
-    /// calling for an arbitrary model. Reporting `true` there silently breaks
-    /// tool use for every tool-less local model under the default
-    /// auto-resolution. Defaults to `true` for providers that target a fixed
-    /// API contract (Anthropic, OpenAI).
+    /// **per model** must report `false` — it cannot truthfully guarantee native
+    /// tool calling for an arbitrary model. Defaults to `true` for providers
+    /// that target a fixed API contract.
     var supportsNativeTools: Bool { get }
 
     func complete(_ request: LLMRequest) async throws -> LLMResponse
@@ -102,7 +99,7 @@ public extension LLMProvider {
 /// Reserved keys (owned by the wire encoder) are never overwritten.
 func mergedRequestBody(
     encoded: Data,
-    extraBody: [String: JSONValue],
+    extraBody: [String: GeneratedContent],
     reservedKeys: Set<String>
 ) throws -> Data {
     guard !extraBody.isEmpty else { return encoded }
@@ -111,95 +108,11 @@ func mergedRequestBody(
     ) as? [String: Any] else {
         return encoded
     }
-    let extraData = try JSONEncoder().encode(extraBody)
-    let extra = try JSONSerialization.jsonObject(with: extraData) as? [String: Any] ?? [:]
-    for (key, value) in extra where !reservedKeys.contains(key) {
-        object[key] = value
+    for (key, value) in extraBody where !reservedKeys.contains(key) {
+        object[key] = try JSONSerialization.jsonObject(
+            with: Data(value.jsonString.utf8),
+            options: [.fragmentsAllowed]
+        )
     }
     return try JSONSerialization.data(withJSONObject: object)
-}
-
-extension URL {
-    /// Resolves a provider endpoint, tolerating the common ways a base URL is
-    /// written. Given `apiPrefix` `"v1"` and `endpoint` `"chat/completions"`:
-    ///
-    /// - `https://api.openai.com`          → `…/v1/chat/completions`
-    /// - `http://host:11434/v1`            → `…/v1/chat/completions` (no double `v1`)
-    /// - `http://host:11434/v1/`           → trailing slash tolerated
-    /// - `http://host/v1/chat/completions` → used verbatim (full override)
-    /// - `http://host/api/v3/chat/completions` → used verbatim (alternate API prefix)
-    ///
-    /// Throws `LLMError.unsupported` rather than silently returning `self`
-    /// when the composed string isn't a valid URL: a misconfigured base URL
-    /// should surface as a clear configuration error, not an opaque 404 from
-    /// a request that quietly went to the bare base URL instead.
-    func resolvingEndpoint(apiPrefix: String, endpoint: String) throws -> URL {
-        try resolvingEndpointPath("\(apiPrefix)/\(endpoint)")
-    }
-
-    /// Resolves a provider endpoint path against this base URL.
-    ///
-    /// The endpoint path may be absolute, in which case it is used verbatim.
-    /// Relative paths tolerate a base URL that already ends with either the
-    /// first path segment or the complete endpoint path.
-    func resolvingEndpointPath(_ endpointPath: String) throws -> URL {
-        let trimmedEndpointPath = endpointPath.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let url = URL(string: trimmedEndpointPath), url.scheme != nil {
-            return url
-        }
-
-        let endpointPathCharacters = CharacterSet(charactersIn: "/")
-        let normalizedEndpointPath = trimmedEndpointPath.trimmingCharacters(
-            in: endpointPathCharacters
-        )
-        guard !normalizedEndpointPath.isEmpty else {
-            throw LLMError.unsupported("endpoint path must not be empty")
-        }
-
-        let endpointComponents = URLComponents(string: normalizedEndpointPath)
-        let endpointPath = (endpointComponents?.path ?? normalizedEndpointPath)
-            .trimmingCharacters(in: endpointPathCharacters)
-        guard !endpointPath.isEmpty else {
-            throw LLMError.unsupported("endpoint path must not be empty")
-        }
-
-        let components = endpointPath.split(
-            separator: "/",
-            omittingEmptySubsequences: true
-        )
-        let firstPathComponent = components.first.map(String.init)
-        let remainder = components.dropFirst().joined(separator: "/")
-        let baseComponents = URLComponents(url: self, resolvingAgainstBaseURL: false)
-        let basePath = (baseComponents?.path ?? "")
-            .trimmingCharacters(in: endpointPathCharacters)
-        let baseEndsWithPath: (String) -> Bool = { suffix in
-            basePath == suffix || basePath.hasSuffix("/\(suffix)")
-        }
-
-        if baseEndsWithPath(endpointPath) || (!remainder.isEmpty && baseEndsWithPath(remainder)) {
-            return self
-        }
-
-        var resolvedComponents = baseComponents
-        let pathToAppend: String
-        if let firstPathComponent, baseEndsWithPath(firstPathComponent) {
-            pathToAppend = remainder
-        } else {
-            pathToAppend = endpointPath
-        }
-
-        let resolvedPath = [basePath, pathToAppend]
-            .filter { !$0.isEmpty }
-            .joined(separator: "/")
-        resolvedComponents?.path = resolvedPath.isEmpty ? "" : "/\(resolvedPath)"
-        if let endpointComponents {
-            resolvedComponents?.percentEncodedQuery = endpointComponents.percentEncodedQuery
-            resolvedComponents?.percentEncodedFragment = endpointComponents.percentEncodedFragment
-        }
-        guard let url = resolvedComponents?.url else {
-            let composed = [absoluteString, normalizedEndpointPath].joined(separator: "/")
-            throw LLMError.unsupported("invalid endpoint URL: \(composed)")
-        }
-        return url
-    }
 }

@@ -1,4 +1,5 @@
 import Foundation
+import FoundationModels
 import AIToolKit
 
 /// A role in an LLM conversation.
@@ -12,14 +13,13 @@ public enum Role: String, Sendable, Codable, Hashable {
 /// A single block of content within a message or response.
 public enum ContentBlock: Sendable, Codable, Hashable {
     case text(String)
-    /// Model-emitted chain-of-thought / reasoning (Ollama `thinking`, OpenAI
-    /// `reasoning_content`, Anthropic extended-thinking blocks). Surfaced so a
+    /// Model-emitted reasoning, such as Ark `reasoning_content`. Surfaced so a
     /// host can show or log it; never re-sent to a provider (the Orchestrator
     /// rebuilds assistant turns from final text + tool calls only).
     case reasoning(String)
     case image(ImageContent)
     case audio(AudioContent)
-    case toolUse(id: String, name: String, input: JSONValue)
+    case toolUse(id: String, name: String, arguments: GeneratedContent)
     case toolResult(toolUseID: String, content: String, isError: Bool)
 
     public var text: String? {
@@ -40,6 +40,141 @@ public enum ContentBlock: Sendable, Codable, Hashable {
     public var audio: AudioContent? {
         if case .audio(let value) = self { return value }
         return nil
+    }
+}
+
+public extension ContentBlock {
+    static func == (lhs: ContentBlock, rhs: ContentBlock) -> Bool {
+        switch (lhs, rhs) {
+        case (.text(let lhs), .text(let rhs)):
+            lhs == rhs
+        case (.reasoning(let lhs), .reasoning(let rhs)):
+            lhs == rhs
+        case (.image(let lhs), .image(let rhs)):
+            lhs == rhs
+        case (.audio(let lhs), .audio(let rhs)):
+            lhs == rhs
+        case (.toolUse(let lhsID, let lhsName, let lhsArguments),
+              .toolUse(let rhsID, let rhsName, let rhsArguments)):
+            lhsID == rhsID
+                && lhsName == rhsName
+                && lhsArguments.jsonString == rhsArguments.jsonString
+        case (.toolResult(let lhsID, let lhsContent, let lhsIsError),
+              .toolResult(let rhsID, let rhsContent, let rhsIsError)):
+            lhsID == rhsID
+                && lhsContent == rhsContent
+                && lhsIsError == rhsIsError
+        default:
+            false
+        }
+    }
+
+    func hash(into hasher: inout Hasher) {
+        switch self {
+        case .text(let value):
+            hasher.combine("text")
+            hasher.combine(value)
+        case .reasoning(let value):
+            hasher.combine("reasoning")
+            hasher.combine(value)
+        case .image(let value):
+            hasher.combine("image")
+            hasher.combine(value)
+        case .audio(let value):
+            hasher.combine("audio")
+            hasher.combine(value)
+        case .toolUse(let id, let name, let arguments):
+            hasher.combine("toolUse")
+            hasher.combine(id)
+            hasher.combine(name)
+            hasher.combine(arguments.jsonString)
+        case .toolResult(let toolUseID, let content, let isError):
+            hasher.combine("toolResult")
+            hasher.combine(toolUseID)
+            hasher.combine(content)
+            hasher.combine(isError)
+        }
+    }
+}
+
+private enum ContentBlockCodingType: String, Codable {
+    case text
+    case reasoning
+    case image
+    case audio
+    case toolUse
+    case toolResult
+}
+
+private enum ContentBlockCodingKeys: String, CodingKey {
+    case type
+    case text
+    case reasoning
+    case image
+    case audio
+    case id
+    case name
+    case argumentsJSON
+    case toolUseID
+    case content
+    case isError
+}
+
+public extension ContentBlock {
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: ContentBlockCodingKeys.self)
+        switch try container.decode(ContentBlockCodingType.self, forKey: .type) {
+        case .text:
+            self = .text(try container.decode(String.self, forKey: .text))
+        case .reasoning:
+            self = .reasoning(try container.decode(String.self, forKey: .reasoning))
+        case .image:
+            self = .image(try container.decode(ImageContent.self, forKey: .image))
+        case .audio:
+            self = .audio(try container.decode(AudioContent.self, forKey: .audio))
+        case .toolUse:
+            self = .toolUse(
+                id: try container.decode(String.self, forKey: .id),
+                name: try container.decode(String.self, forKey: .name),
+                arguments: try GeneratedContent(
+                    json: container.decode(String.self, forKey: .argumentsJSON)
+                )
+            )
+        case .toolResult:
+            self = .toolResult(
+                toolUseID: try container.decode(String.self, forKey: .toolUseID),
+                content: try container.decode(String.self, forKey: .content),
+                isError: try container.decode(Bool.self, forKey: .isError)
+            )
+        }
+    }
+
+    func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: ContentBlockCodingKeys.self)
+        switch self {
+        case .text(let value):
+            try container.encode(ContentBlockCodingType.text, forKey: .type)
+            try container.encode(value, forKey: .text)
+        case .reasoning(let value):
+            try container.encode(ContentBlockCodingType.reasoning, forKey: .type)
+            try container.encode(value, forKey: .reasoning)
+        case .image(let value):
+            try container.encode(ContentBlockCodingType.image, forKey: .type)
+            try container.encode(value, forKey: .image)
+        case .audio(let value):
+            try container.encode(ContentBlockCodingType.audio, forKey: .type)
+            try container.encode(value, forKey: .audio)
+        case .toolUse(let id, let name, let arguments):
+            try container.encode(ContentBlockCodingType.toolUse, forKey: .type)
+            try container.encode(id, forKey: .id)
+            try container.encode(name, forKey: .name)
+            try container.encode(arguments.jsonString, forKey: .argumentsJSON)
+        case .toolResult(let toolUseID, let content, let isError):
+            try container.encode(ContentBlockCodingType.toolResult, forKey: .type)
+            try container.encode(toolUseID, forKey: .toolUseID)
+            try container.encode(content, forKey: .content)
+            try container.encode(isError, forKey: .isError)
+        }
     }
 }
 

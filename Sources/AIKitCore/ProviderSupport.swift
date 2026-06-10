@@ -1,31 +1,21 @@
 import Foundation
+import FoundationModels
 import AIToolKit
 
 package enum AIKitProviderDefaults {
-    package static let openAIBaseURL = URL(string: "https://api.openai.com")!
-    package static let openAIModelListURL = URL(string: "https://api.openai.com/v1/models")!
-    package static let openAIChatCompletionsPath = "v1/chat/completions"
-    package static let openAIChatCompletionsURL = URL(
-        string: "https://api.openai.com/v1/chat/completions"
-    )!
-
-    package static let anthropicBaseURL = URL(string: "https://api.anthropic.com")!
-    package static let anthropicModelListURL = URL(string: "https://api.anthropic.com/v1/models")!
-    package static let anthropicMessagesURL = URL(string: "https://api.anthropic.com/v1/messages")!
-    package static let anthropicAPIVersion = "2023-06-01"
-
-    package static let ollamaBaseURL = URL(string: "http://localhost:11434")!
-    package static let ollamaModelListURL = URL(string: "http://localhost:11434/api/tags")!
-    package static let ollamaChatURL = URL(string: "http://localhost:11434/api/chat")!
-
     package static let appleIntelligenceBaseURL = URL(string: "aikit-apple-intelligence://local")!
     package static let appleIntelligenceModelListURL = URL(
         string: "aikit-apple-intelligence://local/models"
     )!
+    package static let privateCloudComputeBaseURL = URL(
+        string: "aikit-apple-intelligence://private-cloud-compute"
+    )!
 
+    package static let arkBaseURL = URL(string: "https://ark.cn-beijing.volces.com/api/v3")!
     package static let arkModelListURL = URL(
         string: "https://ark.cn-beijing.volces.com/api/v3/models"
     )!
+    package static let arkChatCompletionsPath = "chat/completions"
     package static let arkChatCompletionsURL = URL(
         string: "https://ark.cn-beijing.volces.com/api/v3/chat/completions"
     )!
@@ -64,16 +54,18 @@ package enum AIKitModelListNormalizer {
 package enum AIKitMalformedToolInput {
     private static let rawKey = "__aikit_malformed_tool_input_raw"
 
-    package static func make(raw: String) -> JSONValue {
+    package static func make(raw: String) -> GeneratedContent {
         .object([rawKey: .string(raw)])
     }
 
-    package static func raw(in input: JSONValue) -> String? {
-        guard case .object(let object) = input,
-              object.count == 1,
-              case .string(let raw)? = object[rawKey]
+    package static func raw(in arguments: GeneratedContent) -> String? {
+        guard case .structure(let object, _) = arguments.kind,
+              object.count == 1
         else { return nil }
-        return raw
+        if case .string(let raw)? = object[rawKey]?.kind {
+            return raw
+        }
+        return nil
     }
 }
 

@@ -1,4 +1,5 @@
 import Foundation
+import FoundationModels
 import OSLog
 import AIToolKit
 import AIKitCore
@@ -33,6 +34,20 @@ private extension String {
     }
 }
 
+private actor WorkflowGuardrailViolationBox {
+    private var violation: GuardrailViolation?
+
+    func record(_ violation: GuardrailViolation) {
+        if self.violation == nil {
+            self.violation = violation
+        }
+    }
+
+    func first() -> GuardrailViolation? {
+        violation
+    }
+}
+
 /// A UI-friendly snapshot of the runtime state the orchestrator already owns.
 public struct OrchestratorSnapshot: Sendable, Hashable {
     public var contexts: [ViewContext]
@@ -53,6 +68,45 @@ public struct OrchestratorSnapshot: Sendable, Hashable {
         self.availableTools = availableTools
         self.recentActivities = recentActivities
         self.recentTasks = recentTasks
+    }
+
+    public static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.contexts == rhs.contexts
+            && lhs.resolvedContext == rhs.resolvedContext
+            && lhs.availableTools.aikitSnapshotSignature == rhs.availableTools.aikitSnapshotSignature
+            && lhs.recentActivities == rhs.recentActivities
+            && lhs.recentTasks == rhs.recentTasks
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(contexts)
+        hasher.combine(resolvedContext)
+        hasher.combine(availableTools.aikitSnapshotSignature)
+        hasher.combine(recentActivities)
+        hasher.combine(recentTasks)
+    }
+}
+
+private struct ToolDescriptorSnapshotSignature: Sendable, Hashable {
+    var name: String
+    var description: String
+    var argumentsSchema: String
+    var outputSchema: String?
+}
+
+private extension Array where Element == ToolDescriptor {
+    var aikitSnapshotSignature: [ToolDescriptorSnapshotSignature] {
+        map { descriptor in
+            ToolDescriptorSnapshotSignature(
+                name: descriptor.name,
+                description: descriptor.description,
+                argumentsSchema: (try? descriptor.argumentsSchema.jsonString())
+                    ?? descriptor.argumentsSchema.debugDescription,
+                outputSchema: descriptor.outputSchema.map {
+                    (try? $0.jsonString()) ?? $0.debugDescription
+                }
+            )
+        }
     }
 }
 
@@ -251,7 +305,7 @@ public actor Orchestrator {
         public var retry: RetryPolicy
         /// An overall wall-clock budget for the whole turn (all iterations and
         /// retries combined). `nil` (default) is unbounded. Bounds the case
-        /// where a too-low `configuration.timeout` against a slow local model
+        /// where a too-low `configuration.timeout` against a slow provider call
         /// is classified transient and retried `maxAttempts` times, costing
         /// ≈ N × timeout before aborting; with a budget set the turn aborts
         /// with `TurnDeadlineExceeded` instead of stacking slow failures.
@@ -264,9 +318,9 @@ public actor Orchestrator {
         public var memoryWindow: Int
         public var temperature: Double?
         public var maxTokens: Int?
-        /// Provider-specific request knobs (`num_ctx`, `keep_alive`, `stop`,
-        /// `top_p`, `seed`, …) forwarded on every LLM call this turn.
-        public var extraBody: [String: JSONValue]
+        /// Provider-specific request knobs (`thinking`, `top_p`, `seed`,
+        /// `stop`, …) forwarded on every LLM call this turn.
+        public var extraBody: [String: GeneratedContent]
         /// Controls the fenced-```tool``` fallback (prompt instruction +
         /// recovery parsing). `nil` (the default) auto-resolves per turn:
         /// enabled only when the provider does not support native function
@@ -296,7 +350,7 @@ public actor Orchestrator {
             memoryWindow: Int = 20,
             temperature: Double? = 0.2,
             maxTokens: Int? = nil,
-            extraBody: [String: JSONValue] = [:],
+            extraBody: [String: GeneratedContent] = [:],
             toolCallFallback: Bool? = nil,
             workflowPlanning: Bool = true,
             leanWorkflowSchema: Bool = true
@@ -577,9 +631,9 @@ public actor Orchestrator {
 
     /// The `reportFailure` reason among `calls`, if the model invoked it.
     private func failureReason(in calls: [ToolCall]) -> String? {
-        for call in calls where call.name == ReportFailureTool.name {
-            if case let .object(fields) = call.input,
-               case let .string(reason)? = fields["reason"],
+        for call in calls where call.name == ReportFailureTool.toolName {
+            if let fields = call.arguments.objectValue,
+               let reason = fields["reason"]?.stringValue,
                !reason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 return reason
             }
@@ -750,6 +804,7 @@ public actor Orchestrator {
                 autoBind: autoBind,
                 toolContext: makeToolContext(viewID)
             ),
+            guardrails: guardrails,
             planCache: planCache
         )
 
@@ -797,8 +852,8 @@ public actor Orchestrator {
         for node in workflow.trace.nodes {
             guard let tool = node.tool else { continue }
             let outputText: String
-            if let output = workflow.nodeOutputs[node.nodeID],
-               let data = try? output.data() {
+            if let output = workflow.nodeOutputs[node.nodeID] {
+                let data = output.data()
                 outputText = String(decoding: data, as: UTF8.self)
             } else if let error = node.error {
                 outputText = error
@@ -1059,10 +1114,10 @@ public actor Orchestrator {
     /// than the raw `LLMResponse.content`. This is what makes the fenced-tool
     /// fallback correct: the model's content there is plain text holding the
     /// JSON, with no `tool_use` block, so trusting it would emit a `tool`
-    /// message with no preceding `tool_calls` (rejected by OpenAI-compatible
-    /// backends, mishandled by Ollama). Reconstructing also normalizes the
-    /// native path: any call missing a usable id gets a stable synthetic one
-    /// so the following `tool_result` references a real `tool_use` id.
+    /// message with no preceding `tool_calls` (rejected by chat-completions
+    /// backends). Reconstructing also normalizes the native path: any call
+    /// missing a usable id gets a stable synthetic one so the following
+    /// `tool_result` references a real `tool_use` id.
     private static func assistantTurn(
         text: String?,
         calls: [ToolCall]
@@ -1077,7 +1132,7 @@ public actor Orchestrator {
             var c = call
             c.id = id
             resolved.append(c)
-            blocks.append(.toolUse(id: id, name: c.name, input: c.input))
+            blocks.append(.toolUse(id: id, name: c.name, arguments: c.arguments))
         }
         return (.assistant(blocks), resolved)
     }
@@ -1134,7 +1189,7 @@ public actor Orchestrator {
         }
         emit(.verification(stage: .preToolUse, outcome: .pass))
 
-        let inputData = (try? effectiveCall.input.data()) ?? Data("{}".utf8)
+        let inputData = effectiveCall.arguments.data()
         if updatePhase {
             setPhase(.callingTool(effectiveCall.name), turn: turnID)
         }
@@ -1156,13 +1211,14 @@ public actor Orchestrator {
         deadline: ContinuousClock.Instant?,
         emit: @Sendable (OrchestratorEvent) -> Void
     ) async throws {
-        _ = try await withTurnDeadline(deadline) {
-            try await self.guardrails.verify(
-                .postToolUse,
-                .postToolUse(name: call.name, output: output, isError: true)
-            )
-        }
-        emit(.verification(stage: .postToolUse, outcome: .pass))
+        try await verifyPostToolUse(
+            call,
+            rawOutput: output,
+            diagnosticOutput: output,
+            isError: true,
+            deadline: deadline,
+            emit: emit
+        )
         emit(.toolResult(name: call.name, output: output))
         await recordActivity(
             viewID: viewID,
@@ -1174,19 +1230,21 @@ public actor Orchestrator {
 
     private func finishToolCallSuccess(
         _ call: ToolCall,
+        rawOutput: Data,
         diagnosticOutput: Data,
         viewID: ViewContext.ID,
         turnID: Int,
         deadline: ContinuousClock.Instant?,
         emit: @Sendable (OrchestratorEvent) -> Void
     ) async throws {
-        _ = try await withTurnDeadline(deadline) {
-            try await self.guardrails.verify(
-                .postToolUse,
-                .postToolUse(name: call.name, output: diagnosticOutput, isError: false)
-            )
-        }
-        emit(.verification(stage: .postToolUse, outcome: .pass))
+        try await verifyPostToolUse(
+            call,
+            rawOutput: rawOutput,
+            diagnosticOutput: diagnosticOutput,
+            isError: false,
+            deadline: deadline,
+            emit: emit
+        )
         emit(.toolResult(name: call.name, output: diagnosticOutput))
         await recordActivity(
             viewID: viewID,
@@ -1196,8 +1254,38 @@ public actor Orchestrator {
         )
     }
 
-    private static func data(forToolOutput value: JSONValue) -> Data {
-        (try? value.data()) ?? Data(WorkflowFinalRenderer.displayString(value).utf8)
+    private func verifyPostToolUse(
+        _ call: ToolCall,
+        rawOutput: Data,
+        diagnosticOutput: Data,
+        isError: Bool,
+        deadline: ContinuousClock.Instant?,
+        emit: @Sendable (OrchestratorEvent) -> Void
+    ) async throws {
+        for (output, kind) in [
+            (rawOutput, PostToolUsePayloadKind.raw),
+            (diagnosticOutput, PostToolUsePayloadKind.diagnostic),
+        ] {
+            let warnings = try await withTurnDeadline(deadline) {
+                try await self.guardrails.verify(
+                    .postToolUse,
+                    .postToolUse(
+                        name: call.name,
+                        output: output,
+                        isError: isError,
+                        kind: kind
+                    )
+                )
+            }
+            for warning in warnings {
+                emit(.verification(stage: .postToolUse, outcome: .warn(reason: warning)))
+            }
+            emit(.verification(stage: .postToolUse, outcome: .pass))
+        }
+    }
+
+    private static func data(forToolOutput value: GeneratedContent) -> Data {
+        value.data()
     }
 
     private func executeBatch(
@@ -1249,64 +1337,83 @@ public actor Orchestrator {
         let tools = self.tools
         let descriptorsByName = Dictionary(uniqueKeysWithValues: manifest.map { ($0.name, $0) })
         let toolContext = makeToolContext(viewID)
+        let workflowGuardrailViolations = WorkflowGuardrailViolationBox()
         let executor = WorkflowExecutor { node, resolvedInput, executionContext in
-            guard let tool = node.tool else {
-                throw WorkflowError.missingTool(nodeID: node.id)
-            }
-            let call = ToolCall(
-                id: "workflow-\(node.id)",
-                name: tool,
-                input: resolvedInput
-            )
-            let prepared = try await self.prepareToolCall(
-                call,
-                viewID: viewID,
-                turnID: turnID,
-                deadline: deadline,
-                emit: emit
-            )
-
-            let outputValue: JSONValue
             do {
-                outputValue = try await tools.call(
-                    prepared.call,
-                    context: executionContext.toolContext
+                guard let tool = node.tool else {
+                    throw WorkflowError.missingTool(nodeID: node.id)
+                }
+                let call = ToolCall(
+                    id: "workflow-\(node.id)",
+                    name: tool,
+                    arguments: resolvedInput
                 )
-            } catch {
-                let output = Self.toolErrorOutput(error)
-                try await self.finishToolCallFailure(
-                    prepared.call,
-                    output: output,
+                let prepared = try await self.prepareToolCall(
+                    call,
                     viewID: viewID,
                     turnID: turnID,
                     deadline: deadline,
                     emit: emit
                 )
-                throw error
-            }
 
-            let diagnosticValue = WorkflowOutputRedactor.diagnosticValue(
-                outputValue,
-                node: node,
-                descriptor: descriptorsByName[prepared.call.name]
-            )
-            let diagnosticOutput = Self.data(forToolOutput: diagnosticValue)
-            try await self.finishToolCallSuccess(
-                prepared.call,
-                diagnosticOutput: diagnosticOutput,
-                viewID: viewID,
-                turnID: turnID,
-                deadline: deadline,
-                emit: emit
-            )
-            return outputValue
+                let outputValue: GeneratedContent
+                do {
+                    outputValue = try await tools.call(
+                        prepared.call,
+                        context: executionContext.toolContext
+                    )
+                } catch {
+                    let output = Self.toolErrorOutput(error)
+                    try await self.finishToolCallFailure(
+                        prepared.call,
+                        output: output,
+                        viewID: viewID,
+                        turnID: turnID,
+                        deadline: deadline,
+                        emit: emit
+                    )
+                    throw error
+                }
+
+                let diagnosticValue = WorkflowOutputRedactor.diagnosticValue(
+                    outputValue,
+                    node: node,
+                    descriptor: descriptorsByName[prepared.call.name]
+                )
+                let diagnosticOutput = Self.data(forToolOutput: diagnosticValue)
+                let rawOutput = Self.data(forToolOutput: outputValue)
+                try await self.finishToolCallSuccess(
+                    prepared.call,
+                    rawOutput: rawOutput,
+                    diagnosticOutput: diagnosticOutput,
+                    viewID: viewID,
+                    turnID: turnID,
+                    deadline: deadline,
+                    emit: emit
+                )
+                return outputValue
+            } catch let violation as GuardrailViolation {
+                await workflowGuardrailViolations.record(violation)
+                throw violation
+            }
         }
 
-        let result = try await withTurnDeadline(deadline) {
-            try await executor.execute(
-                validated,
-                context: WorkflowExecutionContext(toolContext: toolContext)
-            )
+        let result: WorkflowResult
+        do {
+            result = try await withTurnDeadline(deadline) {
+                try await executor.execute(
+                    validated,
+                    context: WorkflowExecutionContext(toolContext: toolContext)
+                )
+            }
+        } catch {
+            if let violation = await workflowGuardrailViolations.first() {
+                throw violation
+            }
+            throw error
+        }
+        if let violation = await workflowGuardrailViolations.first() {
+            throw violation
         }
 
         let final = (result.finalText ?? WorkflowFinalRenderer.displayString(result.finalValue))
@@ -1355,7 +1462,7 @@ public actor Orchestrator {
             deadline: deadline,
             emit: emit
         )
-        let outputValue: JSONValue
+        let outputValue: GeneratedContent
         do {
             // A hung or slow tool must not be able to overrun the turn budget,
             // so the invocation is raced against the deadline too.
@@ -1386,6 +1493,7 @@ public actor Orchestrator {
         let output = Self.data(forToolOutput: outputValue)
         try await finishToolCallSuccess(
             prepared.call,
+            rawOutput: output,
             diagnosticOutput: output,
             viewID: viewID,
             turnID: turnID,
@@ -1433,7 +1541,7 @@ public actor Orchestrator {
 
     // MARK: - LLM
 
-    private static func malformedToolInput(raw: String) -> JSONValue {
+    private static func malformedToolInput(raw: String) -> GeneratedContent {
         AIKitMalformedToolInput.make(raw: raw)
     }
 
@@ -1483,9 +1591,9 @@ public actor Orchestrator {
             case .stop(let reason):
                 stopReason = reason
             case .usage(let value):
-                // Providers report usage across several events (Anthropic
-                // splits input/output). Keep the largest seen of each field
-                // so a later partial event can't zero out an earlier count.
+                // Streaming providers may report usage across several events.
+                // Keep the largest seen of each field so a later partial event
+                // can't zero out an earlier count.
                 usage = TokenUsage(
                     inputTokens: max(usage.inputTokens, value.inputTokens),
                     outputTokens: max(usage.outputTokens, value.outputTokens)
@@ -1501,16 +1609,15 @@ public actor Orchestrator {
         blocks.append(contentsOf: audioBlocks.map(ContentBlock.audio))
         for tool in toolBlocks {
             let json = tool.jsonChunks.joined()
-            let input: JSONValue
+            let arguments: GeneratedContent
             if json.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                input = .object([:])
-            } else if let data = json.data(using: .utf8),
-                      let value = try? JSONValue(data: data) {
-                input = value
+                arguments = .object([:])
+            } else if let value = try? GeneratedContent(json: json) {
+                arguments = value
             } else {
-                input = Self.malformedToolInput(raw: json)
+                arguments = Self.malformedToolInput(raw: json)
             }
-            blocks.append(.toolUse(id: tool.id, name: tool.name, input: input))
+            blocks.append(.toolUse(id: tool.id, name: tool.name, arguments: arguments))
         }
         return LLMResponse(content: blocks, stopReason: stopReason, usage: usage)
     }

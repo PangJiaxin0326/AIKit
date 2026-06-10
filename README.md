@@ -32,16 +32,21 @@ Add the `AIKit` product to your target.
 import AIKit
 
 // 1. Provider — remote providers use host-owned API keys.
-let provider = AnthropicProvider(apiKey: myKey)
+let provider = VolcengineArkProvider(
+    apiKey: arkKey,
+    model: "doubao-seed-2-0-lite-260215"
+)
 // Or use Apple's on-device model, when Apple Intelligence is available:
 // let provider = AppleIntelligenceProvider()
+// Or explicitly route through Private Cloud Compute on supported OS releases:
+// let provider = AppleIntelligenceProvider(endpoint: .privateCloudCompute)
 let llm = LLMClient(provider: provider)
 
 // 2. Tools available to the agent.
 let tools = ToolRegistry()
 let memory = try SwiftDataMemoryStore(path: dbPath)
 let configurationStore = AIKitConfigurationStore()
-await tools.register(NavigateTool { input, _ in
+await tools.register(NavigateTool { input in
     router.go(to: input.destination)
     return .init(navigated: true)
 })
@@ -77,7 +82,7 @@ let orchestrator = Orchestrator(
     memory: memory,
     contextResolver: resolver,
     guardrails: policy,
-    options: .init(model: "claude-opus-4-7")
+    options: .init(model: "doubao-seed-2-0-lite-260215")
 )
 
 for try await event in await orchestrator.run("Take me to settings") {
@@ -93,36 +98,42 @@ for try await event in await orchestrator.run("Take me to settings") {
 
 ## Providers
 
-AIKit ships providers for Anthropic, OpenAI, Ollama, and Apple Intelligence.
-The Core dashboard uses shared `AIKitProviderDefinition` metadata for OpenAI,
-Anthropic, Ollama, Apple Intelligence, and Volcengine Ark, including default
-model-list URLs and streaming endpoints where providers expose them. Ollama's
-streaming endpoint is editable; Apple Intelligence is presented as an
-on-device option with a static local model.
+AIKit ships providers for Volcengine Ark and Apple Intelligence. The Ark
+provider is also available as the standalone `VolcengineArkFoundationModels`
+package, which exposes
+`VolcengineArkLanguageModel` and `VolcengineArkLanguageModelExecutor` for
+Foundation Models-style integration.
+
+The Core dashboard uses shared `AIKitProviderDefinition` metadata for
+Volcengine Ark and Apple Intelligence, including Ark's model-list and chat
+completion endpoints plus static Apple Intelligence model IDs for
+`apple-intelligence` and `private-cloud-compute`.
 `AppleIntelligenceProvider` uses Apple's on-device Foundation Models framework,
 requires Apple Intelligence to be available on the device, and does not need an
-API key. It reports `supportsNativeTools == false`, so AIKit enables the fenced
-tool-call fallback and keeps dispatching tools through `ToolRegistry`.
+API key. On iOS/macOS/watchOS/visionOS 27 and newer it can route through
+`PrivateCloudComputeLanguageModel` by using
+`AppleIntelligenceProvider(endpoint: .privateCloudCompute)`, falling back to the
+on-device model only for PCC network failures. It reports
+`supportsNativeTools == false`, so AIKit enables the fenced tool-call fallback
+and keeps dispatching tools through `ToolRegistry`.
 
 Messages can include multimodal blocks:
 
 ```swift
 let request = LLMRequest(
-    model: "gpt-4o",
+    model: "doubao-seed-2-0-lite-260215",
     messages: [
         Message(role: .user, content: [
-            .text("Describe this and answer in voice."),
+            .text("Describe this image."),
             .image(ImageContent(data: imageData, mimeType: "image/jpeg")),
-            .audio(AudioContent(data: audioData, mimeType: "audio/wav", format: .wav)),
         ]),
-    ],
-    audioOutput: AudioOutputOptions(voice: "alloy", format: .mp3)
+    ]
 )
 ```
 
-OpenAI supports image input, wav/mp3 audio input, and generated audio output.
-Anthropic supports image input. Ollama supports base64 image input for
-multimodal local models. Unsupported media modes throw `LLMError.unsupported`.
+Volcengine Ark supports text and image input through chat-completions content
+blocks. Unsupported media modes, including audio input and generated audio
+output, throw `LLMError.unsupported`.
 
 ## SwiftUI
 

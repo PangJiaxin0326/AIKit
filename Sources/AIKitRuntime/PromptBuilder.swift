@@ -1,4 +1,5 @@
 import Foundation
+import FoundationModels
 import AIToolKit
 import AIKitCore
 import AIKitCapability
@@ -14,13 +15,13 @@ public enum PromptBuilder {
     """
 
     /// Appended when `toolCallFallbackHint` is set and tools are available.
-    /// Models without native function calling (common for local models) can
-    /// still drive tools by emitting this fenced block, which `OutputParser`
-    /// recovers. Models with native tool support ignore it.
+    /// Text-only provider paths can still drive tools by emitting this fenced
+    /// block, which `OutputParser` recovers. Models with native tool support
+    /// ignore it.
     public static let toolFallbackInstruction = """
     If you cannot emit a native tool call, request a tool by writing a fenced \
     code block tagged `tool` containing a single JSON object: \
-    {"name": "<toolName>", "input": { ... }}. Emit nothing after that block.
+    {"name": "<toolName>", "arguments": { ... }}. Emit nothing after that block.
     """
 
     public static func build(
@@ -32,7 +33,7 @@ public enum PromptBuilder {
         model: String,
         temperature: Double? = nil,
         maxTokens: Int? = nil,
-        extraBody: [String: JSONValue] = [:],
+        extraBody: [String: GeneratedContent] = [:],
         toolCallFallbackHint: Bool = false,
         workflowPlanningHint: Bool = false,
         leanWorkflowSchemaHint: Bool = true

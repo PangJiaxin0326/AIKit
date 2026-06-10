@@ -1,11 +1,15 @@
 import Foundation
+import FoundationModels
 import AIToolKit
 import AIKitCore
 
 /// Built-in tool: mutates a key on the user's profile. Effect supplied by host.
-public struct SetProfileTool: Tool {
+public struct SetProfileTool: Tool, ToolMetadataProviding {
+    @Generable
     public struct Input: Codable, Sendable {
+        @Guide(description: "Profile field name")
         public var key: String
+        @Guide(description: "New value")
         public var value: String
         public init(key: String, value: String) {
             self.key = key
@@ -13,39 +17,34 @@ public struct SetProfileTool: Tool {
         }
     }
 
+    @Generable
     public struct Output: Codable, Sendable {
         public var applied: Bool
         public init(applied: Bool) { self.applied = applied }
     }
 
-    public static let name = "setProfile"
-    public static let description = "Set a key/value pair on the user's profile."
-    public static let inputSchema = ToolSchema.object(
-        properties: [
-            "key": .string(description: "Profile field name"),
-            "value": .string(description: "New value"),
-        ],
-        required: ["key", "value"]
-    )
-    public static let outputSchema = ToolSchema.strictObject(
-        properties: ["applied": .boolean],
-        required: ["applied"]
-    )
-    public static let annotations = ToolAnnotations(
+    public static let toolName = "setProfile"
+    public static let toolDescription = "Set a key/value pair on the user's profile."
+    public static let toolAnnotations = ToolAnnotations(
         sideEffect: .localWrite,
         sensitiveOutput: .none
     )
-    public static let inputExamples: [JSONValue] = [
+    public static let toolArgumentExamples: [GeneratedContent] = [
         .object(["key": .string("theme"), "value": .string("dark")]),
     ]
 
-    private let handler: @Sendable (Input, ToolContext) async throws -> Output
+    public var name: String { Self.toolName }
+    public var description: String { Self.toolDescription }
+    public var annotations: ToolAnnotations { Self.toolAnnotations }
+    public var argumentExamples: [GeneratedContent] { Self.toolArgumentExamples }
 
-    public init(handler: @escaping @Sendable (Input, ToolContext) async throws -> Output) {
+    private let handler: @Sendable (Input) async throws -> Output
+
+    public init(handler: @escaping @Sendable (Input) async throws -> Output) {
         self.handler = handler
     }
 
-    public func call(_ input: Input, in context: ToolContext) async throws -> Output {
-        try await handler(input, context)
+    public func call(arguments: Input) async throws -> Output {
+        try await handler(arguments)
     }
 }

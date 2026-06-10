@@ -28,13 +28,13 @@ private actor InvocationFlag {
 
     @Test func fullLoopToolThenFinalAnswer() async throws {
         let registry = ToolRegistry()
-        await registry.register(NavigateTool { _, _ in .init(navigated: true) })
+        await registry.register(NavigateTool { _ in .init(navigated: true) })
 
         let provider = MockProvider(responses: [
             LLMResponse(
                 content: [.toolUse(
                     id: "t1", name: "navigate",
-                    input: .object(["destination": .string("profile")])
+                    arguments: .object(["destination": .string("profile")])
                 )],
                 stopReason: .toolUse
             ),
@@ -61,7 +61,7 @@ private actor InvocationFlag {
     @Test func blockedToolShortCircuitsAndNeverInvokes() async throws {
         let flag = InvocationFlag()
         let registry = ToolRegistry()
-        await registry.register(NavigateTool { _, _ in
+        await registry.register(NavigateTool { _ in
             await flag.mark()
             return .init(navigated: true)
         })
@@ -71,7 +71,7 @@ private actor InvocationFlag {
             LLMResponse(
                 content: [.toolUse(
                     id: "t1", name: "navigate",
-                    input: .object(["destination": .string("admin")])
+                    arguments: .object(["destination": .string("admin")])
                 )],
                 stopReason: .toolUse
             )
@@ -105,8 +105,8 @@ private actor InvocationFlag {
         let provider = MockProvider(responses: [
             LLMResponse(
                 content: [.toolUse(
-                    id: "f1", name: ReportFailureTool.name,
-                    input: .object(["reason": .string("Your request is too vague.")])
+                    id: "f1", name: ReportFailureTool.toolName,
+                    arguments: .object(["reason": .string("Your request is too vague.")])
                 )],
                 stopReason: .toolUse
             )
@@ -116,8 +116,8 @@ private actor InvocationFlag {
             llm: LLMClient(provider: provider),
             tools: registry,
             memory: InMemoryMemoryStore(),
-            contextResolver: await resolver(toolNames: [ReportFailureTool.name]),
-            guardrails: PolicyEngine(rails: [AllowlistedTools(allowed: [ReportFailureTool.name])]),
+            contextResolver: await resolver(toolNames: [ReportFailureTool.toolName]),
+            guardrails: PolicyEngine(rails: [AllowlistedTools(allowed: [ReportFailureTool.toolName])]),
             options: .init(model: "test", stream: false, workflowPlanning: false)
         )
 

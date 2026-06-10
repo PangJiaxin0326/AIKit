@@ -1,6 +1,8 @@
 import Foundation
+import FoundationModels
 import AIToolKit
 import AIKitCore
+import AIKitSafety
 
 /// Drives the two-round-trip compiler against an `LLMClient`: Plan → harvest →
 /// (auto-)bind → execute, with the two LLM calls issued as **separate stateless
@@ -19,7 +21,7 @@ public struct WorkflowTwoRoundRunner: Sendable {
     public struct Options: Sendable {
         public var model: String
         public var temperature: Double?
-        public var extraBody: [String: JSONValue]
+        public var extraBody: [String: GeneratedContent]
         /// Constrain the planner round with provider `response_format`
         /// json_schema. The validated v2.1 recipe leaves this false and relies
         /// on freeform output plus brace-balanced extraction; use this only as an
@@ -46,7 +48,7 @@ public struct WorkflowTwoRoundRunner: Sendable {
             model: String,
             sources: [String],
             temperature: Double? = 0.2,
-            extraBody: [String: JSONValue] = [:],
+            extraBody: [String: GeneratedContent] = [:],
             useStructuredPlannerOutput: Bool = false,
             autoBind: Bool = true,
             attemptsPerRound: Int = 2,
@@ -96,6 +98,7 @@ public struct WorkflowTwoRoundRunner: Sendable {
     /// context slot, not a tool node).
     public let plannerToolNames: Set<String>
     public let options: Options
+    public let guardrails: PolicyEngine
     public let planCache: WorkflowPlanCache?
 
     public init(
@@ -104,6 +107,7 @@ public struct WorkflowTwoRoundRunner: Sendable {
         harvester: any ContextHarvesting,
         plannerToolNames: Set<String>,
         options: Options,
+        guardrails: PolicyEngine = PolicyEngine(),
         planCache: WorkflowPlanCache? = nil
     ) {
         self.llm = llm
@@ -111,6 +115,7 @@ public struct WorkflowTwoRoundRunner: Sendable {
         self.harvester = harvester
         self.plannerToolNames = plannerToolNames
         self.options = options
+        self.guardrails = guardrails
         self.planCache = planCache
     }
 
@@ -137,11 +142,24 @@ public struct WorkflowTwoRoundRunner: Sendable {
                 ? responseFormat(name: "workflow_plan", schema: WorkflowTwoRoundSchema.planner(
                     toolNames: manifest.map(\.name), sources: options.sources))
                 : nil
-            let (json, made) = await callJSON(system: system, user: user, format: format)
+            let json: GeneratedContent?
+            let made: [LLMCall]
+            let warnings: [String]
+            do {
+                (json, made, warnings) = try await callJSON(
+                    system: system,
+                    user: user,
+                    format: format,
+                    visibleTools: manifest
+                )
+            } catch {
+                return .init(outcome: .failed(errorMessage(error)), calls: calls, trace: trace)
+            }
             calls.append(contentsOf: made)
+            trace.append(contentsOf: warnings.map { "planner prePrompt warning: \($0)" })
             guard let json else { return .init(outcome: .failed("planner returned no JSON"), calls: calls, trace: trace) }
             do {
-                plan = try JSONDecoder().decode(WorkflowPlan.self, from: json.data())
+                plan = try WorkflowPlan(json)
             } catch {
                 return .init(outcome: .failed("planner parse: \(error)"), calls: calls, trace: trace)
             }
@@ -193,12 +211,24 @@ public struct WorkflowTwoRoundRunner: Sendable {
         \(packet.renderForBinder())
         """
         // Binder is always freeform (v2.1) — never set a binder response_format.
-        let (binderJSON, binderMade) = await callJSON(system: binderSystem, user: binderUser, format: nil)
+        let binderJSON: GeneratedContent?
+        let binderMade: [LLMCall]
+        let binderWarnings: [String]
+        do {
+            (binderJSON, binderMade, binderWarnings) = try await callJSON(
+                system: binderSystem,
+                user: binderUser,
+                format: nil
+            )
+        } catch {
+            return .init(outcome: .failed(errorMessage(error)), calls: calls, trace: trace)
+        }
         calls.append(contentsOf: binderMade)
+        trace.append(contentsOf: binderWarnings.map { "binder prePrompt warning: \($0)" })
         guard let binderJSON else { return .init(outcome: .failed("binder returned no JSON"), calls: calls, trace: trace) }
         let binding: WorkflowBinding
         do {
-            binding = try JSONDecoder().decode(WorkflowBinding.self, from: binderJSON.data())
+            binding = try WorkflowBinding(binderJSON)
         } catch {
             return .init(outcome: .failed("binder parse: \(error)"), calls: calls, trace: trace)
         }
@@ -230,13 +260,59 @@ public struct WorkflowTwoRoundRunner: Sendable {
                     allowApprovalRequiredTools: options.allowApprovalRequiredTools
                 )
             )
-            let executor = WorkflowExecutor(registry: tools)
+            let descriptorsByName = Dictionary(uniqueKeysWithValues: manifest.map { ($0.name, $0) })
+            let executor = WorkflowExecutor { node, resolvedInput, executionContext in
+                guard let tool = node.tool else {
+                    throw WorkflowError.missingTool(nodeID: node.id)
+                }
+                let call = ToolCall(
+                    id: "workflow-\(node.id)",
+                    name: tool,
+                    arguments: resolvedInput
+                )
+                let effectiveCall = try await resolveToolCall(call)
+                let outputValue: GeneratedContent
+                do {
+                    outputValue = try await tools.call(
+                        effectiveCall,
+                        context: executionContext.toolContext
+                    )
+                } catch {
+                    let output = Self.toolErrorOutput(error)
+                    try await verifyPostToolUse(
+                        effectiveCall,
+                        rawOutput: output,
+                        diagnosticOutput: output,
+                        isError: true
+                    )
+                    throw error
+                }
+
+                let rawOutput = outputValue.data()
+                let diagnosticValue = WorkflowOutputRedactor.diagnosticValue(
+                    outputValue,
+                    node: node,
+                    descriptor: descriptorsByName[effectiveCall.name]
+                )
+                let diagnosticOutput = diagnosticValue.data()
+                try await verifyPostToolUse(
+                    effectiveCall,
+                    rawOutput: rawOutput,
+                    diagnosticOutput: diagnosticOutput,
+                    isError: false
+                )
+                return outputValue
+            }
             let result = try await executor.execute(
                 validated, context: WorkflowExecutionContext(toolContext: options.toolContext))
+            let final = (result.finalText ?? WorkflowFinalRenderer.displayString(result.finalValue))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let warnings = try await guardrails.verify(.finalResult, .finalResult(final))
+            trace.append(contentsOf: warnings.map { "finalResult warning: \($0)" })
             return .init(outcome: .executed(result), calls: calls, trace: trace)
         } catch {
             trace.append("execute error: \(error)")
-            return .init(outcome: .failed("execution: \(error)"), calls: calls, trace: trace)
+            return .init(outcome: .failed("execution: \(errorMessage(error))"), calls: calls, trace: trace)
         }
     }
 
@@ -245,28 +321,89 @@ public struct WorkflowTwoRoundRunner: Sendable {
     /// Issues an isolated request and extracts its JSON object, retrying on a
     /// transient miss (nil response or no parseable JSON). Each attempt is a
     /// fresh stateless request, so this stays within the two-LLM-request spirit.
-    private func callJSON(system: String, user: String, format: JSONValue?) async -> (JSONValue?, [LLMCall]) {
+    private func callJSON(
+        system: String,
+        user: String,
+        format: GeneratedContent?,
+        visibleTools: [ToolDescriptor] = []
+    ) async throws -> (GeneratedContent?, [LLMCall], [String]) {
         var made: [LLMCall] = []
+        var extra = options.extraBody
+        if let format { extra["response_format"] = format }
+        let request = LLMRequest(
+            model: options.model, system: system,
+            messages: [Message(role: .user, text: user)],
+            tools: visibleTools,
+            temperature: options.temperature, extraBody: extra)
+        let warnings = try await guardrails.verify(
+            .prePrompt,
+            .prePrompt(RenderedPrompt(
+                request: request,
+                toolNames: Set(visibleTools.map(\.name))
+            ))
+        )
         for _ in 0..<options.attemptsPerRound {
-            var extra = options.extraBody
-            if let format { extra["response_format"] = format }
-            let request = LLMRequest(
-                model: options.model, system: system,
-                messages: [Message(role: .user, text: user)], tools: [],
-                temperature: options.temperature, extraBody: extra)
             let start = ContinuousClock.now
             let response = try? await llm.complete(request)
             let duration = (ContinuousClock.now - start).seconds
             made.append(LLMCall(usage: response?.usage ?? .zero, durationSeconds: duration))
-            if let response, let json = Self.extractJSONObject(from: response) { return (json, made) }
+            if let response, let json = Self.extractJSONObject(from: response) {
+                return (json, made, warnings)
+            }
         }
-        return (nil, made)
+        return (nil, made, warnings)
+    }
+
+    private func resolveToolCall(_ call: ToolCall) async throws -> ToolCall {
+        let (payload, _) = try await guardrails.resolve(.preToolUse, .preToolUse(call))
+        if case .preToolUse(let rewritten) = payload {
+            return rewritten
+        }
+        return call
+    }
+
+    private func verifyPostToolUse(
+        _ call: ToolCall,
+        rawOutput: Data,
+        diagnosticOutput: Data,
+        isError: Bool
+    ) async throws {
+        for (output, kind) in [
+            (rawOutput, PostToolUsePayloadKind.raw),
+            (diagnosticOutput, PostToolUsePayloadKind.diagnostic),
+        ] {
+            try await guardrails.verify(
+                .postToolUse,
+                .postToolUse(
+                    name: call.name,
+                    output: output,
+                    isError: isError,
+                    kind: kind
+                )
+            )
+        }
+    }
+
+    private static func toolErrorOutput(_ error: any Error) -> Data {
+        let payload = ["error": String(describing: error)]
+        return (try? JSONEncoder().encode(payload))
+            ?? Data(String(describing: error).utf8)
+    }
+
+    private func errorMessage(_ error: any Error) -> String {
+        if let violation = error as? GuardrailViolation {
+            return "guardrail \(violation.stage.rawValue)/\(violation.railID): \(violation.reason)"
+        }
+        return "\(error)"
     }
 
     /// Pulls the response JSON object: any tool-call input first, else the first
     /// balanced `{…}` in the text (after stripping a ``` fence).
-    static func extractJSONObject(from response: LLMResponse) -> JSONValue? {
-        if let first = response.toolUses.first, case .object = first.input { return first.input }
+    static func extractJSONObject(from response: LLMResponse) -> GeneratedContent? {
+        if let first = response.toolUses.first,
+           case .structure = first.arguments.kind {
+            return first.arguments
+        }
         var text = response.text.trimmingCharacters(in: .whitespacesAndNewlines)
         if text.hasPrefix("```") {
             if let nl = text.firstIndex(of: "\n") { text = String(text[text.index(after: nl)...]) }
@@ -279,13 +416,13 @@ public struct WorkflowTwoRoundRunner: Sendable {
         // model brace-miscount on the `{{slot}}` authoring path) is ignored — the
         // valid object ends at the first return to depth 0.
         if let balanced = firstBalancedObject(in: text),
-           let value = try? JSONValue(data: Data(balanced.utf8)) {
+           let value = try? GeneratedContent(json: balanced) {
             return value
         }
         // Fallback: greedy first `{` … last `}` (handles trailing prose).
         guard let open = text.firstIndex(of: "{"), let close = text.lastIndex(of: "}"), open < close
         else { return nil }
-        return try? JSONValue(data: Data(text[open...close].utf8))
+        return try? GeneratedContent(json: String(text[open...close]))
     }
 
     /// The first brace-balanced `{…}` substring, scanned string-aware (braces
@@ -315,11 +452,13 @@ public struct WorkflowTwoRoundRunner: Sendable {
         return nil
     }
 
-    private func responseFormat(name: String, schema: JSONValue) -> JSONValue {
+    private func responseFormat(name: String, schema: GenerationSchema) -> GeneratedContent {
         .object([
             "type": .string("json_schema"),
             "json_schema": .object([
-                "name": .string(name), "schema": schema, "strict": .bool(true),
+                "name": .string(name),
+                "schema": (try? GeneratedContent(json: schema.jsonString())) ?? .object([:]),
+                "strict": .bool(true),
             ]),
         ])
     }

@@ -22,17 +22,23 @@ let package = Package(
         .library(name: "AIKitUI", targets: ["AIKitUI"]),
     ],
     dependencies: [
-        // Depend on the published AIToolKit (not a local path) so AIKit
-        // resolves standalone when cloned, and so its identity matches the
-        // AIToolKit MultiModalKit pulls in (no "conflicting identity" warning).
-        .package(url: "https://github.com/PangJiaxin0326/AIToolKit.git", branch: "main"),
-        .package(url: "https://github.com/PangJiaxin0326/MultiModalKit.git", branch: "main"),
-        .package(url: "https://github.com/PangJiaxin0326/UICollection.git", branch: "main"),
+        // Use sibling checkouts so the AIKit stack builds against the packages
+        // updated in lockstep during local development.
+        .package(path: "../AIToolKit"),
+        .package(path: "../MultiModalKit"),
+        .package(path: "../UICollection"),
+        .package(path: "Packages/VolcengineArkFoundationModels"),
     ],
     targets: [
         .target(
             name: "AIKitCore",
-            dependencies: [.product(name: "AIToolKit", package: "AIToolKit")],
+            dependencies: [
+                .product(name: "AIToolKit", package: "AIToolKit"),
+                .product(
+                    name: "VolcengineArkFoundationModels",
+                    package: "VolcengineArkFoundationModels"
+                ),
+            ],
             swiftSettings: swiftSettings
         ),
         .target(
@@ -76,6 +82,10 @@ let package = Package(
             name: "AIKit",
             dependencies: [
                 .product(name: "AIToolKit", package: "AIToolKit"),
+                .product(
+                    name: "VolcengineArkFoundationModels",
+                    package: "VolcengineArkFoundationModels"
+                ),
                 "AIKitCore",
                 "AIKitCapability",
                 "AIKitRuntime",

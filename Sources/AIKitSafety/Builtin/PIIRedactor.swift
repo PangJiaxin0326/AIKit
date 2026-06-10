@@ -1,4 +1,5 @@
 import Foundation
+import FoundationModels
 import AIToolKit
 import AIKitCore
 import AIKitCapability
@@ -51,10 +52,10 @@ public struct PIIRedactor: Guardrail {
               !acceptsPII.contains(call.name)
         else { return nil }
 
-        let redacted = Self.redactStrings(in: call.input, placeholder: placeholder)
-        guard redacted != call.input else { return nil }
+        let redacted = Self.redactStrings(in: call.arguments, placeholder: placeholder)
+        guard redacted != call.arguments else { return nil }
         var rewritten = call
-        rewritten.input = redacted
+        rewritten.arguments = redacted
         return .preToolUse(rewritten)
     }
 
@@ -62,7 +63,7 @@ public struct PIIRedactor: Guardrail {
         guard case .preToolUse(let call) = payload else { return .pass }
         if acceptsPII.contains(call.name) { return .pass }
 
-        let kinds = Self.matchedKinds(in: call.input)
+        let kinds = Self.matchedKinds(in: call.arguments)
         guard let kind = kinds.first else { return .pass }
 
         switch mode {
@@ -85,7 +86,7 @@ public struct PIIRedactor: Guardrail {
     /// matches the per-string rewriter could never remove, so redact-mode
     /// would then falsely `.block("…still contains PII")`. Per-string keeps
     /// the detector and rewriter consistent.
-    private static func matchedKinds(in value: JSONValue) -> [String] {
+    private static func matchedKinds(in value: GeneratedContent) -> [String] {
         let strings = value.allStrings.filter { !$0.isEmpty }
         guard !strings.isEmpty else { return [] }
         return patterns.compactMap { kind, regex in
@@ -98,17 +99,19 @@ public struct PIIRedactor: Guardrail {
     }
 
     private static func redactStrings(
-        in value: JSONValue,
+        in value: GeneratedContent,
         placeholder: String
-    ) -> JSONValue {
-        switch value {
+    ) -> GeneratedContent {
+        switch value.kind {
         case .string(let string):
             return .string(redact(string, placeholder: placeholder))
         case .array(let values):
             return .array(values.map { redactStrings(in: $0, placeholder: placeholder) })
-        case .object(let object):
+        case .structure(let object, _):
             return .object(object.mapValues { redactStrings(in: $0, placeholder: placeholder) })
-        case .null, .bool, .int, .number:
+        case .null, .bool, .number:
+            return value
+        @unknown default:
             return value
         }
     }

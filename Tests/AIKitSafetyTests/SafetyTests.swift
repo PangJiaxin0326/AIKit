@@ -9,14 +9,14 @@ import AIKitCapability
     @Test func allowlistBlocksUnknownTool() async {
         let rail = AllowlistedTools(allowed: ["navigate"])
         let blocked = await rail.evaluate(.preToolUse(
-            ToolCall(name: "deleteEverything", input: .object([:]))
+            ToolCall(name: "deleteEverything", arguments: .object([:]))
         ))
         guard case .block = blocked else {
             Issue.record("expected block")
             return
         }
         let allowed = await rail.evaluate(.preToolUse(
-            ToolCall(name: "navigate", input: .object([:]))
+            ToolCall(name: "navigate", arguments: .object([:]))
         ))
         #expect(allowed == .pass)
     }
@@ -24,7 +24,7 @@ import AIKitCapability
     @Test func emptyAllowlistBlocksEveryTool() async {
         let rail = AllowlistedTools(allowed: [])
         let outcome = await rail.evaluate(.preToolUse(
-            ToolCall(name: "navigate", input: .object([:]))
+            ToolCall(name: "navigate", arguments: .object([:]))
         ))
         guard case .block = outcome else {
             Issue.record("expected block")
@@ -36,7 +36,7 @@ import AIKitCapability
         let rail = PIIRedactor()
         let outcome = await rail.evaluate(.preToolUse(ToolCall(
             name: "setProfile",
-            input: .object(["value": .string("contact me at a@b.com")])
+            arguments: .object(["value": .string("contact me at a@b.com")])
         )))
         guard case .block = outcome else {
             Issue.record("expected block")
@@ -48,7 +48,7 @@ import AIKitCapability
         let rail = PIIRedactor(acceptsPII: ["setProfile"])
         let outcome = await rail.evaluate(.preToolUse(ToolCall(
             name: "setProfile",
-            input: .object(["value": .string("a@b.com")])
+            arguments: .object(["value": .string("a@b.com")])
         )))
         #expect(outcome == .pass)
     }
@@ -57,7 +57,7 @@ import AIKitCapability
         let rail = PIIRedactor(mode: .redact)
         let payload = GuardrailPayload.preToolUse(ToolCall(
             name: "setProfile",
-            input: .object([
+            arguments: .object([
                 "bio": .string("reach me at a@b.com or 555-12-6789"),
                 "ok": .string("nothing sensitive"),
             ])
@@ -66,22 +66,22 @@ import AIKitCapability
             Issue.record("expected a rewritten payload")
             return
         }
-        let bio = call.input.objectValue?["bio"]?.stringValue
+        let bio = call.arguments.objectValue?["bio"]?.stringValue
         #expect(bio?.contains("[REDACTED]") == true)
         #expect(bio?.contains("a@b.com") == false)
-        #expect(call.input.objectValue?["ok"]?.stringValue == "nothing sensitive")
+        #expect(call.arguments.objectValue?["ok"]?.stringValue == "nothing sensitive")
         // The sanitized payload now passes evaluation.
         #expect(await rail.evaluate(.preToolUse(call)) == .pass)
     }
 
-    /// REVIEW2 finding **D**: detection runs per string, like the rewriter.
+    /// Detection runs per string, like the rewriter.
     /// Two clean fields that would only match if joined must not be detected,
     /// so redact-mode no longer falsely blocks "…still contains PII".
     @Test func piiRedactorRedactModeNoFalseBlockAcrossFields() async {
         let rail = PIIRedactor(mode: .redact)
         let payload = GuardrailPayload.preToolUse(ToolCall(
             name: "setProfile",
-            input: .object(["a": .string("1234"), "b": .string("567890")])
+            arguments: .object(["a": .string("1234"), "b": .string("567890")])
         ))
         #expect(await rail.rewrite(payload) == nil)
         #expect(await rail.evaluate(payload) == .pass)
@@ -90,7 +90,7 @@ import AIKitCapability
     @Test func piiRedactorRedactModeLeavesCleanInputUntouched() async {
         let rail = PIIRedactor(mode: .redact)
         let clean = GuardrailPayload.preToolUse(ToolCall(
-            name: "navigate", input: .object(["destination": .string("home")])
+            name: "navigate", arguments: .object(["destination": .string("home")])
         ))
         #expect(await rail.rewrite(clean) == nil)
     }
@@ -126,7 +126,7 @@ import AIKitCapability
         await #expect(throws: GuardrailViolation.self) {
             try await engine.verify(
                 .preToolUse,
-                .preToolUse(ToolCall(name: "evil", input: .object([:])))
+                .preToolUse(ToolCall(name: "evil", arguments: .object([:])))
             )
         }
     }
@@ -147,7 +147,7 @@ import AIKitCapability
         let engine = PolicyEngine(rails: [OutputLengthCap(maxCharacters: 1)])
         // OutputLengthCap only binds finalResult; a preToolUse check is a no-op.
         try await engine.verify(
-            .preToolUse, .preToolUse(ToolCall(name: "x", input: .object([:])))
+            .preToolUse, .preToolUse(ToolCall(name: "x", arguments: .object([:])))
         )
     }
 
@@ -155,18 +155,18 @@ import AIKitCapability
         let engine = PolicyEngine(rails: [AllowlistedTools(allowed: ["navigate"])])
         await #expect(throws: GuardrailViolation.self) {
             try await engine.verify(
-                .preToolUse, .preToolUse(ToolCall(name: "evil", input: .object([:])))
+                .preToolUse, .preToolUse(ToolCall(name: "evil", arguments: .object([:])))
             )
         }
         // Replace by id keeps position but swaps behavior.
         await engine.replace(AllowlistedTools(allowed: ["evil"]))
         try await engine.verify(
-            .preToolUse, .preToolUse(ToolCall(name: "evil", input: .object([:])))
+            .preToolUse, .preToolUse(ToolCall(name: "evil", arguments: .object([:])))
         )
         // Unregister removes it entirely.
         await engine.unregister(id: "builtin.allowlistedTools")
         try await engine.verify(
-            .preToolUse, .preToolUse(ToolCall(name: "anything", input: .object([:])))
+            .preToolUse, .preToolUse(ToolCall(name: "anything", arguments: .object([:])))
         )
     }
 }

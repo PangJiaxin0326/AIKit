@@ -1,36 +1,55 @@
 import Foundation
-import AIToolKit
-
-#if canImport(FoundationModels)
 import FoundationModels
-#endif
+import AIToolKit
 
 /// `LLMProvider` backed by Apple's on-device Foundation Models framework.
 ///
-/// This provider is intentionally text-first. Foundation Models exposes its
-/// own native `Tool` protocol, but AIKit tools already flow through
-/// `ToolRegistry`; reporting `supportsNativeTools == false` enables AIKit's
-/// fenced-```tool``` fallback so the runtime can continue to dispatch tools
-/// through the registry without a second adapter layer.
+/// This provider is intentionally text-first. Although AIKit tools conform to
+/// Foundation Models' `Tool` protocol, the runtime owns and dispatches them
+/// through `ToolRegistry`; reporting `supportsNativeTools == false` enables the
+/// fenced-```tool``` fallback on this provider path.
 public struct AppleIntelligenceProvider: LLMProvider {
+    public enum Endpoint: String, Sendable, Hashable, Codable, CaseIterable {
+        case onDevice = "apple-intelligence"
+        case privateCloudCompute = "private-cloud-compute"
+
+        init?(modelID: String) {
+            switch modelID.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+            case Self.onDevice.rawValue:
+                self = .onDevice
+            case Self.privateCloudCompute.rawValue:
+                self = .privateCloudCompute
+            default:
+                return nil
+            }
+        }
+    }
+
     public var providerName: String {
         AIKitProviderKind.appleIntelligence.definition.displayName
     }
 
     public let configuration: LLMProviderConfiguration
+    public let endpoint: Endpoint
 
     public var supportsNativeTools: Bool { false }
 
     public init(
+        endpoint: Endpoint = .onDevice,
         model: String? = nil,
         availableModels: [String] = [],
         timeout: TimeInterval? = nil
     ) {
+        self.endpoint = endpoint
         self.configuration = LLMProviderConfiguration(
             apiKey: "",
-            baseURL: AIKitProviderDefaults.appleIntelligenceBaseURL,
-            defaultModel: model,
-            availableModels: availableModels,
+            baseURL: endpoint == .privateCloudCompute
+                ? AIKitProviderDefaults.privateCloudComputeBaseURL
+                : AIKitProviderDefaults.appleIntelligenceBaseURL,
+            defaultModel: model ?? endpoint.rawValue,
+            availableModels: availableModels.isEmpty
+                ? Self.defaultModels
+                : availableModels,
             timeout: timeout
         )
     }
@@ -41,13 +60,10 @@ public struct AppleIntelligenceProvider: LLMProvider {
                 "AppleIntelligenceProvider does not support generated audio output."
             )
         }
-        #if canImport(FoundationModels)
-        return try await AppleFoundationModels.complete(request)
-        #else
-        throw LLMError.unsupported(
-            "Apple Intelligence requires the Foundation Models framework."
+        return try await AppleFoundationModels.complete(
+            request,
+            endpoint: Endpoint(modelID: request.model) ?? endpoint
         )
-        #endif
     }
 
     public func stream(
@@ -71,10 +87,10 @@ public struct AppleIntelligenceProvider: LLMProvider {
                             break
                         case .audio(let audio):
                             continuation.yield(.audio(audio))
-                        case .toolUse(let id, let name, let input):
+                        case .toolUse(let id, let name, let arguments):
                             continuation.yield(.toolUseStart(id: id, name: name))
-                            if let data = try? input.data(),
-                               let json = String(data: data, encoding: .utf8) {
+                            let data = arguments.data()
+                            if let json = String(data: data, encoding: .utf8) {
                                 continuation.yield(.toolUseInputDelta(id: id, json: json))
                             }
                             continuation.yield(.toolUseStop(id: id))
@@ -98,6 +114,8 @@ public struct AppleIntelligenceProvider: LLMProvider {
             continuation.onTermination = { _ in task.cancel() }
         }
     }
+
+    private static let defaultModels = Endpoint.allCases.map(\.rawValue)
 
     struct RenderedPrompt: Sendable, Hashable {
         var instructions: String?
@@ -160,8 +178,8 @@ public struct AppleIntelligenceProvider: LLMProvider {
                     parts.append("Transcript: \(transcript)")
                 }
                 return parts.joined(separator: " ")
-            case .toolUse(_, let name, let input):
-                return "Requested tool \(name) with input \(jsonString(input))."
+            case .toolUse(_, let name, let arguments):
+                return "Requested tool \(name) with input \(arguments.jsonString)."
             case .toolResult(_, let content, let isError):
                 return isError ? "Tool error: \(content)" : "Tool result: \(content)"
             }
@@ -172,9 +190,10 @@ public struct AppleIntelligenceProvider: LLMProvider {
     private static func toolManifestBlock(_ tools: [ToolDescriptor]) -> String? {
         guard !tools.isEmpty else { return nil }
         let lines = tools.map { descriptor in
-            """
+            let schema = (try? descriptor.argumentsSchema.jsonString()) ?? "{}"
+            return """
             - \(descriptor.name): \(descriptor.description)
-              input schema: \(jsonString(descriptor.inputSchema))
+              input schema: \(schema)
             """
         }
         .joined(separator: "\n")
@@ -184,19 +203,28 @@ public struct AppleIntelligenceProvider: LLMProvider {
         """
     }
 
-    private static func jsonString(_ value: JSONValue) -> String {
-        guard let data = try? value.data(),
-              let string = String(data: data, encoding: .utf8)
-        else {
-            return "\(value)"
-        }
-        return string
-    }
 }
 
-#if canImport(FoundationModels)
 private enum AppleFoundationModels {
-    static func complete(_ request: LLMRequest) async throws -> LLMResponse {
+    static func complete(
+        _ request: LLMRequest,
+        endpoint: AppleIntelligenceProvider.Endpoint
+    ) async throws -> LLMResponse {
+        if endpoint == .privateCloudCompute {
+            if #available(iOS 27.0, macOS 27.0, visionOS 27.0, watchOS 27.0, *) {
+                do {
+                    return try await completeWithPrivateCloudCompute(request)
+                } catch PrivateCloudComputeLanguageModel.Error.networkFailure(_) {
+                    return try await completeOnDevice(request)
+                } catch {
+                    throw LLMError.provider(message: error.localizedDescription)
+                }
+            }
+        }
+        return try await completeOnDevice(request)
+    }
+
+    private static func completeOnDevice(_ request: LLMRequest) async throws -> LLMResponse {
         let model = SystemLanguageModel.default
         guard model.isAvailable else {
             throw LLMError.provider(
@@ -207,19 +235,57 @@ private enum AppleFoundationModels {
         let rendered = AppleIntelligenceProvider.renderedPrompt(for: request)
         let session: LanguageModelSession
         if let instructions = rendered.instructions {
-            session = LanguageModelSession(instructions: instructions)
+            session = LanguageModelSession(model: model, instructions: instructions)
         } else {
-            session = LanguageModelSession()
+            session = LanguageModelSession(model: model)
         }
+        return try await respond(session: session, prompt: rendered.prompt, request: request)
+    }
+
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, watchOS 27.0, *)
+    private static func completeWithPrivateCloudCompute(
+        _ request: LLMRequest
+    ) async throws -> LLMResponse {
+        let model = PrivateCloudComputeLanguageModel()
+        guard model.isAvailable else {
+            throw LLMError.provider(
+                message: "Private Cloud Compute is unavailable: \(model.availability)"
+            )
+        }
+        let rendered = AppleIntelligenceProvider.renderedPrompt(for: request)
+        let session = makeSession(
+            model: model,
+            rendered: rendered
+        )
+        return try await respond(session: session, prompt: rendered.prompt, request: request)
+    }
+
+    @available(iOS 27.0, macOS 27.0, visionOS 27.0, watchOS 27.0, *)
+    private static func makeSession(
+        model: some LanguageModel,
+        rendered: AppleIntelligenceProvider.RenderedPrompt
+    ) -> LanguageModelSession {
+        if let instructions = rendered.instructions {
+            LanguageModelSession(model: model, instructions: instructions)
+        } else {
+            LanguageModelSession(model: model)
+        }
+    }
+
+    private static func respond(
+        session: LanguageModelSession,
+        prompt: String,
+        request: LLMRequest
+    ) async throws -> LLMResponse {
         let options = GenerationOptions(
-            sampling: nil,
+            samplingMode: nil,
             temperature: request.temperature,
             maximumResponseTokens: request.maxTokens
         )
 
         do {
             let response = try await session.respond(
-                to: rendered.prompt,
+                to: prompt,
                 options: options
             )
             return LLMResponse(
@@ -235,7 +301,6 @@ private enum AppleFoundationModels {
         }
     }
 }
-#endif
 
 private extension String {
     var trimmedNonEmpty: String? {

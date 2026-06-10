@@ -1,4 +1,6 @@
+@_exported import AIToolKit
 @_exported import AIKitCore
+@_exported import VolcengineArkFoundationModels
 @_exported import AIKitCapability
 @_exported import AIKitRuntime
 @_exported import AIKitSafety

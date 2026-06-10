@@ -1,10 +1,11 @@
 import Foundation
+import FoundationModels
 import AIToolKit
 import AIKitCore
 import AIKitCapability
 
 /// What the model wants to happen next.
-public enum ParsedOutput: Sendable, Hashable {
+public enum ParsedOutput: Sendable, Equatable {
     case final(String)
     case toolCalls([ToolCall])
     case mixed(text: String, toolCalls: [ToolCall])
@@ -22,8 +23,8 @@ public enum OutputParser {
 
     /// - Parameter allowToolCallFallback: when true and the response carries no
     ///   native `tool_use` blocks, a fenced ```tool JSON block embedded in the
-    ///   text is recovered as a tool call. Lets models without native function
-    ///   calling (common for local models) still drive tools.
+    ///   text is recovered as a tool call. Lets text-only provider paths still
+    ///   drive tools.
     public static func parse(
         _ response: LLMResponse,
         allowToolCallFallback: Bool = false
@@ -47,16 +48,16 @@ public enum OutputParser {
                     if !textParts.isEmpty { textParts.append("\n") }
                     textParts.append(transcript)
                 }
-            case .toolUse(let id, let name, let input):
+            case .toolUse(let id, let name, let arguments):
                 // A tool_use block whose input failed to decode upstream is
                 // surfaced so the ErrorHandler can re-prompt.
-                if let raw = Self.malformedToolInputRaw(in: input) {
+                if let raw = AIKitMalformedToolInput.raw(in: arguments) {
                     throw ParserError.malformedToolInput(name: name, raw: raw)
                 }
-                if case .null = input {
+                if case .null = arguments.kind {
                     throw ParserError.malformedToolInput(name: name, raw: "null")
                 }
-                calls.append(ToolCall(id: id, name: name, input: input))
+                calls.append(ToolCall(id: id, name: name, arguments: arguments))
             case .toolResult:
                 continue
             }
@@ -109,12 +110,6 @@ public enum OutputParser {
         }
     }
 
-    // MARK: - Malformed native tool-call sentinel
-
-    private static func malformedToolInputRaw(in input: JSONValue) -> String? {
-        AIKitMalformedToolInput.raw(in: input)
-    }
-
     // MARK: - Near-miss diagnostic
 
     // Any fenced block plus its (possibly empty) info string. Used only to
@@ -141,11 +136,10 @@ public enum OutputParser {
             if text[tagRange].lowercased() == "tool" { continue }
             let body = String(text[bodyRange])
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            guard body.contains("\"name\"") || body.contains("\"tool\"")
+            guard body.contains("\"name\"")
             else { continue }
-            if let data = body.data(using: .utf8),
-               let spec = try? JSONDecoder().decode(FencedSpec.self, from: data),
-               let name = spec.resolvedName, !name.isEmpty {
+            if let value = try? GeneratedContent(json: body),
+               let name = Self.toolName(in: value), !name.isEmpty {
                 return true
             }
         }
@@ -153,16 +147,6 @@ public enum OutputParser {
     }
 
     // MARK: - Fenced tool-call fallback
-
-    private struct FencedSpec: Decodable {
-        let name: String?
-        let tool: String?
-        let input: JSONValue?
-        let arguments: JSONValue?
-
-        var resolvedName: String? { name ?? tool }
-        var resolvedInput: JSONValue { input ?? arguments ?? .object([:]) }
-    }
 
     // Requires the explicit `tool` tag (the convention the prompt instructs).
     // Matching bare ``` / ```json blocks would derail legitimate answers that
@@ -182,25 +166,25 @@ public enum OutputParser {
         else { return nil }
         let call = calls.remove(at: index)
         do {
-            return try WorkflowSpec.decodeToolCallInput(call.input)
+            return try WorkflowSpec.decodeToolCallArguments(call.arguments)
         } catch {
-            throw ParserError.malformedWorkflow(raw: Self.rawJSON(call.input))
+            throw ParserError.malformedWorkflow(raw: call.arguments.jsonString)
         }
     }
 
-    private static func decodeWorkflowCandidate(_ value: JSONValue) throws -> WorkflowSpec? {
-        if case .object(let object) = value,
-           let name = object["name"]?.stringValue ?? object["tool"]?.stringValue,
+    private static func decodeWorkflowCandidate(_ value: GeneratedContent) throws -> WorkflowSpec? {
+        if let object = value.objectValue,
+           let name = object["name"]?.stringValue,
            name == WorkflowSpec.toolName,
-           let input = object["input"] ?? object["arguments"] {
+           let input = object["arguments"] {
             do {
-                return try WorkflowSpec.decodeToolCallInput(input)
+                return try WorkflowSpec.decodeToolCallArguments(input)
             } catch {
-                throw ParserError.malformedWorkflow(raw: Self.rawJSON(value))
+                throw ParserError.malformedWorkflow(raw: value.jsonString)
             }
         }
         do {
-            return try WorkflowSpec.decodeToolCallInput(value)
+            return try WorkflowSpec.decodeToolCallArguments(value)
         } catch {
             return nil
         }
@@ -211,8 +195,7 @@ public enum OutputParser {
     ) throws -> (spec: WorkflowSpec, remainingText: String)? {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.hasPrefix("{"),
-           let data = trimmed.data(using: .utf8),
-           let value = try? JSONValue(data: data) {
+           let value = try? GeneratedContent(json: trimmed) {
             if let plan = try Self.decodeWorkflowCandidate(value) {
                 return (plan, "")
             }
@@ -230,8 +213,7 @@ public enum OutputParser {
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             guard Self.looksLikeWorkflowJSON(body)
             else { continue }
-            guard let data = body.data(using: .utf8),
-                  let value = try? JSONValue(data: data)
+            guard let value = try? GeneratedContent(json: body)
             else {
                 throw ParserError.malformedWorkflow(raw: body)
             }
@@ -256,13 +238,6 @@ public enum OutputParser {
                 && text.contains("\"depends_on\""))
     }
 
-    private static func rawJSON(_ value: JSONValue) -> String {
-        guard let data = try? value.data(),
-              let text = String(data: data, encoding: .utf8)
-        else { return "\(value)" }
-        return text
-    }
-
     /// Looks for a fenced ```tool block holding a single JSON object describing
     /// a tool call. A block that is present but unparseable is a hard error so
     /// the ErrorHandler can re-prompt for valid JSON.
@@ -277,15 +252,15 @@ public enum OutputParser {
 
         let body = String(text[bodyRange]).trimmingCharacters(in: .whitespacesAndNewlines)
         // Only treat the block as a tool call if it actually names one.
-        guard body.contains("\"name\"") || body.contains("\"tool\"") else {
+        guard body.contains("\"name\"") else {
             return nil
         }
-        guard let data = body.data(using: .utf8),
-              let spec = try? JSONDecoder().decode(FencedSpec.self, from: data),
-              let name = spec.resolvedName, !name.isEmpty
+        guard let value = try? GeneratedContent(json: body),
+              let name = Self.toolName(in: value), !name.isEmpty
         else {
             throw ParserError.malformedToolInput(name: "unknown", raw: body)
         }
+        let arguments = Self.toolArguments(in: value)
 
         var remaining = text
         if let fullRange = Range(match.range, in: text) {
@@ -297,6 +272,14 @@ public enum OutputParser {
         // `tool_result` can reference. Without it, wire encoders emit a
         // `tool`/`tool_calls`-less message pair that backends reject.
         let id = "fallback-\(UUID().uuidString)"
-        return (ToolCall(id: id, name: name, input: spec.resolvedInput), remaining)
+        return (ToolCall(id: id, name: name, arguments: arguments), remaining)
+    }
+
+    private static func toolName(in value: GeneratedContent) -> String? {
+        value.objectValue?["name"]?.stringValue
+    }
+
+    private static func toolArguments(in value: GeneratedContent) -> GeneratedContent {
+        value.objectValue?["arguments"] ?? .object([:])
     }
 }

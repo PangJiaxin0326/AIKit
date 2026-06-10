@@ -1,9 +1,11 @@
 import Foundation
+import FoundationModels
 import AIToolKit
 import AIKitCore
 
 /// Built-in tool: reads the shared AIKit configuration state.
-public struct GetAIKitConfigurationTool: Tool {
+public struct GetAIKitConfigurationTool: Tool, ToolMetadataProviding {
+    @Generable
     public struct Input: Codable, Sendable {
         public var includeRecentChanges: Bool?
 
@@ -12,37 +14,38 @@ public struct GetAIKitConfigurationTool: Tool {
         }
     }
 
-    public struct Output: Codable, Sendable {
-        public var configuration: AIKitConfiguration
-        public var recentChanges: [AIKitConfigurationChange]
+    @Generable
+    public struct Output: Sendable {
+        public var configuration: GeneratedContent
+        public var recentChanges: GeneratedContent
 
         public init(
-            configuration: AIKitConfiguration,
-            recentChanges: [AIKitConfigurationChange]
+            configuration: GeneratedContent,
+            recentChanges: GeneratedContent
         ) {
             self.configuration = configuration
             self.recentChanges = recentChanges
         }
     }
 
-    public static let name = "getAIKitConfiguration"
-    public static let description = """
+    public static let toolName = "getAIKitConfiguration"
+    public static let toolDescription = """
     Read AIKit's current Core, Capability, Runtime, and Safety configuration.
     """
-    public static let inputSchema = ToolSchema.object(
-        properties: [
-            "includeRecentChanges": .boolean,
-        ]
-    )
-    public static let annotations = ToolAnnotations(
+    public static let toolAnnotations = ToolAnnotations(
         isReadOnly: true,
         isIdempotent: true,
         sideEffect: .none,
         sensitiveOutput: .privateContent
     )
-    public static let inputExamples: [JSONValue] = [
+    public static let toolArgumentExamples: [GeneratedContent] = [
         .object(["includeRecentChanges": .bool(true)]),
     ]
+
+    public var name: String { Self.toolName }
+    public var description: String { Self.toolDescription }
+    public var annotations: ToolAnnotations { Self.toolAnnotations }
+    public var argumentExamples: [GeneratedContent] { Self.toolArgumentExamples }
 
     private let store: AIKitConfigurationStore
 
@@ -50,44 +53,61 @@ public struct GetAIKitConfigurationTool: Tool {
         self.store = store
     }
 
-    public func call(_ input: Input, in context: ToolContext) async throws -> Output {
+    public func call(arguments input: Input) async throws -> Output {
         let changes = await store.recentChanges(
             limit: input.includeRecentChanges == false ? 0 : 10
         )
         return Output(
-            configuration: await store.snapshot(),
-            recentChanges: changes
+            configuration: try Self.content(from: await store.snapshot()),
+            recentChanges: try Self.content(from: changes)
         )
+    }
+
+    private static func content(from value: some Encodable) throws -> GeneratedContent {
+        try GeneratedContent(data: JSONEncoder().encode(value))
     }
 }
 
 /// Built-in tool: mutates one field in the shared AIKit configuration state.
-public struct SetAIKitConfigurationTool: Tool {
-    public struct Input: Codable, Sendable {
-        public var section: AIKitConfiguration.Section
+public struct SetAIKitConfigurationTool: Tool, ToolMetadataProviding {
+    @Generable
+    public struct Input: Sendable {
+        @Guide(description: "Configuration section: core, capability, runtime, or safety")
+        public var section: String
+        @Guide(description: "Field name inside the section")
         public var key: String
-        public var value: JSONValue
+        @Guide(description: "New JSON value for the field")
+        public var value: GeneratedContent
 
         public init(
-            section: AIKitConfiguration.Section,
+            section: String,
             key: String,
-            value: JSONValue
+            value: GeneratedContent
         ) {
             self.section = section
             self.key = key
             self.value = value
         }
+
+        public init(
+            section: AIKitConfiguration.Section,
+            key: String,
+            value: GeneratedContent
+        ) {
+            self.init(section: section.rawValue, key: key, value: value)
+        }
     }
 
-    public struct Output: Codable, Sendable {
+    @Generable
+    public struct Output: Sendable {
         public var applied: Bool
-        public var configuration: AIKitConfiguration
-        public var change: AIKitConfigurationChange
+        public var configuration: GeneratedContent
+        public var change: GeneratedContent
 
         public init(
             applied: Bool,
-            configuration: AIKitConfiguration,
-            change: AIKitConfigurationChange
+            configuration: GeneratedContent,
+            change: GeneratedContent
         ) {
             self.applied = applied
             self.configuration = configuration
@@ -95,69 +115,73 @@ public struct SetAIKitConfigurationTool: Tool {
         }
     }
 
-    public static let name = "setAIKitConfiguration"
-    public static let description = """
+    public static let toolName = "setAIKitConfiguration"
+    public static let toolDescription = """
     Change one AIKit configuration field. Sections are core, capability, \
-    runtime, and safety. Useful keys include model, activeProvider (OpenAI, \
-    Anthropic, Ollama, Apple Intelligence, or Ark), availableModels, \
+    runtime, and safety. Useful keys include model, activeProvider (Volcengine \
+    Ark or Apple Intelligence), availableModels, \
     endpointURL, enabledToolNames, systemPromptFragment, maxIterations, \
     streamsResponses, toolCallFallback, workflowPlanning, leanWorkflowSchema, \
     twoRoundAutoBind, twoRoundStructuredPlannerOutput, enabledGuardrailIDs, and \
     outputLengthLimit.
     """
-    public static let inputSchema = ToolSchema(json: .object([
-        "type": .string("object"),
-        "properties": .object([
-            "section": .object([
-                "type": .string("string"),
-                "description": .string("Configuration section"),
-                "enum": .array(AIKitConfiguration.Section.allCases.map { .string($0.rawValue) }),
-            ]),
-            "key": .object([
-                "type": .string("string"),
-                "description": .string("Field name inside the section"),
-            ]),
-            "value": .object([
-                "description": .string("New JSON value for the field"),
-            ]),
-        ]),
-        "required": .array([
-            .string("section"),
-            .string("key"),
-            .string("value"),
-        ]),
-    ]))
-    public static let annotations = ToolAnnotations(
+    public static let toolAnnotations = ToolAnnotations(
         sideEffect: .localWrite,
         sensitiveOutput: .privateContent
     )
+    public static let toolArgumentExamples: [GeneratedContent] = [
+        .object([
+            "section": .string(AIKitConfiguration.Section.runtime.rawValue),
+            "key": .string("maxIterations"),
+            "value": .int(4),
+        ]),
+    ]
+
+    public var name: String { Self.toolName }
+    public var description: String { Self.toolDescription }
+    public var annotations: ToolAnnotations { Self.toolAnnotations }
+    public var argumentExamples: [GeneratedContent] { Self.toolArgumentExamples }
 
     private let store: AIKitConfigurationStore
+    private let source: String
 
-    public init(store: AIKitConfigurationStore) {
+    public init(store: AIKitConfigurationStore, source: String = "llm") {
         self.store = store
+        self.source = source
     }
 
-    public func call(_ input: Input, in context: ToolContext) async throws -> Output {
+    public func call(arguments input: Input) async throws -> Output {
+        guard let section = AIKitConfiguration.Section(rawValue: input.section) else {
+            throw AIKitConfigurationError.invalidValue(
+                section: .core,
+                key: "section",
+                expected: AIKitConfiguration.Section.allCases.map(\.rawValue).joined(separator: ", ")
+            )
+        }
         let change = try await store.set(
-            section: input.section,
+            section: section,
             key: input.key,
             value: input.value,
-            source: "llm:\(context.viewID)"
+            source: source
         )
+        let snapshot = await store.snapshot()
         return Output(
             applied: true,
-            configuration: await store.snapshot(),
-            change: change
+            configuration: try Self.content(from: snapshot),
+            change: try Self.content(from: change)
         )
+    }
+
+    private static func content(from value: some Encodable) throws -> GeneratedContent {
+        try GeneratedContent(data: JSONEncoder().encode(value))
     }
 }
 
 /// Convenience registration for the configuration tools shipped with AIKit.
 public enum AIKitConfigurationTools {
     public static let toolNames: Set<String> = [
-        GetAIKitConfigurationTool.name,
-        SetAIKitConfigurationTool.name,
+        GetAIKitConfigurationTool.toolName,
+        SetAIKitConfigurationTool.toolName,
     ]
 
     public static func register(

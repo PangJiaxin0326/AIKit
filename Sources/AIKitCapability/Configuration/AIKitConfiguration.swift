@@ -1,4 +1,5 @@
 import Foundation
+import FoundationModels
 import AIToolKit
 import AIKitCore
 
@@ -79,9 +80,6 @@ public struct AIKitConfiguration: Codable, Sendable, Hashable {
         }
 
         public var activeProvider: AIKitProviderKind
-        public var openAI: ProviderConfiguration
-        public var anthropic: ProviderConfiguration
-        public var ollama: ProviderConfiguration
         public var appleIntelligence: ProviderConfiguration
         public var ark: ProviderConfiguration
         public var timeout: TimeInterval?
@@ -89,10 +87,7 @@ public struct AIKitConfiguration: Codable, Sendable, Hashable {
         public var maxTokens: Int?
 
         public init(
-            activeProvider: AIKitProviderKind = .ollama,
-            openAI: ProviderConfiguration = ProviderConfiguration(),
-            anthropic: ProviderConfiguration = ProviderConfiguration(),
-            ollama: ProviderConfiguration = ProviderConfiguration(),
+            activeProvider: AIKitProviderKind = .ark,
             appleIntelligence: ProviderConfiguration = ProviderConfiguration(),
             ark: ProviderConfiguration = ProviderConfiguration(),
             timeout: TimeInterval? = nil,
@@ -100,9 +95,6 @@ public struct AIKitConfiguration: Codable, Sendable, Hashable {
             maxTokens: Int? = nil
         ) {
             self.activeProvider = activeProvider
-            self.openAI = openAI
-            self.anthropic = anthropic
-            self.ollama = ollama
             self.appleIntelligence = appleIntelligence
             self.ark = ark
             self.timeout = timeout
@@ -112,9 +104,6 @@ public struct AIKitConfiguration: Codable, Sendable, Hashable {
 
         private enum CodingKeys: String, CodingKey {
             case activeProvider
-            case openAI
-            case anthropic
-            case ollama
             case appleIntelligence
             case ark
             case timeout
@@ -127,21 +116,9 @@ public struct AIKitConfiguration: Codable, Sendable, Hashable {
             let activeProvider = try container.decodeIfPresent(
                 AIKitProviderKind.self,
                 forKey: .activeProvider
-            ) ?? .ollama
+            ) ?? .ark
 
             self.activeProvider = activeProvider
-            self.openAI = try container.decodeIfPresent(
-                ProviderConfiguration.self,
-                forKey: .openAI
-            ) ?? ProviderConfiguration()
-            self.anthropic = try container.decodeIfPresent(
-                ProviderConfiguration.self,
-                forKey: .anthropic
-            ) ?? ProviderConfiguration()
-            self.ollama = try container.decodeIfPresent(
-                ProviderConfiguration.self,
-                forKey: .ollama
-            ) ?? ProviderConfiguration()
             self.appleIntelligence = try container.decodeIfPresent(
                 ProviderConfiguration.self,
                 forKey: .appleIntelligence
@@ -158,9 +135,6 @@ public struct AIKitConfiguration: Codable, Sendable, Hashable {
         public func encode(to encoder: any Encoder) throws {
             var container = encoder.container(keyedBy: CodingKeys.self)
             try container.encode(activeProvider, forKey: .activeProvider)
-            try container.encode(openAI, forKey: .openAI)
-            try container.encode(anthropic, forKey: .anthropic)
-            try container.encode(ollama, forKey: .ollama)
             try container.encode(appleIntelligence, forKey: .appleIntelligence)
             try container.encode(ark, forKey: .ark)
             try container.encodeIfPresent(timeout, forKey: .timeout)
@@ -177,12 +151,6 @@ public struct AIKitConfiguration: Codable, Sendable, Hashable {
             for provider: AIKitProviderKind
         ) -> ProviderConfiguration {
             switch provider {
-            case .openAI:
-                openAI
-            case .anthropic:
-                anthropic
-            case .ollama:
-                ollama
             case .appleIntelligence:
                 appleIntelligence
             case .ark:
@@ -195,12 +163,6 @@ public struct AIKitConfiguration: Codable, Sendable, Hashable {
             for provider: AIKitProviderKind
         ) {
             switch provider {
-            case .openAI:
-                openAI = providerConfiguration
-            case .anthropic:
-                anthropic = providerConfiguration
-            case .ollama:
-                ollama = providerConfiguration
             case .appleIntelligence:
                 appleIntelligence = providerConfiguration
             case .ark:
@@ -441,7 +403,7 @@ public actor AIKitConfigurationStore {
     public func set(
         section: AIKitConfiguration.Section,
         key: String,
-        value: JSONValue,
+        value: GeneratedContent,
         source: String = "host"
     ) throws -> AIKitConfigurationChange {
         try configuration.set(section: section, key: key, value: value)
@@ -471,7 +433,7 @@ extension AIKitConfiguration {
     public mutating func set(
         section: Section,
         key: String,
-        value: JSONValue
+        value: GeneratedContent
     ) throws {
         let normalized = key.normalizedConfigurationKey
         switch section {
@@ -489,7 +451,7 @@ extension AIKitConfiguration {
     private mutating func setCore(
         key: String,
         originalKey: String,
-        value: JSONValue
+        value: GeneratedContent
     ) throws {
         switch key {
         case "provider", "activeprovider":
@@ -498,7 +460,7 @@ extension AIKitConfiguration {
                 throw AIKitConfigurationError.invalidValue(
                     section: .core,
                     key: originalKey,
-                    expected: "OpenAI, Anthropic, Ollama, Apple Intelligence, or Ark"
+                    expected: "Ark or Apple Intelligence"
                 )
             }
             core.activeProvider = provider
@@ -532,7 +494,7 @@ extension AIKitConfiguration {
     private mutating func setCapability(
         key: String,
         originalKey: String,
-        value: JSONValue
+        value: GeneratedContent
     ) throws {
         switch key {
         case "context", "contextdisplayname", "displayname":
@@ -551,7 +513,7 @@ extension AIKitConfiguration {
     private mutating func setRuntime(
         key: String,
         originalKey: String,
-        value: JSONValue
+        value: GeneratedContent
     ) throws {
         switch key {
         case "stream", "streaming", "streamsresponses":
@@ -578,7 +540,7 @@ extension AIKitConfiguration {
     private mutating func setSafety(
         key: String,
         originalKey: String,
-        value: JSONValue
+        value: GeneratedContent
     ) throws {
         switch key {
         case "guardrails", "enabledguardrails", "enabledguardrailids":
@@ -608,14 +570,12 @@ private extension String {
     }
 }
 
-private extension JSONValue {
+private extension GeneratedContent {
     var configurationDescription: String {
-        switch self {
+        switch kind {
         case .null:
             return "null"
         case .bool(let value):
-            return String(value)
-        case .int(let value):
             return String(value)
         case .number(let value):
             return String(value)
@@ -623,8 +583,10 @@ private extension JSONValue {
             return value
         case .array(let values):
             return values.map(\.configurationDescription).joined(separator: ", ")
-        case .object:
+        case .structure:
             return "object"
+        @unknown default:
+            return jsonString
         }
     }
 
@@ -632,7 +594,7 @@ private extension JSONValue {
         section: AIKitConfiguration.Section,
         key: String
     ) throws -> String {
-        guard case .string(let value) = self else {
+        guard case .string(let value) = kind else {
             throw AIKitConfigurationError.invalidValue(
                 section: section, key: key, expected: "a string"
             )
@@ -644,7 +606,7 @@ private extension JSONValue {
         section: AIKitConfiguration.Section,
         key: String
     ) throws -> String? {
-        if case .null = self { return nil }
+        if case .null = kind { return nil }
         return try string(section: section, key: key)
     }
 
@@ -652,7 +614,7 @@ private extension JSONValue {
         section: AIKitConfiguration.Section,
         key: String
     ) throws -> Bool {
-        guard case .bool(let value) = self else {
+        guard case .bool(let value) = kind else {
             throw AIKitConfigurationError.invalidValue(
                 section: section, key: key, expected: "a boolean"
             )
@@ -674,7 +636,7 @@ private extension JSONValue {
         section: AIKitConfiguration.Section,
         key: String
     ) throws -> Int? {
-        if case .null = self { return nil }
+        if case .null = kind { return nil }
         return try int(section: section, key: key)
     }
 
@@ -682,9 +644,7 @@ private extension JSONValue {
         section: AIKitConfiguration.Section,
         key: String
     ) throws -> Double {
-        switch self {
-        case .int(let value):
-            return Double(value)
+        switch kind {
         case .number(let value):
             return value
         default:
@@ -698,7 +658,7 @@ private extension JSONValue {
         section: AIKitConfiguration.Section,
         key: String
     ) throws -> Double? {
-        if case .null = self { return nil }
+        if case .null = kind { return nil }
         return try double(section: section, key: key)
     }
 
@@ -706,7 +666,7 @@ private extension JSONValue {
         section: AIKitConfiguration.Section,
         key: String
     ) throws -> Set<String> {
-        switch self {
+        switch kind {
         case .array(let values):
             return Set(try values.map { try $0.string(section: section, key: key) })
         case .string(let value):
@@ -725,7 +685,7 @@ private extension JSONValue {
         section: AIKitConfiguration.Section,
         key: String
     ) throws -> [String] {
-        switch self {
+        switch kind {
         case .array(let values):
             return try values.map { try $0.string(section: section, key: key) }
         case .string(let value):
@@ -744,7 +704,7 @@ private extension JSONValue {
         section: AIKitConfiguration.Section,
         key: String
     ) throws -> AIKitConfiguration.ToolCallFallbackMode {
-        if case .bool(let value) = self {
+        if case .bool(let value) = kind {
             return value ? .enabled : .disabled
         }
         let raw = try string(section: section, key: key)

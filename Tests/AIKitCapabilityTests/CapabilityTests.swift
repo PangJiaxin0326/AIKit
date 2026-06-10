@@ -1,4 +1,5 @@
 import Foundation
+import FoundationModels
 import SwiftData
 import Testing
 @testable import AIKitCapability
@@ -6,26 +7,35 @@ import AIKitCore
 import AIToolKit
 
 private struct EchoTool: Tool {
+    @Generable
     struct Input: Codable, Sendable { var text: String }
+    @Generable
     struct Output: Codable, Sendable { var echoed: String }
 
-    static let name = "echo"
-    static let description = "Echoes input back, recording the call in memory."
-    static let inputSchema = ToolSchema.object(
-        properties: ["text": .string(description: "anything")],
-        required: ["text"]
-    )
+    let name = "echo"
+    let description = "Echoes input back, recording the call in memory."
 
     let memory: any MemoryStore
 
-    func call(_ input: Input, in context: ToolContext) async throws -> Output {
+    func call(arguments input: Input) async throws -> Output {
         try await memory.append(UsageEvent(
-            viewID: ViewContext.ID(context.viewID),
+            viewID: ViewContext.ID("tool"),
             kind: .toolInvoked,
             text: "echo:\(input.text)"
         ))
         return Output(echoed: input.text)
     }
+}
+
+private func jsonData(_ value: some ConvertibleToGeneratedContent) -> Data {
+    Data(value.generatedContent.jsonString.utf8)
+}
+
+private func generatedValue<Value: ConvertibleFromGeneratedContent>(
+    _ type: Value.Type = Value.self,
+    from data: Data
+) throws -> Value {
+    try Value(GeneratedContent(data: data))
 }
 
 @Suite struct ToolRegistryTests {
@@ -35,11 +45,11 @@ private struct EchoTool: Tool {
         await registry.register(EchoTool(memory: memory))
         let context = ToolContext(viewID: "home")
 
-        let input = try JSONEncoder().encode(EchoTool.Input(text: "hi"))
+        let input = jsonData(EchoTool.Input(text: "hi"))
         let outData = try await registry.call(
-            name: "echo", jsonInput: input, context: context
+            name: "echo", jsonArguments: input, context: context
         )
-        let output = try JSONDecoder().decode(EchoTool.Output.self, from: outData)
+        let output = try generatedValue(EchoTool.Output.self, from: outData)
         #expect(output.echoed == "hi")
 
         let recent = try await memory.recent(limit: 10, view: nil)
@@ -72,13 +82,13 @@ private struct EchoTool: Tool {
     }
 
     @Test func builtInDescriptorsExposeWorkflowMetadata() {
-        let navigate = NavigateTool.descriptor
+        let navigate = NavigateTool { _ in .init(navigated: true) }.descriptor
         #expect(navigate.outputSchema != nil)
         #expect(navigate.annotations?.sideEffect == .localWrite)
         #expect(navigate.annotations?.sensitiveOutput == ToolAnnotations.SensitiveOutput.none)
-        #expect(navigate.inputExamples?.isEmpty == false)
+        #expect(navigate.argumentExamples?.isEmpty == false)
 
-        let search = SearchMemoryTool.descriptor
+        let search = SearchMemoryTool(memory: InMemoryMemoryStore()).descriptor
         #expect(search.outputSchema != nil)
         #expect(search.annotations?.isReadOnly == true)
         #expect(search.annotations?.sensitiveOutput == .privateContent)
@@ -89,7 +99,7 @@ private struct EchoTool: Tool {
         await #expect(throws: ToolRegistryError.self) {
             try await registry.call(
                 name: "nope",
-                jsonInput: Data("{}".utf8),
+                jsonArguments: Data("{}".utf8),
                 context: ToolContext(viewID: "v")
             )
         }
@@ -257,8 +267,8 @@ private struct EchoTool: Tool {
         let endedAt = startedAt.addingTimeInterval(3.5)
         let record = AIKitSessionUsageRecord(
             taskID: "task-123",
-            modelName: "gpt-5",
-            providerName: "openai",
+            modelName: "doubao-seed-2-0-lite-260215",
+            providerName: "Volcengine Ark",
             startedAt: startedAt,
             endedAt: endedAt,
             durationSeconds: 3.5,
@@ -276,8 +286,8 @@ private struct EchoTool: Tool {
             FetchDescriptor<AIKitSessionUsageRecord>()
         ).first)
         #expect(fetched.taskID == "task-123")
-        #expect(fetched.modelName == "gpt-5")
-        #expect(fetched.providerName == "openai")
+        #expect(fetched.modelName == "doubao-seed-2-0-lite-260215")
+        #expect(fetched.providerName == "Volcengine Ark")
         #expect(fetched.startedAt == startedAt)
         #expect(fetched.endedAt == endedAt)
         #expect(fetched.durationSeconds == 3.5)
@@ -291,7 +301,7 @@ private struct EchoTool: Tool {
     @Test func sessionUsageRecordClampsTokenAccessors() {
         let record = AIKitSessionUsageRecord(
             taskID: "task-123",
-            modelName: "gpt-5",
+            modelName: "doubao-seed-2-0-lite-260215",
             durationSeconds: 1,
             roundTripCount: 1,
             inputTokens: 1,
@@ -328,8 +338,8 @@ private struct EchoTool: Tool {
         try await store.record(AIKitSessionUsageSummary(
             id: id,
             taskID: "turn-1",
-            modelName: "gpt-5",
-            providerName: "openai",
+            modelName: "doubao-seed-2-0-lite-260215",
+            providerName: "Volcengine Ark",
             startedAt: startedAt,
             endedAt: endedAt,
             durationSeconds: 2,
@@ -368,8 +378,8 @@ private struct EchoTool: Tool {
         try await store.record(AIKitSessionUsageSummary(
             id: id,
             taskID: "turn-1",
-            modelName: "gpt-5",
-            providerName: "openai",
+            modelName: "doubao-seed-2-0-lite-260215",
+            providerName: "Volcengine Ark",
             startedAt: startedAt,
             endedAt: endedAt,
             durationSeconds: 2,
@@ -382,8 +392,8 @@ private struct EchoTool: Tool {
         try await store.record(AIKitSessionUsageSummary(
             id: id,
             taskID: "turn-1",
-            modelName: "gpt-5.1",
-            providerName: "openai",
+            modelName: "doubao-seed-2-0-pro-260515",
+            providerName: "Volcengine Ark",
             startedAt: startedAt,
             endedAt: endedAt.addingTimeInterval(1),
             durationSeconds: 3,
@@ -399,7 +409,7 @@ private struct EchoTool: Tool {
         let fetched = try #require(records.first)
         #expect(records.count == 1)
         #expect(fetched.id == id)
-        #expect(fetched.modelName == "gpt-5.1")
+        #expect(fetched.modelName == "doubao-seed-2-0-pro-260515")
         #expect(fetched.durationSeconds == 3)
         #expect(fetched.roundTripCount == 2)
         #expect(fetched.messageCount == 3)
@@ -415,44 +425,38 @@ private struct EchoTool: Tool {
         await AIKitConfigurationTools.register(in: registry, store: store)
 
         let names = await registry.registeredNames()
-        #expect(names.contains(GetAIKitConfigurationTool.name))
-        #expect(names.contains(SetAIKitConfigurationTool.name))
+        #expect(names.contains(GetAIKitConfigurationTool.toolName))
+        #expect(names.contains(SetAIKitConfigurationTool.toolName))
 
         let context = ToolContext(viewID: "settings")
         let setInput = SetAIKitConfigurationTool.Input(
             section: .runtime,
             key: "maxIterations",
-            value: 4
+            value: .int(4)
         )
-        let setData = try JSONEncoder().encode(setInput)
+        let setData = jsonData(setInput)
         let outputData = try await registry.call(
-            name: SetAIKitConfigurationTool.name,
-            jsonInput: setData,
+            name: SetAIKitConfigurationTool.toolName,
+            jsonArguments: setData,
             context: context
         )
-        let output = try JSONDecoder().decode(
-            SetAIKitConfigurationTool.Output.self,
-            from: outputData
-        )
+        let output = try generatedValue(SetAIKitConfigurationTool.Output.self, from: outputData)
 
         #expect(output.applied)
-        #expect(output.configuration.runtime.maxIterations == 4)
+        #expect(output.configuration.objectValue?["runtime"]?.objectValue?["maxIterations"]?.intValue == 4)
 
         let snapshot = await store.snapshot()
         #expect(snapshot.runtime.maxIterations == 4)
 
-        let getData = try JSONEncoder().encode(GetAIKitConfigurationTool.Input())
+        let getData = jsonData(GetAIKitConfigurationTool.Input())
         let readData = try await registry.call(
-            name: GetAIKitConfigurationTool.name,
-            jsonInput: getData,
+            name: GetAIKitConfigurationTool.toolName,
+            jsonArguments: getData,
             context: context
         )
-        let read = try JSONDecoder().decode(
-            GetAIKitConfigurationTool.Output.self,
-            from: readData
-        )
-        #expect(read.configuration.runtime.maxIterations == 4)
-        #expect(read.recentChanges.count == 1)
+        let read = try generatedValue(GetAIKitConfigurationTool.Output.self, from: readData)
+        #expect(read.configuration.objectValue?["runtime"]?.objectValue?["maxIterations"]?.intValue == 4)
+        #expect(read.recentChanges.arrayValue?.count == 1)
     }
 
     @Test func configurationStoreAcceptsStringSetUpdates() async throws {
@@ -496,22 +500,6 @@ private struct EchoTool: Tool {
         #expect(runtime.twoRoundStructuredPlannerOutput == false)
     }
 
-    @Test func runtimeDropsRemovedStructuredBinderField() throws {
-        let data = Data("""
-        {
-          "streamsResponses": true,
-          "twoRoundStructuredBinderOutput": true
-        }
-        """.utf8)
-
-        let runtime = try JSONDecoder().decode(AIKitConfiguration.Runtime.self, from: data)
-        let encodedData = try JSONEncoder().encode(runtime)
-        let encoded = try #require(String(data: encodedData, encoding: .utf8))
-
-        #expect(runtime.streamsResponses)
-        #expect(encoded.contains("twoRoundStructuredBinderOutput") == false)
-    }
-
     @Test func configurationStoreAcceptsWorkflowRuntimeUpdates() async throws {
         let store = AIKitConfigurationStore()
 
@@ -532,55 +520,70 @@ private struct EchoTool: Tool {
     }
 
     @Test func coreStoresProviderConfigurationsIndependently() {
-        var core = AIKitConfiguration.Core(activeProvider: .ollama)
-        var ollama = core.activeProviderConfiguration
-        ollama.defaultModel = "llama3.1"
-        ollama.endpointURL = "http://localhost:11434/api/chat"
-        core.activeProviderConfiguration = ollama
+        var core = AIKitConfiguration.Core(activeProvider: .ark)
+        var ark = core.activeProviderConfiguration
+        ark.defaultModel = "doubao-seed-1-6"
+        ark.endpointURL = "https://ark.cn-beijing.volces.com/api/v3/chat/completions"
+        core.activeProviderConfiguration = ark
 
-        core.activeProvider = .openAI
-        var openAI = core.activeProviderConfiguration
-        openAI.defaultModel = "gpt-5"
-        core.activeProviderConfiguration = openAI
+        core.activeProvider = .appleIntelligence
+        var appleIntelligence = core.activeProviderConfiguration
+        appleIntelligence.defaultModel = "private-cloud-compute"
+        core.activeProviderConfiguration = appleIntelligence
 
-        #expect(core.providerConfiguration(for: .ollama).defaultModel == "llama3.1")
-        #expect(core.providerConfiguration(for: .ollama).endpointURL == "http://localhost:11434/api/chat")
-        #expect(core.providerConfiguration(for: .openAI).defaultModel == "gpt-5")
+        #expect(core.providerConfiguration(for: .ark).defaultModel == "doubao-seed-1-6")
+        #expect(
+            core.providerConfiguration(for: .ark).endpointURL ==
+            "https://ark.cn-beijing.volces.com/api/v3/chat/completions"
+        )
+        #expect(
+            core.providerConfiguration(for: .appleIntelligence).defaultModel ==
+            "private-cloud-compute"
+        )
     }
 
     @Test func refreshedModelListKeepsOnlyStillAvailableDefault() {
         var provider = AIKitConfiguration.Core.ProviderConfiguration(
-            defaultModel: "gpt-5",
-            availableModels: ["gpt-5"]
+            defaultModel: "doubao-seed-2-0-pro-260515",
+            availableModels: ["doubao-seed-2-0-pro-260515"]
         )
 
-        provider.replaceAvailableModels(["gpt-4o", "gpt-5"])
-        #expect(provider.defaultModel == "gpt-5")
-        #expect(provider.availableModels == ["gpt-4o", "gpt-5"])
+        provider.replaceAvailableModels([
+            "doubao-seed-2-0-lite-260215",
+            "doubao-seed-2-0-pro-260515",
+        ])
+        #expect(provider.defaultModel == "doubao-seed-2-0-pro-260515")
+        #expect(provider.availableModels == [
+            "doubao-seed-2-0-lite-260215",
+            "doubao-seed-2-0-pro-260515",
+        ])
 
-        provider.replaceAvailableModels(["gpt-4o"])
+        provider.replaceAvailableModels(["doubao-seed-2-0-lite-260215"])
         #expect(provider.defaultModel == nil)
 
-        provider.defaultModel = "gpt-4o"
+        provider.defaultModel = "doubao-seed-2-0-lite-260215"
         provider.replaceAvailableModels([])
         #expect(provider.defaultModel == nil)
         #expect(provider.availableModels == [])
     }
 
-    @Test func corePersistsAvailableModels() throws {
+    @Test func corePersistsArkAvailableModels() throws {
         let configuration = AIKitConfiguration(core: .init(
-            activeProvider: .openAI,
-            openAI: .init(defaultModel: "gpt-5", availableModels: ["gpt-4o", "gpt-5"])
+            activeProvider: .ark,
+            ark: .init(
+                defaultModel: "doubao-seed-1-6",
+                availableModels: ["doubao-seed-1-6", "doubao-seed-2-0-lite-260215"]
+            )
         ))
 
         let data = try JSONEncoder().encode(configuration)
         let decoded = try JSONDecoder().decode(AIKitConfiguration.self, from: data)
 
-        #expect(decoded.core.activeProvider == .openAI)
-        #expect(decoded.core.providerConfiguration(for: .openAI).defaultModel == "gpt-5")
-        #expect(decoded.core.providerConfiguration(for: .openAI).availableModels == [
-            "gpt-4o",
-            "gpt-5",
+        #expect(decoded.core.activeProvider == .ark)
+        #expect(decoded.core.providerConfiguration(for: .ark).defaultModel == "doubao-seed-1-6")
+        #expect(decoded.core.providerConfiguration(for: .ark).availableModels == [
+            "doubao-seed-1-6",
+            "doubao-seed-2-0-lite-260215",
         ])
     }
 
@@ -610,7 +613,7 @@ private struct EchoTool: Tool {
             activeProvider: .appleIntelligence,
             appleIntelligence: .init(
                 defaultModel: "apple-intelligence",
-                availableModels: ["apple-intelligence"]
+                availableModels: ["apple-intelligence", "private-cloud-compute"]
             )
         ))
 
@@ -624,6 +627,7 @@ private struct EchoTool: Tool {
         )
         #expect(decoded.core.providerConfiguration(for: .appleIntelligence).availableModels == [
             "apple-intelligence",
+            "private-cloud-compute",
         ])
     }
 

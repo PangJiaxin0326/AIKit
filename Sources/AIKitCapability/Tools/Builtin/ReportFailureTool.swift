@@ -1,4 +1,5 @@
 import Foundation
+import FoundationModels
 import AIToolKit
 import AIKitCore
 
@@ -6,48 +7,46 @@ import AIKitCore
 /// confidently complete (too vague, ambiguous, or out of scope). The
 /// `Orchestrator` intercepts it by name and ends the turn in a failure
 /// state carrying `reason`, so it never actually runs `invoke`.
-public struct ReportFailureTool: Tool {
+public struct ReportFailureTool: Tool, ToolMetadataProviding {
+    @Generable
     public struct Input: Codable, Sendable {
+        @Guide(description: "Why you can't confidently proceed")
         public var reason: String
         public init(reason: String) { self.reason = reason }
     }
 
+    @Generable
     public struct Output: Codable, Sendable {
         public var acknowledged: Bool
         public init(acknowledged: Bool = true) { self.acknowledged = acknowledged }
     }
 
-    public static let name = "reportFailure"
-    public static let description = """
+    public static let toolName = "reportFailure"
+    public static let toolDescription = """
         Call this instead of guessing when you cannot confidently complete the \
         user's request — e.g. it is too vague or ambiguous, asks for something \
         outside your tools, or you would have to invent details. Give a short, \
         plain reason the user can act on (what is unclear or missing). Do not \
         call any other tool in the same turn.
         """
-    public static let inputSchema = ToolSchema.object(
-        properties: [
-            "reason": .string(description: "Why you can't confidently proceed"),
-        ],
-        required: ["reason"]
-    )
-    public static let outputSchema = ToolSchema.strictObject(
-        properties: ["acknowledged": .boolean],
-        required: ["acknowledged"]
-    )
-    public static let annotations = ToolAnnotations(
+    public static let toolAnnotations = ToolAnnotations(
         isReadOnly: true,
         isIdempotent: true,
         sideEffect: .none,
         sensitiveOutput: .none
     )
-    public static let inputExamples: [JSONValue] = [
+    public static let toolArgumentExamples: [GeneratedContent] = [
         .object(["reason": .string("I need the destination before I can continue.")]),
     ]
 
+    public var name: String { Self.toolName }
+    public var description: String { Self.toolDescription }
+    public var annotations: ToolAnnotations { Self.toolAnnotations }
+    public var argumentExamples: [GeneratedContent] { Self.toolArgumentExamples }
+
     public init() {}
 
-    public func call(_ input: Input, in context: ToolContext) async throws -> Output {
+    public func call(arguments input: Input) async throws -> Output {
         Output()
     }
 }

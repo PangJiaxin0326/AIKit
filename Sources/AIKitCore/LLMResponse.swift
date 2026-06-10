@@ -1,4 +1,5 @@
 import Foundation
+import FoundationModels
 import AIToolKit
 
 /// A complete, non-streamed response from an LLM provider.
@@ -29,10 +30,10 @@ public struct LLMResponse: Sendable, Codable, Hashable {
     }
 
     /// All `.toolUse` blocks in order.
-    public var toolUses: [(id: String, name: String, input: JSONValue)] {
+    public var toolUses: [(id: String, name: String, arguments: GeneratedContent)] {
         content.compactMap { block in
-            if case .toolUse(let id, let name, let input) = block {
-                return (id, name, input)
+            if case .toolUse(let id, let name, let arguments) = block {
+                return (id, name, arguments)
             }
             return nil
         }

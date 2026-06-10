@@ -19,11 +19,16 @@ public enum Verifier {
     }
 }
 
+public enum PostToolUsePayloadKind: String, Sendable, Hashable, CaseIterable {
+    case raw
+    case diagnostic
+}
+
 /// Stage-specific data handed to a guardrail.
 public enum GuardrailPayload: Sendable {
     case prePrompt(RenderedPrompt)
     case preToolUse(ToolCall)
-    case postToolUse(name: String, output: Data, isError: Bool)
+    case postToolUse(name: String, output: Data, isError: Bool, kind: PostToolUsePayloadKind)
     case finalResult(String)
 
     public var stage: Verifier.Stage {

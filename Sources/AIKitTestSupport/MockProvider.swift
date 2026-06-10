@@ -88,12 +88,10 @@ public final class MockProvider: LLMProvider, @unchecked Sendable {
                         break
                     case .audio(let audio):
                         continuation.yield(.audio(audio))
-                    case .toolUse(let id, let name, let input):
+                    case .toolUse(let id, let name, let arguments):
                         continuation.yield(.toolUseStart(id: id, name: name))
-                        if let data = try? input.data(),
-                           let json = String(data: data, encoding: .utf8) {
-                            continuation.yield(.toolUseInputDelta(id: id, json: json))
-                        }
+                        let json = String(decoding: arguments.data(), as: UTF8.self)
+                        continuation.yield(.toolUseInputDelta(id: id, json: json))
                         continuation.yield(.toolUseStop(id: id))
                     case .toolResult:
                         break

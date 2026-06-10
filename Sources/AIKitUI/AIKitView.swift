@@ -3603,5 +3603,5 @@ private extension String {
 }
 
 #Preview {
-    AIKitChatbotOverlay(orchestrator: .init(llm: .init(provider: OllamaProvider()), tools: .init(), memory: InMemoryMemoryStore(), contextResolver: .init(), guardrails: .init()))
+    AIKitChatbotOverlay(orchestrator: .init(llm: .init(provider: VolcengineArkProvider(apiKey: "preview", model: "doubao-seed-2-0-lite-260215")), tools: .init(), memory: InMemoryMemoryStore(), contextResolver: .init(), guardrails: .init()))
 }
