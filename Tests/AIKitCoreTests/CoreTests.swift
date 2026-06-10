@@ -196,6 +196,66 @@ import AIKitTestSupport
     }
 }
 
+@Suite struct ProviderCredentialStoreTests {
+    /// Fresh, isolated defaults per test; the suite name is unique so tests
+    /// can't see each other's writes or the real app domain.
+    private func makeDefaults() throws -> UserDefaults {
+        let suiteName = "AIKitCredentialTests-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        return defaults
+    }
+
+    @Test func savedKeyRoundTrips() throws {
+        let defaults = try makeDefaults()
+        var store = AIKitProviderCredentialStore()
+        store.setAPIKey("sk-ark-123", for: .ark)
+        store.save(defaults: defaults)
+
+        let loaded = AIKitProviderCredentialStore.load(defaults: defaults)
+        #expect(loaded.apiKey(for: .ark) == "sk-ark-123")
+    }
+
+    @Test func legacyPerProviderKeysAreReadWhenDictionaryWasNeverSaved() throws {
+        let defaults = try makeDefaults()
+        defaults.set(" sk-legacy-ark \n", forKey: "arkAPIKey")
+        let loaded = AIKitProviderCredentialStore.load(defaults: defaults)
+        #expect(loaded.apiKey(for: .ark) == "sk-legacy-ark")
+
+        let older = try makeDefaults()
+        older.set("sk-other", forKey: "otherProviderAPIKey")
+        #expect(
+            AIKitProviderCredentialStore.load(defaults: older)
+                .apiKey(for: .ark) == "sk-other"
+        )
+    }
+
+    @Test func savedDictionaryWinsOverLegacyKeys() throws {
+        let defaults = try makeDefaults()
+        defaults.set("sk-legacy", forKey: "arkAPIKey")
+
+        // Clearing the key in the new UI must stay cleared even though the
+        // legacy value is still on disk.
+        var store = AIKitProviderCredentialStore()
+        store.setAPIKey("", for: .ark)
+        store.save(defaults: defaults)
+        #expect(
+            AIKitProviderCredentialStore.load(defaults: defaults)
+                .apiKey(for: .ark).isEmpty
+        )
+    }
+
+    @Test func credentialFreeProvidersStoreNothing() throws {
+        let defaults = try makeDefaults()
+        var store = AIKitProviderCredentialStore()
+        store.setAPIKey("ignored", for: .appleIntelligence)
+        store.save(defaults: defaults)
+
+        let loaded = AIKitProviderCredentialStore.load(defaults: defaults)
+        #expect(loaded.apiKey(for: .appleIntelligence).isEmpty)
+    }
+}
+
 @Suite struct MockProviderTests {
     @Test func nonStreamingRoundTrip() async throws {
         let provider = MockProvider(finalText: "hello world")

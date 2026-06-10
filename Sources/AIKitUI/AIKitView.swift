@@ -670,64 +670,6 @@ private struct AIKitSearchTabSelectionInterceptor: UIViewControllerRepresentable
 }
 #endif
 
-private struct AIKitProviderCredentialStore: Equatable {
-    private static let storageKey = "AIKitProviderAPIKeys"
-
-    private var apiKeys: [AIKitProviderKind: String]
-
-    init(apiKeys: [AIKitProviderKind: String] = [:]) {
-        self.apiKeys = apiKeys
-    }
-
-    static func load(defaults: UserDefaults = .standard) -> Self {
-        guard let data = defaults.data(forKey: storageKey),
-              let storedValues = try? JSONDecoder().decode([String: String].self, from: data)
-        else {
-            return Self()
-        }
-
-        let apiKeys = storedValues.reduce(into: [AIKitProviderKind: String]()) { result, pair in
-            guard let provider = AIKitProviderKind(providerName: pair.key),
-                  provider.definition.apiKeyStrategy.requiresCredential,
-                  !pair.value.isEmpty
-            else { return }
-            result[provider] = pair.value
-        }
-        return Self(apiKeys: apiKeys)
-    }
-
-    func apiKey(for provider: AIKitProviderKind) -> String {
-        guard provider.definition.apiKeyStrategy.requiresCredential else { return "" }
-        return apiKeys[provider] ?? ""
-    }
-
-    mutating func setAPIKey(_ apiKey: String, for provider: AIKitProviderKind) {
-        guard provider.definition.apiKeyStrategy.requiresCredential else {
-            apiKeys[provider] = nil
-            return
-        }
-        if apiKey.isEmpty {
-            apiKeys[provider] = nil
-        } else {
-            apiKeys[provider] = apiKey
-        }
-    }
-
-    func save(defaults: UserDefaults = .standard) {
-        let storedValues = apiKeys.reduce(into: [String: String]()) { result, pair in
-            result[pair.key.rawValue] = pair.value
-        }
-        guard let data = try? JSONEncoder().encode(storedValues) else { return }
-        defaults.set(data, forKey: Self.storageKey)
-    }
-}
-
-private extension AIKitProviderDefinition.APIKeyStrategy {
-    var requiresCredential: Bool {
-        self != .none
-    }
-}
-
 /// A SwiftUI state-management surface for AIKit's Core, Capability, Runtime,
 /// and Safety configuration.
 public struct AIKitView: View {
