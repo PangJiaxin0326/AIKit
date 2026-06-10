@@ -16,7 +16,8 @@ prompt + schema contract lives in the sibling package **AIToolKit**
 
 ## 1. Pick the paradigm (decision rule)
 
-All three run the same `Tool`s through `ToolRegistry`; they differ in how the plan
+All three run the same official `FoundationModels.Tool`s, handed over as
+`[any Tool]` (AIToolKit's `ToolRegistry` is gone); they differ in how the plan
 is produced.
 
 ```
@@ -40,7 +41,7 @@ import AIKitRuntime   // WorkflowTwoRoundRunner
 
 let runner = WorkflowTwoRoundRunner(
     llm: client,                       // your LLMClient
-    tools: registry,                   // ToolRegistry with every tool registered
+    tools: tools,                      // the host's [any Tool] set (every tool)
     harvester: myHarvester,            // ContextHarvesting — deterministic, local, NO LLM
     plannerToolNames: plannerTools,    // the planner's tool universe (exclude context-reading tools)
     options: .init(
@@ -156,7 +157,7 @@ sequential there.
 
 ## 7. Reproduce checklist & pitfalls
 
-- [ ] Register all tools; give the planner the task's tools **minus** any
+- [ ] Hand over all tools; give the planner the task's tools **minus** any
       context-reading tool (local state is a `$slot`, not a tool node).
 - [ ] Use the AIToolKit lean prompt/schema as-is; keep the **two** worked examples
       and the three guard-rail clauses. Don't tailor the example per task.

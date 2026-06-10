@@ -42,16 +42,17 @@ let provider = VolcengineArkProvider(
 // let provider = AppleIntelligenceProvider(endpoint: .privateCloudCompute)
 let llm = LLMClient(provider: provider)
 
-// 2. Tools available to the agent.
-let tools = ToolRegistry()
+// 2. Tools available to the agent — the official [any Tool] currency.
 let memory = try SwiftDataMemoryStore(path: dbPath)
 let configurationStore = AIKitConfigurationStore()
-await tools.register(NavigateTool { input in
-    router.go(to: input.destination)
-    return .init(navigated: true)
-})
-await tools.register(SearchMemoryTool(memory: memory))
-await AIKitConfigurationTools.register(in: tools, store: configurationStore)
+var tools: [any Tool] = [
+    NavigateTool { input in
+        router.go(to: input.destination)
+        return .init(navigated: true)
+    },
+    SearchMemoryTool(memory: memory),
+]
+tools += AIKitConfigurationTools.all(store: configurationStore)
 
 // 3. View context — which prompt fragment and tools are live.
 let resolver = ContextResolver()
@@ -115,7 +116,7 @@ API key. On iOS/macOS/watchOS/visionOS 27 and newer it can route through
 `AppleIntelligenceProvider(endpoint: .privateCloudCompute)`, falling back to the
 on-device model only for PCC network failures. It reports
 `supportsNativeTools == false`, so AIKit enables the fenced tool-call fallback
-and keeps dispatching tools through `ToolRegistry`.
+and keeps dispatching the parsed calls onto the host's tools itself.
 
 Messages can include multimodal blocks:
 
@@ -142,13 +143,13 @@ struct RootView: View {
     let orchestrator: Orchestrator
     let resolver: ContextResolver
     let configurationStore: AIKitConfigurationStore
-    let tools: ToolRegistry
+    let tools: [any Tool]
 
     var body: some View {
         AIKitView(
             orchestrator: orchestrator,
             configurationStore: configurationStore,
-            toolRegistry: tools
+            tools: tools
         )
             .aiContextResolver(resolver)
             .aiContext(ViewContext(
