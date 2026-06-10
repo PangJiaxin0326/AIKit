@@ -116,6 +116,14 @@ recover it (cheap input, protects the output win):
 - **Validate / refuse, don't guess.** The runtime validates the plan, the binding
   preserves the graph, and resolved input is checked against each tool's schema.
   A clean `cannot_bind` / required-missing is a **success**.
+- **A planned `reportFailure` node is a refusal.** If the planner phrases its
+  bail-out as a node (`{"tool":"reportFailure","input":{"reason":…}}`) instead of
+  `"outcome":"cannot_plan"`, the runner returns `.refused(reason)` before
+  validation — it never executes as a no-op node, whether or not the planner
+  manifest lists the tool. The sequential `Orchestrator` does the same for a
+  direct call or a `workflow_run` node, and provides `reportFailure` by default
+  (auto-registered, advertised with any non-empty tool subset) — hosts register
+  nothing and never list it in `ViewContext.toolNames`.
 - **`autoBind`** is correct-by-construction (one candidate ⇒ the Binder would pick
   it). Leave it on; ambiguity and text-authoring still fall through to the Binder.
 

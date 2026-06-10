@@ -51,7 +51,12 @@ public enum PromptBuilder {
 
         // Tools restricted to the view's subset (the manifest is already
         // filtered by the registry, but be defensive about empty subsets).
-        var tools = toolManifest.filter { context.toolNames.contains($0.name) }
+        // The built-in `reportFailure` escape hatch passes regardless: the
+        // orchestrator provides it by default, so contexts never list it.
+        var tools = toolManifest.filter {
+            context.toolNames.contains($0.name)
+                || $0.name == ReportFailureTool.toolName
+        }
 
         if workflowPlanningHint, !tools.isEmpty {
             systemParts.append(WorkflowPromptBuilder.planningInstruction(

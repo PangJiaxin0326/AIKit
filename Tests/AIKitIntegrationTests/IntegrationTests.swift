@@ -1,4 +1,5 @@
 import Foundation
+import FoundationModels
 import Testing
 import AIToolKit
 import AIKitCore
@@ -99,8 +100,11 @@ private actor InvocationFlag {
     }
 
     @Test func reportFailureEndsTurnWithReason() async throws {
+        // The host registers only its own tool: `reportFailure` is provided
+        // by the orchestrator itself — neither registered, nor in the
+        // context's toolNames, nor in the allowlist.
         let registry = ToolRegistry()
-        await registry.register(ReportFailureTool())
+        await registry.register(NavigateTool { _ in .init(navigated: true) })
 
         let provider = MockProvider(responses: [
             LLMResponse(
@@ -116,8 +120,8 @@ private actor InvocationFlag {
             llm: LLMClient(provider: provider),
             tools: registry,
             memory: InMemoryMemoryStore(),
-            contextResolver: await resolver(toolNames: [ReportFailureTool.toolName]),
-            guardrails: PolicyEngine(rails: [AllowlistedTools(allowed: [ReportFailureTool.toolName])]),
+            contextResolver: await resolver(toolNames: ["navigate"]),
+            guardrails: PolicyEngine(rails: [AllowlistedTools(allowed: ["navigate"])]),
             options: .init(model: "test", stream: false, workflowPlanning: false)
         )
 
@@ -128,6 +132,96 @@ private actor InvocationFlag {
             if case .error(let error) = event { Issue.record("unexpected: \(error)") }
         }
         #expect(failure == "Your request is too vague.")
+
+        // The default-provided tool was advertised to the model alongside the
+        // view's own subset.
+        let request = try #require(provider.receivedRequests.first)
+        #expect(request.tools.contains { $0.name == ReportFailureTool.toolName })
+
+        // The turn landed in the failed state, sticky on the task record.
+        let task = try #require(await orchestrator.snapshot().recentTasks.first)
+        #expect(task.failureReason == "Your request is too vague.")
+    }
+
+    @Test func reportFailureEndsPlanningModeTurnOnDirectCall() async throws {
+        let flag = InvocationFlag()
+        let registry = ToolRegistry()
+        await registry.register(NavigateTool { _ in
+            await flag.mark()
+            return .init(navigated: true)
+        })
+
+        // Planning mode rejects direct tool calls as malformed plans — but a
+        // direct `reportFailure` call is a refusal and must end the turn.
+        let provider = MockProvider(responses: [
+            LLMResponse(
+                content: [.toolUse(
+                    id: "f1", name: ReportFailureTool.toolName,
+                    arguments: .object(["reason": .string("No tool can do that.")])
+                )],
+                stopReason: .toolUse
+            )
+        ])
+
+        let orchestrator = Orchestrator(
+            llm: LLMClient(provider: provider),
+            tools: registry,
+            memory: InMemoryMemoryStore(),
+            contextResolver: await resolver(toolNames: ["navigate"]),
+            guardrails: PolicyEngine(),
+            options: .init(model: "test", stream: false, workflowPlanning: true)
+        )
+
+        var failure: String?
+        for try await event in await orchestrator.run("do the impossible") {
+            if case .failure(let reason) = event { failure = reason }
+            if case .finalAnswer = event { Issue.record("should not finalize") }
+            if case .error(let error) = event { Issue.record("unexpected: \(error)") }
+        }
+        #expect(failure == "No tool can do that.")
+        #expect(await flag.didInvoke == false)
+        #expect(provider.receivedRequests.count == 1)
+    }
+
+    @Test func reportFailureWorkflowNodeEndsTurnAsRefusal() async throws {
+        let flag = InvocationFlag()
+        let registry = ToolRegistry()
+        await registry.register(NavigateTool { _ in
+            await flag.mark()
+            return .init(navigated: true)
+        })
+
+        // The model phrases the refusal as a one-node workflow plan. It must
+        // surface as a failure, not execute as a no-op tool and "succeed".
+        let spec = try GeneratedContent(json: """
+        {"schema_version":"\(WorkflowSpec.schemaVersion)","nodes":[\
+        {"id":"bail","tool":"\(ReportFailureTool.toolName)",\
+        "input":{"reason":"The ask is ambiguous."}}]}
+        """)
+        let provider = MockProvider(responses: [
+            LLMResponse(
+                content: [.toolUse(id: "w1", name: WorkflowSpec.toolName, arguments: spec)],
+                stopReason: .toolUse
+            )
+        ])
+
+        let orchestrator = Orchestrator(
+            llm: LLMClient(provider: provider),
+            tools: registry,
+            memory: InMemoryMemoryStore(),
+            contextResolver: await resolver(toolNames: ["navigate"]),
+            guardrails: PolicyEngine(),
+            options: .init(model: "test", stream: false, workflowPlanning: true)
+        )
+
+        var failure: String?
+        for try await event in await orchestrator.run("do something vague") {
+            if case .failure(let reason) = event { failure = reason }
+            if case .finalAnswer = event { Issue.record("should not finalize") }
+            if case .error(let error) = event { Issue.record("unexpected: \(error)") }
+        }
+        #expect(failure == "The ask is ambiguous.")
+        #expect(await flag.didInvoke == false)
     }
 
     @Test func fiftyConcurrentOrchestratorsAreIsolated() async throws {

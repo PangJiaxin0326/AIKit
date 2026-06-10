@@ -2,6 +2,7 @@ import Foundation
 import FoundationModels
 import AIToolKit
 import AIKitCore
+import AIKitCapability
 import AIKitSafety
 
 /// Drives the two-round-trip compiler against an `LLMClient`: Plan → harvest →
@@ -157,6 +158,16 @@ public struct WorkflowTwoRoundRunner: Sendable {
 
         if plan.effectiveOutcome == .cannotPlan {
             return .init(outcome: .refused("cannot_plan: \(plan.message ?? "no safe workflow")"), calls: calls, trace: trace)
+        }
+        // A planned `reportFailure` node is a refusal phrased as a node — the
+        // model bailing out, not a step to execute. Catch it before validation
+        // so it refuses cleanly whether or not the planner manifest lists it.
+        if let refusal = plan.nodes.first(where: { $0.tool == ReportFailureTool.toolName }) {
+            trace.append("planner refused via \(ReportFailureTool.toolName)")
+            return .init(
+                outcome: .refused(ReportFailureTool.reason(from: refusal.input)),
+                calls: calls, trace: trace
+            )
         }
         do {
             try WorkflowTwoRoundCompiler.validatePlan(

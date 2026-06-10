@@ -391,6 +391,9 @@ public actor Orchestrator {
     /// Sticky reason from the last failed turn; cleared when a new turn
     /// starts or `cancelActiveTurns()` is called.
     private var lastFailureReason: String?
+    /// Whether the built-in default tools have been registered into the host
+    /// registry; done lazily on the first turn since `init` cannot hop actors.
+    private var builtinToolsEnsured = false
     private var activityObservers: [UUID: AsyncStream<OrchestratorActivity>.Continuation] = [:]
     /// Observer ids whose stream terminated before the actor processed their
     /// registration task.
@@ -624,17 +627,37 @@ public actor Orchestrator {
         turnTasks[turn] = task
     }
 
+    /// Registers AIKit's built-in tools (currently just `reportFailure`) into
+    /// the host's registry, so every orchestrator provides them by default
+    /// without the host registering anything. A host registration under the
+    /// same name wins.
+    private func ensureBuiltinTools() async {
+        guard !builtinToolsEnsured else { return }
+        // Flag is set only after registration: a concurrent first turn then
+        // re-checks the registry (idempotent) instead of racing past it.
+        if await !tools.contains(name: ReportFailureTool.toolName) {
+            await tools.register(ReportFailureTool())
+        }
+        builtinToolsEnsured = true
+    }
+
+    /// The built-in `reportFailure` escape hatch rides along with any view
+    /// that exposes at least one tool; a tool-less context stays pure chat.
+    private static func withBuiltinTools(_ names: Set<String>) -> Set<String> {
+        names.isEmpty ? names : names.union([ReportFailureTool.toolName])
+    }
+
     /// The `reportFailure` reason among `calls`, if the model invoked it.
     private func failureReason(in calls: [ToolCall]) -> String? {
-        for call in calls where call.name == ReportFailureTool.toolName {
-            if let fields = call.arguments.objectValue,
-               let reason = fields["reason"]?.stringValue,
-               !reason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                return reason
-            }
-            return "The assistant could not confidently complete this request."
-        }
-        return nil
+        calls.first { $0.name == ReportFailureTool.toolName }
+            .map { ReportFailureTool.reason(from: $0.arguments) }
+    }
+
+    /// The `reportFailure` reason among workflow `nodes`, if the model
+    /// planned the refusal as a node instead of a direct call.
+    private func failureReason(in nodes: [WorkflowNode]) -> String? {
+        nodes.first { $0.tool == ReportFailureTool.toolName }
+            .map { ReportFailureTool.reason(from: $0.input) }
     }
 
     /// A concise, user-facing message for a terminal error.
@@ -696,6 +719,7 @@ public actor Orchestrator {
         turnID: Int,
         emit: @escaping @Sendable (OrchestratorEvent) -> Void
     ) async {
+        await ensureBuiltinTools()
         await loop(instruction, turnID: turnID, emit: emit)
         await finishTurn(turnID)
     }
@@ -761,6 +785,7 @@ public actor Orchestrator {
         turnID: Int,
         emit: @escaping @Sendable (OrchestratorEvent) -> Void
     ) async {
+        await ensureBuiltinTools()
         let context = await contextResolver.merged()
         let viewID = context.leafID
         setTaskViewID(viewID, turn: turnID)
@@ -937,7 +962,9 @@ public actor Orchestrator {
                 let recent = (try? await memory.recent(
                     limit: options.memoryWindow, view: viewID
                 )) ?? []
-                let manifest = await tools.manifest(for: context.toolNames)
+                let manifest = await tools.manifest(
+                    for: Self.withBuiltinTools(context.toolNames)
+                )
                 guard let selectedModel = configuredModel else {
                     let error = LLMError.missingModel
                     await recordFailure(errorMessage(error), turn: turnID)
@@ -1012,15 +1039,18 @@ public actor Orchestrator {
                     return
 
                 case .toolCalls(let calls):
-                    if options.workflowPlanning {
-                        throw OutputParser.ParserError.malformedWorkflow(
-                            raw: "Expected a single \(WorkflowSpec.toolName) call or WorkflowSpec JSON, not direct tool calls."
-                        )
-                    }
+                    // A `reportFailure` call is a refusal in any mode — in
+                    // planning mode the model is still told it may bail out,
+                    // so it must end the turn, not read as a malformed plan.
                     if let reason = failureReason(in: calls) {
                         await recordFailure(reason, turn: turnID, outcome: .refused)
                         emit(.failure(reason: reason))
                         return
+                    }
+                    if options.workflowPlanning {
+                        throw OutputParser.ParserError.malformedWorkflow(
+                            raw: "Expected a single \(WorkflowSpec.toolName) call or WorkflowSpec JSON, not direct tool calls."
+                        )
                     }
                     let (entry, resolved) = Self.assistantTurn(text: nil, calls: calls)
                     transcript.append(entry)
@@ -1030,15 +1060,15 @@ public actor Orchestrator {
                     )
 
                 case .mixed(let text, let calls):
-                    if options.workflowPlanning {
-                        throw OutputParser.ParserError.malformedWorkflow(
-                            raw: "Expected a single \(WorkflowSpec.toolName) call or WorkflowSpec JSON, not direct tool calls."
-                        )
-                    }
                     if let reason = failureReason(in: calls) {
                         await recordFailure(reason, turn: turnID, outcome: .refused)
                         emit(.failure(reason: reason))
                         return
+                    }
+                    if options.workflowPlanning {
+                        throw OutputParser.ParserError.malformedWorkflow(
+                            raw: "Expected a single \(WorkflowSpec.toolName) call or WorkflowSpec JSON, not direct tool calls."
+                        )
                     }
                     // Non-stream mode never emitted deltas, so surface the
                     // narration that accompanies the tool call instead of
@@ -1284,6 +1314,15 @@ public actor Orchestrator {
     ) async throws {
         if !options.stream, let narration, !narration.isEmpty {
             emit(.llmDelta(narration))
+        }
+
+        // A planned `reportFailure` node is the model refusing, not a step to
+        // run: end the turn in the failure state instead of executing it as a
+        // no-op tool and reporting success.
+        if let reason = failureReason(in: spec.nodes) {
+            await recordFailure(reason, turn: turnID, outcome: .refused)
+            emit(.failure(reason: reason))
+            return
         }
 
         let validated = try WorkflowValidator.validate(

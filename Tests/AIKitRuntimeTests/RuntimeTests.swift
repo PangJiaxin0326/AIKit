@@ -594,6 +594,41 @@ private struct FixedHarvester: ContextHarvesting {
         #expect(destination?.contains("[REDACTED]") == true)
         #expect(destination?.contains("a@b.com") == false)
     }
+
+    @Test func plannedReportFailureNodeRefusesInsteadOfExecuting() async throws {
+        let invocations = ToolInvocationRecorder()
+        let registry = ToolRegistry()
+        await registry.register(NavigateTool { input in
+            await invocations.record(input.destination)
+            return .init(navigated: true)
+        })
+        // The planner phrases its refusal as a reportFailure node (it is not
+        // even in the planner manifest): the run must refuse with the node's
+        // reason, not execute the node — or trip plan validation.
+        let plan = """
+        {"nodes":[{"id":"bail","tool":"\(ReportFailureTool.toolName)",\
+        "input":{"reason":"Nothing here can archive entries."}}],
+         "context_slots":[]}
+        """
+        let provider = MockProvider(responses: [
+            LLMResponse(content: [.text(plan)], stopReason: .endTurn),
+        ])
+        let subject = WorkflowTwoRoundRunner(
+            llm: LLMClient(provider: provider),
+            tools: registry,
+            harvester: StubHarvester(),
+            plannerToolNames: ["navigate"],
+            options: .init(model: "test", sources: [])
+        )
+
+        let result = await subject.run(intent: "archive everything")
+        guard case .refused(let reason) = result.outcome else {
+            Issue.record("expected refusal, got \(result.outcome)")
+            return
+        }
+        #expect(reason == "Nothing here can archive entries.")
+        #expect(await invocations.destinations.isEmpty)
+    }
 }
 
 @Suite struct RetryPolicyTests {
