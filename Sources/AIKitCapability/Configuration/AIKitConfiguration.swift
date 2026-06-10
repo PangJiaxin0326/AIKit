@@ -196,7 +196,6 @@ public struct AIKitConfiguration: Codable, Sendable, Hashable {
         public var maxTurnDuration: TimeInterval?
         public var toolCallFallback: ToolCallFallbackMode
         public var workflowPlanning: Bool
-        public var leanWorkflowSchema: Bool
         public var twoRoundAutoBind: Bool
         public var twoRoundStructuredPlannerOutput: Bool
 
@@ -206,7 +205,6 @@ public struct AIKitConfiguration: Codable, Sendable, Hashable {
             case maxTurnDuration
             case toolCallFallback
             case workflowPlanning
-            case leanWorkflowSchema
             case twoRoundAutoBind
             case twoRoundStructuredPlannerOutput
         }
@@ -217,7 +215,6 @@ public struct AIKitConfiguration: Codable, Sendable, Hashable {
             maxTurnDuration: TimeInterval? = nil,
             toolCallFallback: ToolCallFallbackMode = .automatic,
             workflowPlanning: Bool = true,
-            leanWorkflowSchema: Bool = true,
             twoRoundAutoBind: Bool = true,
             twoRoundStructuredPlannerOutput: Bool = false
         ) {
@@ -226,7 +223,6 @@ public struct AIKitConfiguration: Codable, Sendable, Hashable {
             self.maxTurnDuration = maxTurnDuration
             self.toolCallFallback = toolCallFallback
             self.workflowPlanning = workflowPlanning
-            self.leanWorkflowSchema = leanWorkflowSchema
             self.twoRoundAutoBind = twoRoundAutoBind
             self.twoRoundStructuredPlannerOutput = twoRoundStructuredPlannerOutput
         }
@@ -253,10 +249,6 @@ public struct AIKitConfiguration: Codable, Sendable, Hashable {
                 Bool.self,
                 forKey: .workflowPlanning
             ) ?? true
-            self.leanWorkflowSchema = try container.decodeIfPresent(
-                Bool.self,
-                forKey: .leanWorkflowSchema
-            ) ?? true
             self.twoRoundAutoBind = try container.decodeIfPresent(
                 Bool.self,
                 forKey: .twoRoundAutoBind
@@ -274,7 +266,6 @@ public struct AIKitConfiguration: Codable, Sendable, Hashable {
             try container.encodeIfPresent(maxTurnDuration, forKey: .maxTurnDuration)
             try container.encode(toolCallFallback, forKey: .toolCallFallback)
             try container.encode(workflowPlanning, forKey: .workflowPlanning)
-            try container.encode(leanWorkflowSchema, forKey: .leanWorkflowSchema)
             try container.encode(twoRoundAutoBind, forKey: .twoRoundAutoBind)
             try container.encode(
                 twoRoundStructuredPlannerOutput,
@@ -526,8 +517,6 @@ extension AIKitConfiguration {
             runtime.toolCallFallback = try value.toolCallFallbackMode(section: .runtime, key: originalKey)
         case "workflow", "workflowplanning":
             runtime.workflowPlanning = try value.bool(section: .runtime, key: originalKey)
-        case "leanworkflow", "leanworkflowschema":
-            runtime.leanWorkflowSchema = try value.bool(section: .runtime, key: originalKey)
         case "tworoundautobind", "autobind":
             runtime.twoRoundAutoBind = try value.bool(section: .runtime, key: originalKey)
         case "tworoundstructuredplanner", "tworoundstructuredplanneroutput", "structuredplanneroutput":

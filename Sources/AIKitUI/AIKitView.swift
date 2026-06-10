@@ -681,12 +681,12 @@ public struct AIKitView: View {
     @MainActor
     public init(
         configurationStore: AIKitConfigurationStore = AIKitConfigurationStore(),
-        toolRegistry: ToolRegistry? = nil
+        tools: [any Tool] = []
     ) {
         self.orchestrator = nil
         _model = State(initialValue: AIKitConfigurationViewModel(
             store: configurationStore,
-            toolRegistry: toolRegistry
+            tools: tools
         ))
         _providerCredentials = State(initialValue: AIKitProviderCredentialStore.load())
     }
@@ -695,12 +695,12 @@ public struct AIKitView: View {
     public init(
         orchestrator: Orchestrator,
         configurationStore: AIKitConfigurationStore = AIKitConfigurationStore(),
-        toolRegistry: ToolRegistry? = nil
+        tools: [any Tool] = []
     ) {
         self.orchestrator = orchestrator
         _model = State(initialValue: AIKitConfigurationViewModel(
             store: configurationStore,
-            toolRegistry: toolRegistry
+            tools: tools
         ))
         _providerCredentials = State(initialValue: AIKitProviderCredentialStore.load())
     }
@@ -1125,9 +1125,6 @@ public struct AIKitView: View {
             .pickerStyle(.segmented)
             Toggle(isOn: binding(\.runtime.workflowPlanning)) {
                 aiKitText("Workflow planning")
-            }
-            Toggle(isOn: binding(\.runtime.leanWorkflowSchema)) {
-                aiKitText("Lean workflow schema")
             }
             Toggle(isOn: binding(\.runtime.twoRoundAutoBind)) {
                 aiKitText("Two-round auto-bind")
@@ -2108,18 +2105,18 @@ private final class AIKitConfigurationViewModel {
     var status: String?
 
     private let store: AIKitConfigurationStore
-    private let toolRegistry: ToolRegistry?
+    private let tools: [any Tool]
     private let modelCatalog: AIKitModelCatalog
     private var modelCatalogStates: [AIKitProviderKind: ModelCatalogState] = [:]
     @ObservationIgnored private var saveTask: Task<Void, Never>?
 
     init(
         store: AIKitConfigurationStore,
-        toolRegistry: ToolRegistry?,
+        tools: [any Tool],
         modelCatalog: AIKitModelCatalog = AIKitModelCatalog()
     ) {
         self.store = store
-        self.toolRegistry = toolRegistry
+        self.tools = tools
         self.modelCatalog = modelCatalog
         self.configuration = .standard
     }
@@ -2131,9 +2128,9 @@ private final class AIKitConfigurationViewModel {
     func load() async {
         configuration = await store.snapshot()
         recentChanges = await store.recentChanges(limit: 6)
-        if let toolRegistry {
-            availableTools = await toolRegistry.registeredDescriptors()
-        }
+        availableTools = tools
+            .map(\.descriptor)
+            .sorted { $0.name < $1.name }
         status = nil
     }
 

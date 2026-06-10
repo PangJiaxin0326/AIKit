@@ -30,12 +30,11 @@ public enum PromptBuilder {
         memory: [UsageEvent],
         transcript: [TranscriptEntry],
         toolManifest: [ToolDescriptor],
+        workflow: WorkflowTool? = nil,
         model: String,
         temperature: Double? = nil,
         maxTokens: Int? = nil,
-        toolCallFallbackHint: Bool = false,
-        workflowPlanningHint: Bool = false,
-        leanWorkflowSchemaHint: Bool = true
+        toolCallFallbackHint: Bool = false
     ) -> LLMRequest {
         var systemParts = [basePreamble]
         if !context.systemPromptFragment.isEmpty {
@@ -50,7 +49,7 @@ public enum PromptBuilder {
         messages.append(contentsOf: transcript.map(\.message))
 
         // Tools restricted to the view's subset (the manifest is already
-        // filtered by the registry, but be defensive about empty subsets).
+        // filtered by the orchestrator, but be defensive about empty subsets).
         // The built-in `reportFailure` escape hatch passes regardless: the
         // orchestrator provides it by default, so contexts never list it.
         var tools = toolManifest.filter {
@@ -58,15 +57,12 @@ public enum PromptBuilder {
                 || $0.name == ReportFailureTool.toolName
         }
 
-        if workflowPlanningHint, !tools.isEmpty {
-            systemParts.append(WorkflowPromptBuilder.planningInstruction(
-                toolManifest: tools,
-                minimal: leanWorkflowSchemaHint,
-                includeExample: true
-            ))
-            tools = [WorkflowSchema.descriptor(
-                availableTools: tools, minimal: leanWorkflowSchemaHint
-            )]
+        // In planning mode the model sees ONE tool — the workflow — whose
+        // schema and instructions AIToolKit builds from the leaf tools. The
+        // instructions carry the manifest and the load-bearing worked example.
+        if let workflow, !tools.isEmpty {
+            systemParts.append(workflow.instructions())
+            tools = [workflow.descriptor]
         } else if toolCallFallbackHint, !tools.isEmpty {
             systemParts.append(toolFallbackInstruction)
         }

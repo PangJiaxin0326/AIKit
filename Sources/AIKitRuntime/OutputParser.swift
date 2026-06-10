@@ -4,13 +4,14 @@ import AIToolKit
 import AIKitCore
 import AIKitCapability
 
-/// What the model wants to happen next.
+/// What the model wants to happen next. A workflow plan arrives as an
+/// ordinary tool call named `WorkflowSpec.toolName`; the orchestrator
+/// dispatches it to the unified `WorkflowTool`, which owns validation and
+/// returns structured statuses the model can fix in the loop.
 public enum ParsedOutput: Sendable, Equatable {
     case final(String)
     case toolCalls([ToolCall])
     case mixed(text: String, toolCalls: [ToolCall])
-    case workflow(WorkflowSpec)
-    case mixedWorkflow(text: String, workflow: WorkflowSpec)
 }
 
 /// Converts an `LLMResponse` into app-aware intents.
@@ -31,7 +32,6 @@ public enum OutputParser {
     ) throws -> ParsedOutput {
         var textParts: [String] = []
         var calls: [ToolCall] = []
-        var workflow: WorkflowSpec?
 
         for block in response.content {
             switch block {
@@ -65,11 +65,11 @@ public enum OutputParser {
 
         var trimmed = textParts.joined().trimmingCharacters(in: .whitespacesAndNewlines)
 
-        workflow = try Self.popWorkflowCall(from: &calls)
-
-        if workflow == nil, !trimmed.isEmpty {
-            if let recovered = try Self.recoverWorkflowSpec(in: trimmed) {
-                workflow = recovered.spec
+        // Text-only provider paths emit the workflow plan as bare or fenced
+        // JSON; recover it as a workflow_run call so dispatch is uniform.
+        if !calls.contains(where: { $0.name == WorkflowSpec.toolName }), !trimmed.isEmpty {
+            if let recovered = try Self.recoverWorkflowCall(in: trimmed) {
+                calls.append(recovered.call)
                 trimmed = recovered.remainingText
                     .trimmingCharacters(in: .whitespacesAndNewlines)
             }
@@ -83,19 +83,10 @@ public enum OutputParser {
             }
         }
 
-        if workflow == nil {
-            workflow = try Self.popWorkflowCall(from: &calls)
-        }
-
-        if let workflow {
-            guard calls.isEmpty else {
-                throw ParserError.malformedWorkflow(
-                    raw: "Workflow specs cannot be mixed with separate tool calls."
-                )
-            }
-            return trimmed.isEmpty
-                ? .workflow(workflow)
-                : .mixedWorkflow(text: trimmed, workflow: workflow)
+        if calls.contains(where: { $0.name == WorkflowSpec.toolName }), calls.count > 1 {
+            throw ParserError.malformedWorkflow(
+                raw: "Workflow runs cannot be mixed with separate tool calls."
+            )
         }
 
         switch (trimmed.isEmpty, calls.isEmpty) {
@@ -161,45 +152,22 @@ public enum OutputParser {
         options: [.dotMatchesLineSeparators, .caseInsensitive]
     )
 
-    private static func popWorkflowCall(from calls: inout [ToolCall]) throws -> WorkflowSpec? {
-        guard let index = calls.firstIndex(where: { $0.name == WorkflowSpec.toolName })
-        else { return nil }
-        let call = calls.remove(at: index)
-        do {
-            return try WorkflowSpec.decodeToolCallArguments(call.arguments)
-        } catch {
-            throw ParserError.malformedWorkflow(raw: call.arguments.jsonString)
-        }
-    }
-
-    private static func decodeWorkflowCandidate(_ value: GeneratedContent) throws -> WorkflowSpec? {
-        if let object = value.objectValue,
-           let name = object["name"]?.stringValue,
-           name == WorkflowSpec.toolName,
-           let input = object["arguments"] {
-            do {
-                return try WorkflowSpec.decodeToolCallArguments(input)
-            } catch {
-                throw ParserError.malformedWorkflow(raw: value.jsonString)
-            }
-        }
-        do {
-            return try WorkflowSpec.decodeToolCallArguments(value)
-        } catch {
-            return nil
-        }
-    }
-
-    private static func recoverWorkflowSpec(
+    /// Recovers a workflow plan the model emitted as text — the whole reply as
+    /// one bare JSON object, or a fenced block — as a `workflow_run` tool
+    /// call. The plan is NOT validated here: `WorkflowTool` owns that and
+    /// answers a malformed plan with a structured `invalid_plan` output the
+    /// model can correct. Only JSON that *looks* like a workflow but does not
+    /// parse at all is a hard error, so the ErrorHandler can re-prompt.
+    private static func recoverWorkflowCall(
         in text: String
-    ) throws -> (spec: WorkflowSpec, remainingText: String)? {
+    ) throws -> (call: ToolCall, remainingText: String)? {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.hasPrefix("{"),
-           let value = try? GeneratedContent(json: trimmed) {
-            if let plan = try Self.decodeWorkflowCandidate(value) {
-                return (plan, "")
-            }
-            if Self.looksLikeWorkflowJSON(trimmed) {
+        if trimmed.hasPrefix("{") {
+            if let value = try? GeneratedContent(json: trimmed) {
+                if let arguments = Self.workflowArguments(in: value) {
+                    return (Self.workflowCall(arguments), "")
+                }
+            } else if Self.looksLikeWorkflowJSON(trimmed) {
                 throw ParserError.malformedWorkflow(raw: trimmed)
             }
         }
@@ -217,16 +185,37 @@ public enum OutputParser {
             else {
                 throw ParserError.malformedWorkflow(raw: body)
             }
-            if let plan = try Self.decodeWorkflowCandidate(value) {
+            if let arguments = Self.workflowArguments(in: value) {
                 var remaining = text
                 if let fullRange = Range(match.range, in: text) {
                     remaining.removeSubrange(fullRange)
                 }
-                return (plan, remaining)
+                return (Self.workflowCall(arguments), remaining)
             }
             throw ParserError.malformedWorkflow(raw: body)
         }
         return nil
+    }
+
+    /// The workflow-call arguments inside `value`: either the
+    /// `{"name":"workflow_run","arguments":{…}}` envelope, or a bare plan
+    /// object whose `nodes` is an array of node objects naming a `tool`.
+    private static func workflowArguments(in value: GeneratedContent) -> GeneratedContent? {
+        guard let object = value.objectValue else { return nil }
+        if object["name"]?.stringValue == WorkflowSpec.toolName,
+           let input = object["arguments"] {
+            return input
+        }
+        if let nodes = object["nodes"]?.arrayValue,
+           !nodes.isEmpty,
+           nodes.allSatisfy({ $0.objectValue?["tool"]?.stringValue != nil }) {
+            return value
+        }
+        return nil
+    }
+
+    private static func workflowCall(_ arguments: GeneratedContent) -> ToolCall {
+        ToolCall(name: WorkflowSpec.toolName, arguments: arguments)
     }
 
     private static func looksLikeWorkflowJSON(_ text: String) -> Bool {
@@ -234,8 +223,7 @@ public enum OutputParser {
             || text.contains("\"\(WorkflowSpec.toolName)\"")
             || (text.contains("\"nodes\"")
                 && text.contains("\"tool\"")
-                && text.contains("\"input\"")
-                && text.contains("\"depends_on\""))
+                && text.contains("\"input\""))
     }
 
     /// Looks for a fenced ```tool block holding a single JSON object describing

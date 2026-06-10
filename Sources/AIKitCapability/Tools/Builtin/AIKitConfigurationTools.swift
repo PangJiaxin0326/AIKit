@@ -109,8 +109,8 @@ public struct SetAIKitConfigurationTool: Tool {
     runtime, and safety. Useful keys include model, activeProvider (Volcengine \
     Ark or Apple Intelligence), availableModels, \
     endpointURL, enabledToolNames, systemPromptFragment, maxIterations, \
-    streamsResponses, toolCallFallback, workflowPlanning, leanWorkflowSchema, \
-    twoRoundAutoBind, twoRoundStructuredPlannerOutput, enabledGuardrailIDs, and \
+    streamsResponses, toolCallFallback, workflowPlanning, twoRoundAutoBind, \
+    twoRoundStructuredPlannerOutput, enabledGuardrailIDs, and \
     outputLengthLimit.
     """
     public var name: String { Self.toolName }
@@ -151,18 +151,19 @@ public struct SetAIKitConfigurationTool: Tool {
     }
 }
 
-/// Convenience registration for the configuration tools shipped with AIKit.
+/// The configuration tools shipped with AIKit.
 public enum AIKitConfigurationTools {
     public static let toolNames: Set<String> = [
         GetAIKitConfigurationTool.toolName,
         SetAIKitConfigurationTool.toolName,
     ]
 
-    public static func register(
-        in registry: ToolRegistry,
-        store: AIKitConfigurationStore
-    ) async {
-        await registry.register(GetAIKitConfigurationTool(store: store))
-        await registry.register(SetAIKitConfigurationTool(store: store))
+    /// Both configuration tools, in the `[any Tool]` currency a
+    /// `LanguageModelSession` (or the `Orchestrator`) takes.
+    public static func all(store: AIKitConfigurationStore) -> [any Tool] {
+        [
+            GetAIKitConfigurationTool(store: store),
+            SetAIKitConfigurationTool(store: store),
+        ]
     }
 }

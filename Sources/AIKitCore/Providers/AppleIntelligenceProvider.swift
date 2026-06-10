@@ -6,7 +6,7 @@ import AIToolKit
 ///
 /// This provider is intentionally text-first. Although AIKit tools conform to
 /// Foundation Models' `Tool` protocol, the runtime owns and dispatches them
-/// through `ToolRegistry`; reporting `supportsNativeTools == false` enables the
+/// itself; reporting `supportsNativeTools == false` enables the
 /// fenced-```tool``` fallback on this provider path.
 public struct AppleIntelligenceProvider: LLMProvider {
     public enum Endpoint: String, Sendable, Hashable, Codable, CaseIterable {

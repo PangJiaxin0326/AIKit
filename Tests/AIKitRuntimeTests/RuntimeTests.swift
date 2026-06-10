@@ -72,34 +72,36 @@ private struct FixedHarvester: ContextHarvesting {
         #expect(request.system?.contains(PromptBuilder.toolFallbackInstruction) == false)
     }
 
-    @Test func workflowPlanningDefaultsToLeanSchemaWithExample() throws {
+    @Test func workflowPlanningAdvertisesUnifiedWorkflowTool() throws {
         let context = ResolvedContext(
             stack: [.init("home")],
             systemPromptFragment: "",
             toolNames: ["navigate"],
             metadata: [:]
         )
+        let navigate = NavigateTool { _ in .init(navigated: true) }
         let request = PromptBuilder.build(
             instruction: "Open settings",
             context: context,
             memory: [],
             transcript: [],
-            toolManifest: [
-                ToolDescriptor(name: "navigate", description: "nav", argumentsSchema: GeneratedContent.generationSchema),
-            ],
-            model: "test-model",
-            workflowPlanningHint: true
+            toolManifest: [navigate.descriptor],
+            workflow: WorkflowTool(tools: [navigate]),
+            model: "test-model"
         )
 
-        #expect(request.system?.contains("Emit only") == true)
-        #expect(request.system?.contains("Example WorkflowSpec") == true)
+        #expect(request.system?.contains("topological DAG") == true)
+        #expect(request.system?.contains("Example workflow") == true)
         #expect(request.tools.map(\.name) == [WorkflowSpec.toolName])
 
         let schemaJSON = try #require(try request.tools.first?.argumentsSchema.jsonString())
         let schemaObject = try #require(GeneratedContent(json: schemaJSON).objectValue)
         let required = try #require(schemaObject["required"]?.arrayValue)
-        #expect(required.compactMap(\.stringValue) == ["schema_version", "nodes"])
+        #expect(required.compactMap(\.stringValue).contains("nodes"))
         let properties = try #require(schemaObject["properties"]?.objectValue)
+        #expect(properties["nodes"] != nil)
+        // No harvester: the slot vocabulary is omitted entirely.
+        #expect(properties["context_slots"] == nil)
         #expect(properties["final"] == nil)
         #expect(properties["limits"] == nil)
     }
@@ -234,10 +236,12 @@ private struct FixedHarvester: ContextHarvesting {
         )
         let json = try workflowJSONString(spec)
         let response = LLMResponse(content: [.text(json)], stopReason: .endTurn)
-        guard case .workflow(let plan) = try OutputParser.parse(response) else {
-            Issue.record("expected workflow spec")
+        guard case .toolCalls(let calls) = try OutputParser.parse(response),
+              let call = calls.first, call.name == WorkflowSpec.toolName else {
+            Issue.record("expected recovered workflow call")
             return
         }
+        let plan = try WorkflowSpec.decodeToolCallArguments(call.arguments)
 
         let validated = try WorkflowValidator.validate(
             plan,
@@ -298,20 +302,21 @@ private struct FixedHarvester: ContextHarvesting {
             content: [.toolUse(id: "wf", name: WorkflowSpec.toolName, arguments: input)],
             stopReason: .toolUse
         )
-        guard case .workflow(let plan) = try OutputParser.parse(response) else {
-            Issue.record("expected workflow spec")
+        guard case .toolCalls(let calls) = try OutputParser.parse(response),
+              let call = calls.first, call.name == WorkflowSpec.toolName else {
+            Issue.record("expected workflow call")
             return
         }
+        let plan = try WorkflowSpec.decodeToolCallArguments(call.arguments)
         #expect(plan.nodes.compactMap(\.tool) == ["navigate"])
     }
 
     @Test func workflowGuardrailViolationIgnoresContinueWithNullPolicy() async throws {
         let flag = InvocationFlag()
-        let registry = ToolRegistry()
-        await registry.register(NavigateTool { _ in
+        let tools: [any Tool] = [NavigateTool { _ in
             await flag.mark()
             return .init(navigated: true)
-        })
+        }]
         let resolver = ContextResolver()
         await resolver.push(ViewContext(
             id: .init("home"), displayName: "Home", toolNames: ["navigate"]
@@ -337,7 +342,7 @@ private struct FixedHarvester: ContextHarvesting {
         ])
         let orchestrator = Orchestrator(
             llm: LLMClient(provider: provider),
-            tools: registry,
+            tools: tools,
             memory: InMemoryMemoryStore(),
             contextResolver: resolver,
             guardrails: PolicyEngine(rails: [PIIRedactor()]),
@@ -357,8 +362,7 @@ private struct FixedHarvester: ContextHarvesting {
 
     @Test func workflowPostToolUseReceivesToolOutput() async throws {
         let recorder = PostToolUseOutputRecorder()
-        let registry = ToolRegistry()
-        await registry.register(SensitiveOutputTool())
+        let tools: [any Tool] = [SensitiveOutputTool()]
         let resolver = ContextResolver()
         await resolver.push(ViewContext(
             id: .init("home"), displayName: "Home", toolNames: [SensitiveOutputTool.toolName]
@@ -379,7 +383,7 @@ private struct FixedHarvester: ContextHarvesting {
         ])
         let orchestrator = Orchestrator(
             llm: LLMClient(provider: provider),
-            tools: registry,
+            tools: tools,
             memory: InMemoryMemoryStore(),
             contextResolver: resolver,
             guardrails: PolicyEngine(rails: [
@@ -398,29 +402,27 @@ private struct FixedHarvester: ContextHarvesting {
         #expect(entries.first?.text.contains("top-secret") == true)
     }
 
-    @Test func promptBuilderCanExposeWorkflowSchema() {
+    @Test func workflowInstructionsCarryToolManifest() {
         let context = ResolvedContext(
             stack: [.init("home")],
             systemPromptFragment: "",
             toolNames: ["navigate", "setProfile"],
             metadata: [:]
         )
+        let navigate = NavigateTool { _ in .init(navigated: true) }
+        let setProfile = SetProfileTool { _ in .init(applied: true) }
         let request = PromptBuilder.build(
             instruction: "Open settings and remember my theme",
             context: context,
             memory: [],
             transcript: [],
-            toolManifest: [
-                ToolDescriptor(name: "navigate", description: "nav", argumentsSchema: GeneratedContent.generationSchema),
-                ToolDescriptor(name: "setProfile", description: "profile", argumentsSchema: GeneratedContent.generationSchema),
-            ],
-            model: "test-model",
-            workflowPlanningHint: true
+            toolManifest: [navigate.descriptor, setProfile.descriptor],
+            workflow: WorkflowTool(tools: [navigate, setProfile]),
+            model: "test-model"
         )
-        #expect(request.system?.contains("WorkflowSpec is a topological DAG") == true)
-        #expect(request.system?.contains("- navigate: nav") == true)
+        #expect(request.system?.contains("- navigate:") == true)
         #expect(request.system?.contains("Arguments schema:") == true)
-        #expect(request.system?.contains("- setProfile: profile") == true)
+        #expect(request.system?.contains("- setProfile:") == true)
         #expect(request.tools.map { $0.name } == [WorkflowSpec.toolName])
     }
 }
@@ -442,14 +444,14 @@ private struct FixedHarvester: ContextHarvesting {
 
     private func runner(
         provider: MockProvider,
-        registry: ToolRegistry,
+        tools: [any Tool],
         packet: ContextPacket,
         options: WorkflowTwoRoundRunner.Options,
         planCache: WorkflowPlanCache? = nil
     ) -> WorkflowTwoRoundRunner {
         WorkflowTwoRoundRunner(
             llm: LLMClient(provider: provider),
-            tools: registry,
+            tools: tools,
             harvester: FixedHarvester(packet: packet),
             plannerToolNames: ["navigate"],
             options: options,
@@ -458,10 +460,9 @@ private struct FixedHarvester: ContextHarvesting {
     }
 
     @Test func structuredOutputCanBePlannerOnly() async throws {
-        let registry = ToolRegistry()
-        await registry.register(NavigateTool { input in
+        let tools: [any Tool] = [NavigateTool { input in
             .init(navigated: input.destination == "settings")
-        })
+        }]
         let plan = """
         {"nodes":[{"id":"go","tool":"navigate","input":{"destination":{"$slot":"destination"}}}],
          "context_slots":[{"slot_id":"destination","source":"current_destination"}]}
@@ -493,7 +494,7 @@ private struct FixedHarvester: ContextHarvesting {
         ])
         let subject = runner(
             provider: provider,
-            registry: registry,
+            tools: tools,
             packet: packet,
             options: .init(
                 model: "test",
@@ -516,11 +517,10 @@ private struct FixedHarvester: ContextHarvesting {
 
     @Test func planCacheAndAutoBindSkipPlannerOnRepeat() async throws {
         let invocations = ToolInvocationRecorder()
-        let registry = ToolRegistry()
-        await registry.register(NavigateTool { input in
+        let tools: [any Tool] = [NavigateTool { input in
             await invocations.record(input.destination)
             return .init(navigated: true)
-        })
+        }]
         let plan = """
         {"nodes":[{"id":"go","tool":"navigate","input":{"destination":{"$slot":"destination"}}}],
          "context_slots":[{"slot_id":"destination","source":"current_destination"}]}
@@ -540,7 +540,7 @@ private struct FixedHarvester: ContextHarvesting {
         let cache = WorkflowPlanCache()
         let subject = runner(
             provider: provider,
-            registry: registry,
+            tools: tools,
             packet: packet,
             options: .init(model: "test", sources: ["current_destination"]),
             planCache: cache
@@ -564,11 +564,10 @@ private struct FixedHarvester: ContextHarvesting {
 
     @Test func safetyRedactsToolInputBeforeTwoRoundExecution() async throws {
         let seen = SeenInput()
-        let registry = ToolRegistry()
-        await registry.register(NavigateTool { input in
+        let tools: [any Tool] = [NavigateTool { input in
             await seen.record(input.destination)
             return .init(navigated: true)
-        })
+        }]
         let plan = """
         {"nodes":[{"id":"go","tool":"navigate","input":{"destination":"email me at a@b.com"}}],
          "context_slots":[]}
@@ -578,7 +577,7 @@ private struct FixedHarvester: ContextHarvesting {
         ])
         let subject = WorkflowTwoRoundRunner(
             llm: LLMClient(provider: provider),
-            tools: registry,
+            tools: tools,
             harvester: StubHarvester(),
             plannerToolNames: ["navigate"],
             options: .init(model: "test", sources: []),
@@ -597,11 +596,10 @@ private struct FixedHarvester: ContextHarvesting {
 
     @Test func plannedReportFailureNodeRefusesInsteadOfExecuting() async throws {
         let invocations = ToolInvocationRecorder()
-        let registry = ToolRegistry()
-        await registry.register(NavigateTool { input in
+        let tools: [any Tool] = [NavigateTool { input in
             await invocations.record(input.destination)
             return .init(navigated: true)
-        })
+        }]
         // The planner phrases its refusal as a reportFailure node (it is not
         // even in the planner manifest): the run must refuse with the node's
         // reason, not execute the node — or trip plan validation.
@@ -615,7 +613,7 @@ private struct FixedHarvester: ContextHarvesting {
         ])
         let subject = WorkflowTwoRoundRunner(
             llm: LLMClient(provider: provider),
-            tools: registry,
+            tools: tools,
             harvester: StubHarvester(),
             plannerToolNames: ["navigate"],
             options: .init(model: "test", sources: [])
@@ -644,7 +642,7 @@ private struct FixedHarvester: ContextHarvesting {
         #expect(ErrorClassifier.category(of: LLMError.httpStatus(code: 400, body: "")) == .fatal)
         #expect(ErrorClassifier.category(of: GuardrailViolation(railID: "r", stage: .preToolUse, reason: "x")) == .guardrailViolation)
         #expect(ErrorClassifier.category(of: OutputParser.ParserError.empty) == .malformedOutput)
-        #expect(ErrorClassifier.category(of: ToolRegistryError.decodingFailed(name: "navigate", detail: "bad type")) == .malformedOutput)
+        #expect(ErrorClassifier.category(of: ToolDispatchError.decodingFailed(name: "navigate", detail: "bad type")) == .malformedOutput)
         #expect(ErrorClassifier.category(of: GenericToolError(message: "x", isRetriable: true)) == .toolRetriable)
     }
 
@@ -682,10 +680,9 @@ private struct FixedHarvester: ContextHarvesting {
         guardrails: PolicyEngine = PolicyEngine(),
         usageRecorder: (any AIKitSessionUsageRecording)? = nil
     ) async -> Orchestrator {
-        let registry = ToolRegistry()
-        await registry.register(NavigateTool { input in
+        let tools: [any Tool] = [NavigateTool { input in
             .init(navigated: input.destination == "settings")
-        })
+        }]
         let resolver = ContextResolver()
         await resolver.push(ViewContext(
             id: .init("home"),
@@ -695,7 +692,7 @@ private struct FixedHarvester: ContextHarvesting {
         ))
         return Orchestrator(
             llm: LLMClient(provider: provider),
-            tools: registry,
+            tools: tools,
             memory: InMemoryMemoryStore(),
             contextResolver: resolver,
             guardrails: guardrails,
@@ -837,10 +834,9 @@ private struct FixedHarvester: ContextHarvesting {
     }
 
     @Test func runWorkflowTaskHostsTwoRoundAsTrackedTurn() async throws {
-        let registry = ToolRegistry()
-        await registry.register(NavigateTool { input in
+        let tools: [any Tool] = [NavigateTool { input in
             .init(navigated: input.destination == "settings")
-        })
+        }]
         let resolver = ContextResolver()
         await resolver.push(ViewContext(
             id: .init("home"),
@@ -860,7 +856,7 @@ private struct FixedHarvester: ContextHarvesting {
         ])
         let orchestrator = Orchestrator(
             llm: LLMClient(provider: provider),
-            tools: registry,
+            tools: tools,
             memory: memory,
             contextResolver: resolver,
             guardrails: PolicyEngine(),
@@ -898,10 +894,9 @@ private struct FixedHarvester: ContextHarvesting {
     }
 
     @Test func runWorkflowTaskAppliesFinalResultGuardrail() async throws {
-        let registry = ToolRegistry()
-        await registry.register(NavigateTool { _ in
+        let tools: [any Tool] = [NavigateTool { _ in
             .init(navigated: true)
-        })
+        }]
         let resolver = ContextResolver()
         await resolver.push(ViewContext(
             id: .init("home"), displayName: "Home", toolNames: ["navigate"]
@@ -915,7 +910,7 @@ private struct FixedHarvester: ContextHarvesting {
         ])
         let orchestrator = Orchestrator(
             llm: LLMClient(provider: provider),
-            tools: registry,
+            tools: tools,
             memory: InMemoryMemoryStore(),
             contextResolver: resolver,
             guardrails: PolicyEngine(rails: [OutputLengthCap(maxCharacters: 1)]),
@@ -940,11 +935,10 @@ private struct FixedHarvester: ContextHarvesting {
 
     @Test func workflowPlanningRejectsDirectToolCallsWithoutInvokingTool() async throws {
         let flag = InvocationFlag()
-        let registry = ToolRegistry()
-        await registry.register(NavigateTool { _ in
+        let tools: [any Tool] = [NavigateTool { _ in
             await flag.mark()
             return .init(navigated: true)
-        })
+        }]
         let resolver = ContextResolver()
         await resolver.push(ViewContext(
             id: .init("home"), displayName: "Home", toolNames: ["navigate"]
@@ -960,7 +954,7 @@ private struct FixedHarvester: ContextHarvesting {
         ])
         let orchestrator = Orchestrator(
             llm: LLMClient(provider: provider),
-            tools: registry,
+            tools: tools,
             memory: InMemoryMemoryStore(),
             contextResolver: resolver,
             guardrails: PolicyEngine(),
@@ -977,10 +971,9 @@ private struct FixedHarvester: ContextHarvesting {
     }
 
     @Test func malformedToolInputCorrectedOnSecondAttemptWithoutOrphanToolMessage() async throws {
-        let registry = ToolRegistry()
-        await registry.register(NavigateTool { input in
+        let tools: [any Tool] = [NavigateTool { input in
             .init(navigated: input.destination == "settings")
-        })
+        }]
         let resolver = ContextResolver()
         await resolver.push(ViewContext(
             id: .init("home"), displayName: "Home", toolNames: ["navigate"]
@@ -998,7 +991,7 @@ private struct FixedHarvester: ContextHarvesting {
         ])
         let orchestrator = Orchestrator(
             llm: LLMClient(provider: provider),
-            tools: registry,
+            tools: tools,
             memory: InMemoryMemoryStore(),
             contextResolver: resolver,
             guardrails: PolicyEngine(),
@@ -1034,11 +1027,10 @@ private struct FixedHarvester: ContextHarvesting {
 
     @Test func malformedNativeToolInputCorrectedWithoutInvokingTool() async throws {
         let invocations = ToolInvocationRecorder()
-        let registry = ToolRegistry()
-        await registry.register(NavigateTool { input in
+        let tools: [any Tool] = [NavigateTool { input in
             await invocations.record(input.destination)
             return .init(navigated: input.destination == "settings")
-        })
+        }]
         let resolver = ContextResolver()
         await resolver.push(ViewContext(
             id: .init("home"), displayName: "Home", toolNames: ["navigate"]
@@ -1057,7 +1049,7 @@ private struct FixedHarvester: ContextHarvesting {
         ])
         let orchestrator = Orchestrator(
             llm: LLMClient(provider: provider),
-            tools: registry,
+            tools: tools,
             memory: InMemoryMemoryStore(),
             contextResolver: resolver,
             guardrails: PolicyEngine(),
@@ -1086,13 +1078,12 @@ private struct FixedHarvester: ContextHarvesting {
 
     @Test func retriableToolFailureCreatesErrorToolResultAndRecovers() async throws {
         let attempts = ToolAttemptCounter()
-        let registry = ToolRegistry()
-        await registry.register(NavigateTool { _ in
+        let tools: [any Tool] = [NavigateTool { _ in
             if await attempts.shouldFailOnce() {
                 throw GenericToolError(message: "temporary navigation failure", isRetriable: true)
             }
             return .init(navigated: true)
-        })
+        }]
         let resolver = ContextResolver()
         await resolver.push(ViewContext(
             id: .init("home"), displayName: "Home", toolNames: ["navigate"]
@@ -1110,7 +1101,7 @@ private struct FixedHarvester: ContextHarvesting {
         ])
         let orchestrator = Orchestrator(
             llm: LLMClient(provider: provider),
-            tools: registry,
+            tools: tools,
             memory: InMemoryMemoryStore(),
             contextResolver: resolver,
             guardrails: PolicyEngine(),
@@ -1145,16 +1136,17 @@ private struct FixedHarvester: ContextHarvesting {
     @Test func failedMultiToolBatchMarksUnexecutedCallsSkippedBeforeRetry() async throws {
         let attempts = ToolAttemptCounter()
         let skippedFlag = InvocationFlag()
-        let registry = ToolRegistry()
-        await registry.register(NavigateTool { _ in
-            if await attempts.shouldFailOnce() {
-                throw GenericToolError(message: "temporary navigation failure", isRetriable: true)
-            }
-            return .init(navigated: true)
-        })
-        await registry.register(EmptyInputTool {
-            await skippedFlag.mark()
-        })
+        let tools: [any Tool] = [
+            NavigateTool { _ in
+                if await attempts.shouldFailOnce() {
+                    throw GenericToolError(message: "temporary navigation failure", isRetriable: true)
+                }
+                return .init(navigated: true)
+            },
+            EmptyInputTool {
+                await skippedFlag.mark()
+            },
+        ]
         let resolver = ContextResolver()
         await resolver.push(ViewContext(
             id: .init("home"),
@@ -1177,7 +1169,7 @@ private struct FixedHarvester: ContextHarvesting {
         ])
         let orchestrator = Orchestrator(
             llm: LLMClient(provider: provider),
-            tools: registry,
+            tools: tools,
             memory: InMemoryMemoryStore(),
             contextResolver: resolver,
             guardrails: PolicyEngine(),
@@ -1210,10 +1202,9 @@ private struct FixedHarvester: ContextHarvesting {
 
     @Test func postToolUseReceivesIsErrorTrueForToolFailure() async throws {
         let recorder = PostToolUseRecorder()
-        let registry = ToolRegistry()
-        await registry.register(NavigateTool { _ in
+        let tools: [any Tool] = [NavigateTool { _ in
             throw GenericToolError(message: "permanent navigation failure")
-        })
+        }]
         let resolver = ContextResolver()
         await resolver.push(ViewContext(
             id: .init("home"), displayName: "Home", toolNames: ["navigate"]
@@ -1226,7 +1217,7 @@ private struct FixedHarvester: ContextHarvesting {
         ])
         let orchestrator = Orchestrator(
             llm: LLMClient(provider: provider),
-            tools: registry,
+            tools: tools,
             memory: InMemoryMemoryStore(),
             contextResolver: resolver,
             guardrails: PolicyEngine(rails: [RecordingPostToolUseRail(recorder: recorder)]),
@@ -1246,10 +1237,9 @@ private struct FixedHarvester: ContextHarvesting {
     }
 
     @Test func postToolUseBlockSuppressesFailedToolResultEvent() async throws {
-        let registry = ToolRegistry()
-        await registry.register(NavigateTool { _ in
+        let tools: [any Tool] = [NavigateTool { _ in
             throw GenericToolError(message: "contains blocked output")
-        })
+        }]
         let resolver = ContextResolver()
         await resolver.push(ViewContext(
             id: .init("home"), displayName: "Home", toolNames: ["navigate"]
@@ -1262,7 +1252,7 @@ private struct FixedHarvester: ContextHarvesting {
         ])
         let orchestrator = Orchestrator(
             llm: LLMClient(provider: provider),
-            tools: registry,
+            tools: tools,
             memory: InMemoryMemoryStore(),
             contextResolver: resolver,
             guardrails: PolicyEngine(rails: [BlockingPostToolUseRail()]),
@@ -1284,12 +1274,11 @@ private struct FixedHarvester: ContextHarvesting {
     }
 
     @Test func streamingEmitsDeltas() async throws {
-        let registry = ToolRegistry()
         let resolver = ContextResolver()
         await resolver.push(ViewContext(id: .init("v"), displayName: "V"))
         let orchestrator = Orchestrator(
             llm: LLMClient(provider: MockProvider(finalText: "hello stream")),
-            tools: registry,
+            tools: [],
             memory: InMemoryMemoryStore(),
             contextResolver: resolver,
             guardrails: PolicyEngine(),
@@ -1307,17 +1296,16 @@ private struct FixedHarvester: ContextHarvesting {
 
     @Test func malformedStreamedToolJSONDoesNotInvokeTool() async throws {
         let flag = InvocationFlag()
-        let registry = ToolRegistry()
-        await registry.register(EmptyInputTool {
+        let tools: [any Tool] = [EmptyInputTool {
             await flag.mark()
-        })
+        }]
         let resolver = ContextResolver()
         await resolver.push(ViewContext(
             id: .init("v"), displayName: "V", toolNames: [EmptyInputTool.toolName]
         ))
         let orchestrator = Orchestrator(
             llm: LLMClient(provider: MalformedStreamingToolProvider()),
-            tools: registry,
+            tools: tools,
             memory: InMemoryMemoryStore(),
             contextResolver: resolver,
             guardrails: PolicyEngine(),
@@ -1366,7 +1354,7 @@ private struct FixedHarvester: ContextHarvesting {
         await resolver.push(ViewContext(id: .init("v"), displayName: "V"))
         let orchestrator = Orchestrator(
             llm: LLMClient(provider: provider),
-            tools: ToolRegistry(),
+            tools: [],
             memory: InMemoryMemoryStore(),
             contextResolver: resolver,
             guardrails: PolicyEngine(),
@@ -1378,11 +1366,10 @@ private struct FixedHarvester: ContextHarvesting {
 
     @Test func piiRedactorRedactsToolInputBeforeInvocation() async throws {
         let seen = SeenInput()
-        let registry = ToolRegistry()
-        await registry.register(NavigateTool { input in
+        let tools: [any Tool] = [NavigateTool { input in
             await seen.record(input.destination)
             return .init(navigated: true)
-        })
+        }]
         let resolver = ContextResolver()
         await resolver.push(ViewContext(
             id: .init("home"), displayName: "Home", toolNames: ["navigate"]
@@ -1396,7 +1383,7 @@ private struct FixedHarvester: ContextHarvesting {
         ])
         let orchestrator = Orchestrator(
             llm: LLMClient(provider: provider),
-            tools: registry,
+            tools: tools,
             memory: InMemoryMemoryStore(),
             contextResolver: resolver,
             guardrails: PolicyEngine(rails: [PIIRedactor(mode: .redact)]),
@@ -1410,54 +1397,41 @@ private struct FixedHarvester: ContextHarvesting {
         #expect(destination?.contains("a@b.com") == false)
     }
 
-    @Test func workflowSpecExecutesTopologicalDAGWithoutSecondLLMCall() async throws {
+    @Test func workflowPlanExecutesTopologicalDAGWithoutSecondLLMCall() async throws {
         let recorder = WorkflowRecorder()
-        let registry = ToolRegistry()
-        await registry.register(FindContactTool(recorder: recorder))
-        await registry.register(CreateReminderTool(recorder: recorder))
-        await registry.register(NavigateTool { input in
-            await recorder.record("navigate:\(input.destination)")
-            return .init(navigated: true)
-        })
+        let tools: [any Tool] = [
+            FindContactTool(recorder: recorder),
+            CreateReminderTool(recorder: recorder),
+            NavigateTool { input in
+                await recorder.record("navigate:\(input.destination)")
+                return .init(navigated: true)
+            },
+        ]
         let resolver = ContextResolver()
         await resolver.push(ViewContext(
             id: .init("home"),
             displayName: "Home",
             toolNames: ["findContact", "createReminder", "navigate"]
         ))
-        let workflow = try workflowJSONString(WorkflowSpec(
-            workflowID: "wf_call_alex",
-            intent: "Find Alex, create a reminder, and open reminders.",
-            nodes: [
-                WorkflowNode(
-                    id: "find_alex",
-                    tool: "findContact",
-                    input: .object(["query": .string("Alex")])
-                ),
-                WorkflowNode(
-                    id: "make_reminder",
-                    tool: "createReminder",
-                    dependsOn: ["find_alex"],
-                    input: .object([
-                        "title": .string("Call Alex"),
-                        "contactID": workflowRef(node: "find_alex", path: "/contactID"),
-                    ])
-                ),
-                WorkflowNode(
-                    id: "open_reminders",
-                    tool: "navigate",
-                    dependsOn: ["make_reminder"],
-                    input: .object(["destination": .string("reminders")])
-                ),
-            ],
-            final: .message("Done.")
-        ))
+        // A lean plan, as the unified WorkflowTool's contract prescribes:
+        // ordering comes from $ref data edges, not depends_on.
+        let plan = """
+        {"nodes":[\
+        {"id":"find_alex","tool":"findContact","input":{"query":"Alex"}},\
+        {"id":"make_reminder","tool":"createReminder","input":{\
+        "title":"Call Alex","contactID":{"$ref":{"source":"node",\
+        "node":"find_alex","path":"/contactID"}}}},\
+        {"id":"open_reminders","tool":"navigate","input":{\
+        "destination":{"$ref":{"source":"node","node":"make_reminder",\
+        "path":"/title"}}}}\
+        ]}
+        """
         let provider = MockProvider(responses: [
-            LLMResponse(content: [.text(workflow)], stopReason: .endTurn),
+            LLMResponse(content: [.text(plan)], stopReason: .endTurn),
         ])
         let orchestrator = Orchestrator(
             llm: LLMClient(provider: provider),
-            tools: registry,
+            tools: tools,
             memory: InMemoryMemoryStore(),
             contextResolver: resolver,
             guardrails: PolicyEngine(),
@@ -1474,13 +1448,17 @@ private struct FixedHarvester: ContextHarvesting {
             if case .error(let error) = event { Issue.record("unexpected: \(error)") }
         }
 
-        #expect(toolNames == ["findContact", "createReminder", "navigate"])
-        #expect(final == "Done.")
+        // The workflow_run dispatch frames the per-node activity events.
+        #expect(toolNames == [
+            WorkflowSpec.toolName, "findContact", "createReminder", "navigate",
+        ])
+        // The final answer is the last node's output — no second LLM pass.
+        #expect(final?.contains("navigated") == true)
         #expect(provider.receivedRequests.count == 1)
         #expect(await recorder.events == [
             "find:Alex",
             "reminder:Call Alex:contact-alex",
-            "navigate:reminders",
+            "navigate:Call Alex",
         ])
     }
 }
@@ -1859,10 +1837,9 @@ private final class SlowProvider: LLMProvider, @unchecked Sendable {
     /// A fenced-fallback recovery must be recorded as a structured `tool_use`
     /// block, with the following `tool_result` carrying the matching id.
     @Test func fencedFallbackRecordsStructuredToolUse() async throws {
-        let registry = ToolRegistry()
-        await registry.register(NavigateTool { input in
+        let tools: [any Tool] = [NavigateTool { input in
             .init(navigated: input.destination == "settings")
-        })
+        }]
         let resolver = ContextResolver()
         await resolver.push(ViewContext(
             id: .init("home"), displayName: "Home",
@@ -1876,7 +1853,7 @@ private final class SlowProvider: LLMProvider, @unchecked Sendable {
         ])
         let orchestrator = Orchestrator(
             llm: LLMClient(provider: provider),
-            tools: registry,
+            tools: tools,
             memory: InMemoryMemoryStore(),
             contextResolver: resolver,
             guardrails: PolicyEngine(),
@@ -1926,15 +1903,14 @@ private final class SlowProvider: LLMProvider, @unchecked Sendable {
             await resolver.push(ViewContext(
                 id: .init("v"), displayName: "V", toolNames: ["navigate"]
             ))
-            let registry = ToolRegistry()
-            await registry.register(NavigateTool { _ in .init(navigated: true) })
+            let tools: [any Tool] = [NavigateTool { _ in .init(navigated: true) }]
             let provider = MockProvider(
                 responses: [LLMResponse(content: [.text("ok")], stopReason: .endTurn)],
                 supportsNativeTools: nativeTools
             )
             let orchestrator = Orchestrator(
                 llm: LLMClient(provider: provider),
-                tools: registry,
+                tools: tools,
                 memory: InMemoryMemoryStore(),
                 contextResolver: resolver,
                 guardrails: PolicyEngine(),
@@ -1969,8 +1945,7 @@ private struct SlowGuardrail: Guardrail {
     private func run(
         nativeTools: Bool, fallback: Bool?
     ) async throws -> (toolRan: Bool, final: String?) {
-        let registry = ToolRegistry()
-        await registry.register(NavigateTool { _ in .init(navigated: true) })
+        let tools: [any Tool] = [NavigateTool { _ in .init(navigated: true) }]
         let resolver = ContextResolver()
         await resolver.push(ViewContext(
             id: .init("home"), displayName: "Home", toolNames: ["navigate"]
@@ -1986,7 +1961,7 @@ private struct SlowGuardrail: Guardrail {
         )
         let orchestrator = Orchestrator(
             llm: LLMClient(provider: provider),
-            tools: registry,
+            tools: tools,
             memory: InMemoryMemoryStore(),
             contextResolver: resolver,
             guardrails: PolicyEngine(),
@@ -2045,7 +2020,7 @@ private struct SlowGuardrail: Guardrail {
         ])
         return Orchestrator(
             llm: LLMClient(provider: provider),
-            tools: ToolRegistry(),
+            tools: [],
             memory: InMemoryMemoryStore(),
             contextResolver: resolver,
             guardrails: PolicyEngine(),
@@ -2106,11 +2081,10 @@ private struct SlowGuardrail: Guardrail {
     /// executed, but a diagnostic warning is surfaced.
     @Test func emitsWarningAndDoesNotExecute() async throws {
         let flag = InvocationFlag()
-        let registry = ToolRegistry()
-        await registry.register(NavigateTool { _ in
+        let tools: [any Tool] = [NavigateTool { _ in
             await flag.mark()
             return .init(navigated: true)
-        })
+        }]
         let resolver = ContextResolver()
         await resolver.push(ViewContext(
             id: .init("home"), displayName: "Home", toolNames: ["navigate"]
@@ -2122,7 +2096,7 @@ private struct SlowGuardrail: Guardrail {
         ])
         let orchestrator = Orchestrator(
             llm: LLMClient(provider: provider),
-            tools: registry,
+            tools: tools,
             memory: InMemoryMemoryStore(),
             contextResolver: resolver,
             guardrails: PolicyEngine(),
@@ -2155,7 +2129,7 @@ private struct SlowGuardrail: Guardrail {
         await resolver.push(ViewContext(id: .init("v"), displayName: "V"))
         let orchestrator = Orchestrator(
             llm: LLMClient(provider: MockProvider(finalText: "hi")),
-            tools: ToolRegistry(),
+            tools: [],
             memory: InMemoryMemoryStore(),
             contextResolver: resolver,
             guardrails: PolicyEngine(),
@@ -2177,7 +2151,7 @@ private struct SlowGuardrail: Guardrail {
         await resolver.push(ViewContext(id: .init("v"), displayName: "V"))
         let orchestrator = Orchestrator(
             llm: LLMClient(provider: SlowProvider(delay: .seconds(5))),
-            tools: ToolRegistry(),
+            tools: [],
             memory: InMemoryMemoryStore(),
             contextResolver: resolver,
             guardrails: PolicyEngine(),
@@ -2196,11 +2170,10 @@ private struct SlowGuardrail: Guardrail {
     /// A hung tool must not be able to overrun the budget; the invocation is
     /// raced against the deadline too.
     @Test func deadlineInterruptsHangingTool() async throws {
-        let registry = ToolRegistry()
-        await registry.register(NavigateTool { _ in
+        let tools: [any Tool] = [NavigateTool { _ in
             try await Task.sleep(for: .seconds(5))
             return .init(navigated: true)
-        })
+        }]
         let resolver = ContextResolver()
         await resolver.push(ViewContext(
             id: .init("home"), displayName: "Home", toolNames: ["navigate"]
@@ -2214,7 +2187,7 @@ private struct SlowGuardrail: Guardrail {
         ])
         let orchestrator = Orchestrator(
             llm: LLMClient(provider: provider),
-            tools: registry,
+            tools: tools,
             memory: InMemoryMemoryStore(),
             contextResolver: resolver,
             guardrails: PolicyEngine(),
@@ -2239,7 +2212,7 @@ private struct SlowGuardrail: Guardrail {
         await resolver.push(ViewContext(id: .init("v"), displayName: "V"))
         let orchestrator = Orchestrator(
             llm: LLMClient(provider: MockProvider(finalText: "hi")),
-            tools: ToolRegistry(),
+            tools: [],
             memory: InMemoryMemoryStore(),
             contextResolver: resolver,
             guardrails: PolicyEngine(rails: [

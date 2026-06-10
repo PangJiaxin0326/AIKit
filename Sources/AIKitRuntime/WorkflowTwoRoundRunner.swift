@@ -10,7 +10,13 @@ import AIKitSafety
 /// requests** (no conversation chaining). The pure validate/auto-bind/compile
 /// logic lives in AIToolKit (`WorkflowTwoRoundCompiler`); this runner adds only
 /// the LLM calls, the deterministic harvest, the optional plan cache, and DAG
-/// execution through `ToolRegistry`.
+/// execution over the host's official `[any Tool]` set.
+///
+/// AIToolKit's unified `WorkflowTool` covers the same protocol inside an
+/// ordinary session tool loop; this runner remains for hosts that need strict
+/// round isolation (planner blind to context, binder in a separate tailored
+/// request) and the between-rounds interception point (plan cache, native
+/// candidate pickers).
 ///
 /// The current reproduction recipe is documented in this package's `AGENTS.md`,
 /// which is the single source of truth for two-round settings and guard rails.
@@ -81,7 +87,7 @@ public struct WorkflowTwoRoundRunner: Sendable {
     }
 
     public let llm: LLMClient
-    public let tools: ToolRegistry
+    public let tools: [any Tool]
     public let harvester: any ContextHarvesting
     /// Tools the Planner may use — typically the task's tools minus any
     /// context-reading tool (the two-round mechanism for local state is the
@@ -91,9 +97,11 @@ public struct WorkflowTwoRoundRunner: Sendable {
     public let guardrails: PolicyEngine
     public let planCache: WorkflowPlanCache?
 
+    private let toolSet: ToolSet
+
     public init(
         llm: LLMClient,
-        tools: ToolRegistry,
+        tools: [any Tool],
         harvester: any ContextHarvesting,
         plannerToolNames: Set<String>,
         options: Options,
@@ -107,6 +115,7 @@ public struct WorkflowTwoRoundRunner: Sendable {
         self.options = options
         self.guardrails = guardrails
         self.planCache = planCache
+        self.toolSet = ToolSet(tools)
     }
 
     public func run(intent: String) async -> RunResult {
@@ -120,7 +129,7 @@ public struct WorkflowTwoRoundRunner: Sendable {
             plan = cached
             trace.append("plan-cache HIT — planner call skipped")
         } else {
-            let manifest = await tools.manifest(for: plannerToolNames)
+            let manifest = toolSet.descriptors(for: plannerToolNames)
             let system = WorkflowTwoRoundPrompt.plannerSystem(sources: options.sources)
             let user = """
             User request: \(intent)
@@ -250,13 +259,14 @@ public struct WorkflowTwoRoundRunner: Sendable {
     private func execute(nodes: [WorkflowPlanNode], calls: [LLMCall], trace: [String]) async -> RunResult {
         var trace = trace
         do {
-            let manifest = await tools.manifest(for: Set(nodes.compactMap(\.tool)))
+            let manifest = toolSet.descriptors(for: Set(nodes.compactMap(\.tool)))
             let descriptors = Dictionary(uniqueKeysWithValues: manifest.map { ($0.name, $0) })
             let spec = WorkflowTwoRoundCompiler.buildSpec(from: nodes, descriptors: descriptors)
             let validated = try WorkflowValidator.validate(
                 spec,
                 policy: WorkflowValidationPolicy(descriptors: manifest)
             )
+            let toolSet = self.toolSet
             let executor = WorkflowExecutor { node, resolvedInput, _ in
                 guard let tool = node.tool else {
                     throw WorkflowError.missingTool(nodeID: node.id)
@@ -269,7 +279,7 @@ public struct WorkflowTwoRoundRunner: Sendable {
                 let effectiveCall = try await resolveToolCall(call)
                 let outputValue: GeneratedContent
                 do {
-                    outputValue = try await tools.call(effectiveCall)
+                    outputValue = try await toolSet.call(effectiveCall)
                 } catch {
                     let output = Self.toolErrorOutput(error)
                     try await verifyPostToolUse(effectiveCall, output: output, isError: true)

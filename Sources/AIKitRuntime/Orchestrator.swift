@@ -34,17 +34,19 @@ private extension String {
     }
 }
 
-private actor WorkflowGuardrailViolationBox {
-    private var violation: GuardrailViolation?
+/// Captures the host-observability `WorkflowResult` a `WorkflowTool` reports
+/// via `onResult`, so the orchestrator can record node activity after the
+/// call returns (the model itself only sees the final value).
+private actor WorkflowResultBox {
+    private var latest: WorkflowResult?
 
-    func record(_ violation: GuardrailViolation) {
-        if self.violation == nil {
-            self.violation = violation
-        }
+    func record(_ result: WorkflowResult) {
+        latest = result
     }
 
-    func first() -> GuardrailViolation? {
-        violation
+    func take() -> WorkflowResult? {
+        defer { latest = nil }
+        return latest
     }
 }
 
@@ -325,18 +327,12 @@ public actor Orchestrator {
         /// prompted to emit a redundant fenced block. Set `true`/`false` to
         /// force it (e.g. a tool-less model behind a native-looking provider).
         public var toolCallFallback: Bool?
-        /// Adds AIKit's WorkflowSpec schema to prompts and native tool
-        /// manifests. This lets the model describe multiple dependent tool
-        /// calls in one response; the device executes them locally and emits
-        /// the final answer without a second LLM pass.
+        /// Advertises AIToolKit's unified `WorkflowTool` (built over the
+        /// view's tool subset) as the single model-facing tool. This lets the
+        /// model describe multiple dependent tool calls in one response; the
+        /// device executes the DAG locally and emits the final answer without
+        /// a second LLM pass.
         public var workflowPlanning: Bool
-        /// When true (and `workflowPlanning` is on), the synthetic
-        /// `workflow_run` tool advertises the *minimal* WorkflowSpec schema
-        /// (`{schema_version, nodes:[{id, tool, input}]}`) and the planning
-        /// instruction tells the model to emit only those fields. The runtime
-        /// defaults every omitted field, so the model produces far fewer
-        /// output tokens per plan. Requires a lenient `WorkflowSpec` decoder.
-        public var leanWorkflowSchema: Bool
 
         public init(
             model: String? = nil,
@@ -348,8 +344,7 @@ public actor Orchestrator {
             temperature: Double? = 0.2,
             maxTokens: Int? = nil,
             toolCallFallback: Bool? = nil,
-            workflowPlanning: Bool = true,
-            leanWorkflowSchema: Bool = true
+            workflowPlanning: Bool = true
         ) {
             self.model = model
             self.maxIterations = maxIterations
@@ -361,12 +356,15 @@ public actor Orchestrator {
             self.maxTokens = maxTokens
             self.toolCallFallback = toolCallFallback
             self.workflowPlanning = workflowPlanning
-            self.leanWorkflowSchema = leanWorkflowSchema
         }
     }
 
     private let llm: LLMClient
-    private let tools: ToolRegistry
+    /// The host's official tools plus AIKit's built-ins, in registration
+    /// order — the `[any Tool]` currency handed to runners and workflows.
+    private let allTools: [any Tool]
+    /// Name-indexed dispatch table over `allTools`.
+    private let tools: ToolSet
     private let memory: any MemoryStore
     private let contextResolver: ContextResolver
     private let guardrails: PolicyEngine
@@ -391,9 +389,6 @@ public actor Orchestrator {
     /// Sticky reason from the last failed turn; cleared when a new turn
     /// starts or `cancelActiveTurns()` is called.
     private var lastFailureReason: String?
-    /// Whether the built-in default tools have been registered into the host
-    /// registry; done lazily on the first turn since `init` cannot hop actors.
-    private var builtinToolsEnsured = false
     private var activityObservers: [UUID: AsyncStream<OrchestratorActivity>.Continuation] = [:]
     /// Observer ids whose stream terminated before the actor processed their
     /// registration task.
@@ -627,20 +622,6 @@ public actor Orchestrator {
         turnTasks[turn] = task
     }
 
-    /// Registers AIKit's built-in tools (currently just `reportFailure`) into
-    /// the host's registry, so every orchestrator provides them by default
-    /// without the host registering anything. A host registration under the
-    /// same name wins.
-    private func ensureBuiltinTools() async {
-        guard !builtinToolsEnsured else { return }
-        // Flag is set only after registration: a concurrent first turn then
-        // re-checks the registry (idempotent) instead of racing past it.
-        if await !tools.contains(name: ReportFailureTool.toolName) {
-            await tools.register(ReportFailureTool())
-        }
-        builtinToolsEnsured = true
-    }
-
     /// The built-in `reportFailure` escape hatch rides along with any view
     /// that exposes at least one tool; a tool-less context stays pure chat.
     private static func withBuiltinTools(_ names: Set<String>) -> Set<String> {
@@ -653,11 +634,12 @@ public actor Orchestrator {
             .map { ReportFailureTool.reason(from: $0.arguments) }
     }
 
-    /// The `reportFailure` reason among workflow `nodes`, if the model
+    /// The `reportFailure` reason among a workflow plan's nodes, if the model
     /// planned the refusal as a node instead of a direct call.
-    private func failureReason(in nodes: [WorkflowNode]) -> String? {
-        nodes.first { $0.tool == ReportFailureTool.toolName }
-            .map { ReportFailureTool.reason(from: $0.input) }
+    private func failureReason(inPlan arguments: GeneratedContent) -> String? {
+        guard let nodes = try? arguments.contentArray("nodes") else { return nil }
+        return nodes.first { $0.optionalString("tool") == ReportFailureTool.toolName }
+            .map { ReportFailureTool.reason(from: $0.property("input") ?? .object([:])) }
     }
 
     /// A concise, user-facing message for a terminal error.
@@ -679,7 +661,7 @@ public actor Orchestrator {
 
     public init(
         llm: LLMClient,
-        tools: ToolRegistry,
+        tools: [any Tool],
         memory: any MemoryStore,
         contextResolver: ContextResolver,
         guardrails: PolicyEngine,
@@ -687,7 +669,15 @@ public actor Orchestrator {
         options: Options = .init()
     ) {
         self.llm = llm
-        self.tools = tools
+        // AIKit's built-in tools (currently just `reportFailure`) ride along
+        // by default, so hosts hand over nothing; a host tool under the same
+        // name wins.
+        var allTools = tools
+        if !allTools.contains(where: { $0.name == ReportFailureTool.toolName }) {
+            allTools.append(ReportFailureTool())
+        }
+        self.allTools = allTools
+        self.tools = ToolSet(allTools)
         self.memory = memory
         self.contextResolver = contextResolver
         self.guardrails = guardrails
@@ -719,7 +709,6 @@ public actor Orchestrator {
         turnID: Int,
         emit: @escaping @Sendable (OrchestratorEvent) -> Void
     ) async {
-        await ensureBuiltinTools()
         await loop(instruction, turnID: turnID, emit: emit)
         await finishTurn(turnID)
     }
@@ -785,7 +774,6 @@ public actor Orchestrator {
         turnID: Int,
         emit: @escaping @Sendable (OrchestratorEvent) -> Void
     ) async {
-        await ensureBuiltinTools()
         let context = await contextResolver.merged()
         let viewID = context.leafID
         setTaskViewID(viewID, turn: turnID)
@@ -813,7 +801,7 @@ public actor Orchestrator {
 
         let runner = WorkflowTwoRoundRunner(
             llm: llm,
-            tools: tools,
+            tools: allTools,
             harvester: harvester,
             plannerToolNames: plannerToolNames,
             options: .init(
@@ -897,7 +885,7 @@ public actor Orchestrator {
     ) async -> OrchestratorSnapshot {
         let contexts = await contextResolver.current()
         let resolved = await contextResolver.merged()
-        let manifest = await tools.manifest(for: resolved.toolNames)
+        let manifest = tools.descriptors(for: resolved.toolNames)
         let viewID = resolved.stack.isEmpty ? nil : resolved.leafID
         let recent = (try? await memory.recent(
             limit: recentActivityLimit,
@@ -937,6 +925,18 @@ public actor Orchestrator {
             ContinuousClock.now.advanced(by: .seconds($0))
         }
 
+        // The view's tool subset is fixed for the turn. The unified
+        // WorkflowTool over that subset handles any workflow_run call —
+        // whether or not planning mode advertised it. A tool-less context
+        // stays pure chat (a WorkflowTool needs at least one leaf tool).
+        let activeTools = tools.subset(for: Self.withBuiltinTools(context.toolNames))
+        let manifest = activeTools.map(\.descriptor)
+        let workflowResults = WorkflowResultBox()
+        let workflow: WorkflowTool? = activeTools.isEmpty ? nil : WorkflowTool(
+            tools: activeTools,
+            onResult: { await workflowResults.record($0) }
+        )
+
         var transcript: [TranscriptEntry] = []
         var pendingCorrection: String?
         var attempt = 0
@@ -962,9 +962,6 @@ public actor Orchestrator {
                 let recent = (try? await memory.recent(
                     limit: options.memoryWindow, view: viewID
                 )) ?? []
-                let manifest = await tools.manifest(
-                    for: Self.withBuiltinTools(context.toolNames)
-                )
                 guard let selectedModel = configuredModel else {
                     let error = LLMError.missingModel
                     await recordFailure(errorMessage(error), turn: turnID)
@@ -978,12 +975,11 @@ public actor Orchestrator {
                     memory: recent,
                     transcript: transcript,
                     toolManifest: manifest,
+                    workflow: options.workflowPlanning ? workflow : nil,
                     model: selectedModel,
                     temperature: options.temperature,
                     maxTokens: options.maxTokens,
-                    toolCallFallbackHint: useFallback,
-                    workflowPlanningHint: options.workflowPlanning,
-                    leanWorkflowSchemaHint: options.leanWorkflowSchema
+                    toolCallFallbackHint: useFallback
                 )
                 let rendered = RenderedPrompt(request: request, toolNames: context.toolNames)
                 emit(.promptBuilt(rendered))
@@ -1039,65 +1035,22 @@ public actor Orchestrator {
                     return
 
                 case .toolCalls(let calls):
-                    // A `reportFailure` call is a refusal in any mode — in
-                    // planning mode the model is still told it may bail out,
-                    // so it must end the turn, not read as a malformed plan.
-                    if let reason = failureReason(in: calls) {
-                        await recordFailure(reason, turn: turnID, outcome: .refused)
-                        emit(.failure(reason: reason))
-                        return
-                    }
-                    if options.workflowPlanning {
-                        throw OutputParser.ParserError.malformedWorkflow(
-                            raw: "Expected a single \(WorkflowSpec.toolName) call or WorkflowSpec JSON, not direct tool calls."
-                        )
-                    }
-                    let (entry, resolved) = Self.assistantTurn(text: nil, calls: calls)
-                    transcript.append(entry)
-                    try await executeBatch(
-                        resolved, viewID: viewID, turnID: turnID, deadline: deadline,
+                    let ended = try await handleToolCalls(
+                        calls, narration: nil,
+                        workflow: workflow, workflowResults: workflowResults,
+                        viewID: viewID, turnID: turnID, deadline: deadline,
                         transcript: &transcript, emit: emit
                     )
+                    if ended { return }
 
                 case .mixed(let text, let calls):
-                    if let reason = failureReason(in: calls) {
-                        await recordFailure(reason, turn: turnID, outcome: .refused)
-                        emit(.failure(reason: reason))
-                        return
-                    }
-                    if options.workflowPlanning {
-                        throw OutputParser.ParserError.malformedWorkflow(
-                            raw: "Expected a single \(WorkflowSpec.toolName) call or WorkflowSpec JSON, not direct tool calls."
-                        )
-                    }
-                    // Non-stream mode never emitted deltas, so surface the
-                    // narration that accompanies the tool call instead of
-                    // dropping it. (Streaming already emitted it as deltas.)
-                    if !options.stream, !text.isEmpty {
-                        emit(.llmDelta(text))
-                    }
-                    let (entry, resolved) = Self.assistantTurn(text: text, calls: calls)
-                    transcript.append(entry)
-                    try await executeBatch(
-                        resolved, viewID: viewID, turnID: turnID, deadline: deadline,
-                        transcript: &transcript, emit: emit
-                    )
-
-                case .workflow(let plan):
-                    try await executeWorkflow(
-                        plan, narration: nil, manifest: manifest,
+                    let ended = try await handleToolCalls(
+                        calls, narration: text,
+                        workflow: workflow, workflowResults: workflowResults,
                         viewID: viewID, turnID: turnID, deadline: deadline,
                         transcript: &transcript, emit: emit
                     )
-                    return
-
-                case .mixedWorkflow(let text, let plan):
-                    try await executeWorkflow(
-                        plan, narration: text, manifest: manifest,
-                        viewID: viewID, turnID: turnID, deadline: deadline,
-                        transcript: &transcript, emit: emit
-                    )
-                    return
+                    if ended { return }
                 }
                 attempt = 0
             } catch is CancellationError {
@@ -1302,16 +1255,75 @@ public actor Orchestrator {
         }
     }
 
-    private func executeWorkflow(
-        _ spec: WorkflowSpec,
+    /// Routes one parsed batch of calls: a `reportFailure` refusal ends the
+    /// turn; a `workflow_run` call goes to the unified `WorkflowTool`; in
+    /// planning mode anything else is a malformed plan; otherwise the calls
+    /// execute sequentially. Returns `true` when the turn ended.
+    private func handleToolCalls(
+        _ calls: [ToolCall],
         narration: String?,
-        manifest: [ToolDescriptor],
+        workflow: WorkflowTool?,
+        workflowResults: WorkflowResultBox,
         viewID: ViewContext.ID,
         turnID: Int,
         deadline: ContinuousClock.Instant?,
         transcript: inout [TranscriptEntry],
         emit: @escaping @Sendable (OrchestratorEvent) -> Void
-    ) async throws {
+    ) async throws -> Bool {
+        // A `reportFailure` call is a refusal in any mode — in planning mode
+        // the model is still told it may bail out, so it must end the turn,
+        // not read as a malformed plan.
+        if let reason = failureReason(in: calls) {
+            await recordFailure(reason, turn: turnID, outcome: .refused)
+            emit(.failure(reason: reason))
+            return true
+        }
+        if let workflow,
+           let call = calls.first(where: { $0.name == WorkflowSpec.toolName }) {
+            // The parser guarantees a workflow call arrives alone.
+            return try await executeWorkflowCall(
+                call, narration: narration,
+                workflow: workflow, workflowResults: workflowResults,
+                viewID: viewID, turnID: turnID, deadline: deadline,
+                transcript: &transcript, emit: emit
+            )
+        }
+        if options.workflowPlanning {
+            throw OutputParser.ParserError.malformedWorkflow(
+                raw: "Expected a single \(WorkflowSpec.toolName) call or workflow JSON, not direct tool calls."
+            )
+        }
+        // Non-stream mode never emitted deltas, so surface the narration
+        // that accompanies the tool calls instead of dropping it.
+        // (Streaming already emitted it as deltas.)
+        if !options.stream, let narration, !narration.isEmpty {
+            emit(.llmDelta(narration))
+        }
+        let (entry, resolved) = Self.assistantTurn(text: narration, calls: calls)
+        transcript.append(entry)
+        try await executeBatch(
+            resolved, viewID: viewID, turnID: turnID, deadline: deadline,
+            transcript: &transcript, emit: emit
+        )
+        return false
+    }
+
+    /// Dispatches a `workflow_run` call to the unified `WorkflowTool` and
+    /// interprets its structured status: `completed` and `cannot_plan` end
+    /// the turn; every other status (invalid plan, clarification, execution
+    /// failure) rides the ordinary tool loop back to the model so it can
+    /// self-correct. Returns `true` when the turn ended.
+    private func executeWorkflowCall(
+        _ call: ToolCall,
+        narration: String?,
+        workflow: WorkflowTool,
+        workflowResults: WorkflowResultBox,
+        viewID: ViewContext.ID,
+        turnID: Int,
+        deadline: ContinuousClock.Instant?,
+        transcript: inout [TranscriptEntry],
+        emit: @escaping @Sendable (OrchestratorEvent) -> Void
+    ) async throws -> Bool {
         if !options.stream, let narration, !narration.isEmpty {
             emit(.llmDelta(narration))
         }
@@ -1319,98 +1331,68 @@ public actor Orchestrator {
         // A planned `reportFailure` node is the model refusing, not a step to
         // run: end the turn in the failure state instead of executing it as a
         // no-op tool and reporting success.
-        if let reason = failureReason(in: spec.nodes) {
+        if let reason = failureReason(inPlan: call.arguments) {
             await recordFailure(reason, turn: turnID, outcome: .refused)
             emit(.failure(reason: reason))
-            return
+            return true
         }
 
-        let validated = try WorkflowValidator.validate(
-            spec,
-            policy: WorkflowValidationPolicy(descriptors: manifest)
+        // The preToolUse rails see the whole plan — every node input — so
+        // payload rewrites (e.g. PII redaction) land before execution.
+        let prepared = try await prepareToolCall(
+            call, viewID: viewID, turnID: turnID, deadline: deadline, emit: emit
         )
-        let tools = self.tools
-        let workflowGuardrailViolations = WorkflowGuardrailViolationBox()
-        let executor = WorkflowExecutor { node, resolvedInput, _ in
-            do {
-                guard let tool = node.tool else {
-                    throw WorkflowError.missingTool(nodeID: node.id)
-                }
-                let call = ToolCall(
-                    id: "workflow-\(node.id)",
-                    name: tool,
-                    arguments: resolvedInput
-                )
-                let prepared = try await self.prepareToolCall(
-                    call,
-                    viewID: viewID,
-                    turnID: turnID,
-                    deadline: deadline,
-                    emit: emit
-                )
-
-                let outputValue: GeneratedContent
-                do {
-                    outputValue = try await tools.call(prepared.call)
-                } catch {
-                    let output = Self.toolErrorOutput(error)
-                    try await self.finishToolCallFailure(
-                        prepared.call,
-                        output: output,
-                        viewID: viewID,
-                        turnID: turnID,
-                        deadline: deadline,
-                        emit: emit
-                    )
-                    throw error
-                }
-
-                try await self.finishToolCallSuccess(
-                    prepared.call,
-                    output: outputValue.data(),
-                    viewID: viewID,
-                    turnID: turnID,
-                    deadline: deadline,
-                    emit: emit
-                )
-                return outputValue
-            } catch let violation as GuardrailViolation {
-                await workflowGuardrailViolations.record(violation)
-                throw violation
-            }
+        let output = try await withTurnDeadline(deadline) {
+            try await workflow.call(arguments: prepared.call.arguments)
         }
+        let result = await workflowResults.take()
+        if let result {
+            await recordWorkflowNodes(result, viewID: viewID, turnID: turnID, emit: emit)
+        }
+        try await finishToolCallSuccess(
+            prepared.call, output: output.data(),
+            viewID: viewID, turnID: turnID, deadline: deadline, emit: emit
+        )
 
-        let result: WorkflowResult
-        do {
-            result = try await withTurnDeadline(deadline) {
-                try await executor.execute(
-                    validated,
-                    context: WorkflowExecutionContext()
+        switch output.optionalString("status") {
+        case "completed":
+            let finalText = result?.finalText ?? output.optionalString("final_text")
+            let finalValue = result?.finalValue ?? output.property("result")
+            let final = (finalText ?? finalValue.map(WorkflowFinalRenderer.displayString) ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .emptyAsNil
+                ?? "Done."
+            setPhase(.verifying, turn: turnID)
+            _ = try await withTurnDeadline(deadline) {
+                try await self.guardrails.verify(
+                    .finalResult, .finalResult(final)
                 )
             }
-        } catch {
-            if let violation = await workflowGuardrailViolations.first() {
-                throw violation
-            }
-            throw error
-        }
-        if let violation = await workflowGuardrailViolations.first() {
-            throw violation
-        }
+            emit(.verification(stage: .finalResult, outcome: .pass))
+            await recordActivity(viewID: viewID, kind: .llmResponse, text: final, turn: turnID)
+            emit(.finalAnswer(final))
+            return true
 
-        let final = (result.finalText ?? WorkflowFinalRenderer.displayString(result.finalValue))
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .emptyAsNil
-            ?? "Done."
-        setPhase(.verifying, turn: turnID)
-        _ = try await withTurnDeadline(deadline) {
-            try await self.guardrails.verify(
-                .finalResult, .finalResult(final)
-            )
+        case "cannot_plan":
+            let reason = output.optionalString("message")?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .emptyAsNil
+                ?? ReportFailureTool.fallbackReason
+            await recordFailure(reason, turn: turnID, outcome: .refused)
+            emit(.failure(reason: reason))
+            return true
+
+        default:
+            let (entry, resolved) = Self.assistantTurn(text: narration, calls: [prepared.call])
+            transcript.append(entry)
+            transcript.append(.toolResult(
+                id: resolved.first?.id ?? prepared.call.name,
+                name: prepared.call.name,
+                content: String(decoding: output.data(), as: UTF8.self),
+                isError: false
+            ))
+            return false
         }
-        emit(.verification(stage: .finalResult, outcome: .pass))
-        await recordActivity(viewID: viewID, kind: .llmResponse, text: final, turn: turnID)
-        emit(.finalAnswer(final))
     }
 
     private func appendSkippedToolResults(

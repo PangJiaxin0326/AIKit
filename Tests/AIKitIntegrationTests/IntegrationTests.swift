@@ -28,8 +28,7 @@ private actor InvocationFlag {
     }
 
     @Test func fullLoopToolThenFinalAnswer() async throws {
-        let registry = ToolRegistry()
-        await registry.register(NavigateTool { _ in .init(navigated: true) })
+        let tools: [any Tool] = [NavigateTool { _ in .init(navigated: true) }]
 
         let provider = MockProvider(responses: [
             LLMResponse(
@@ -44,7 +43,7 @@ private actor InvocationFlag {
 
         let orchestrator = Orchestrator(
             llm: LLMClient(provider: provider),
-            tools: registry,
+            tools: tools,
             memory: InMemoryMemoryStore(),
             contextResolver: await resolver(toolNames: ["navigate"]),
             guardrails: PolicyEngine(rails: [AllowlistedTools(allowed: ["navigate"])]),
@@ -61,11 +60,10 @@ private actor InvocationFlag {
 
     @Test func blockedToolShortCircuitsAndNeverInvokes() async throws {
         let flag = InvocationFlag()
-        let registry = ToolRegistry()
-        await registry.register(NavigateTool { _ in
+        let tools: [any Tool] = [NavigateTool { _ in
             await flag.mark()
             return .init(navigated: true)
-        })
+        }]
 
         // The model asks for `navigate`, but the policy only allows `searchMemory`.
         let provider = MockProvider(responses: [
@@ -80,7 +78,7 @@ private actor InvocationFlag {
 
         let orchestrator = Orchestrator(
             llm: LLMClient(provider: provider),
-            tools: registry,
+            tools: tools,
             memory: InMemoryMemoryStore(),
             contextResolver: await resolver(toolNames: ["navigate"]),
             guardrails: PolicyEngine(rails: [AllowlistedTools(allowed: ["searchMemory"])]),
@@ -100,11 +98,10 @@ private actor InvocationFlag {
     }
 
     @Test func reportFailureEndsTurnWithReason() async throws {
-        // The host registers only its own tool: `reportFailure` is provided
-        // by the orchestrator itself — neither registered, nor in the
+        // The host hands over only its own tool: `reportFailure` is provided
+        // by the orchestrator itself — neither passed in, nor in the
         // context's toolNames, nor in the allowlist.
-        let registry = ToolRegistry()
-        await registry.register(NavigateTool { _ in .init(navigated: true) })
+        let tools: [any Tool] = [NavigateTool { _ in .init(navigated: true) }]
 
         let provider = MockProvider(responses: [
             LLMResponse(
@@ -118,7 +115,7 @@ private actor InvocationFlag {
 
         let orchestrator = Orchestrator(
             llm: LLMClient(provider: provider),
-            tools: registry,
+            tools: tools,
             memory: InMemoryMemoryStore(),
             contextResolver: await resolver(toolNames: ["navigate"]),
             guardrails: PolicyEngine(rails: [AllowlistedTools(allowed: ["navigate"])]),
@@ -145,11 +142,10 @@ private actor InvocationFlag {
 
     @Test func reportFailureEndsPlanningModeTurnOnDirectCall() async throws {
         let flag = InvocationFlag()
-        let registry = ToolRegistry()
-        await registry.register(NavigateTool { _ in
+        let tools: [any Tool] = [NavigateTool { _ in
             await flag.mark()
             return .init(navigated: true)
-        })
+        }]
 
         // Planning mode rejects direct tool calls as malformed plans — but a
         // direct `reportFailure` call is a refusal and must end the turn.
@@ -165,7 +161,7 @@ private actor InvocationFlag {
 
         let orchestrator = Orchestrator(
             llm: LLMClient(provider: provider),
-            tools: registry,
+            tools: tools,
             memory: InMemoryMemoryStore(),
             contextResolver: await resolver(toolNames: ["navigate"]),
             guardrails: PolicyEngine(),
@@ -185,11 +181,10 @@ private actor InvocationFlag {
 
     @Test func reportFailureWorkflowNodeEndsTurnAsRefusal() async throws {
         let flag = InvocationFlag()
-        let registry = ToolRegistry()
-        await registry.register(NavigateTool { _ in
+        let tools: [any Tool] = [NavigateTool { _ in
             await flag.mark()
             return .init(navigated: true)
-        })
+        }]
 
         // The model phrases the refusal as a one-node workflow plan. It must
         // surface as a failure, not execute as a no-op tool and "succeed".
@@ -207,7 +202,7 @@ private actor InvocationFlag {
 
         let orchestrator = Orchestrator(
             llm: LLMClient(provider: provider),
-            tools: registry,
+            tools: tools,
             memory: InMemoryMemoryStore(),
             contextResolver: await resolver(toolNames: ["navigate"]),
             guardrails: PolicyEngine(),
@@ -228,12 +223,11 @@ private actor InvocationFlag {
         try await withThrowingTaskGroup(of: String?.self) { group in
             for i in 0..<50 {
                 group.addTask {
-                    let registry = ToolRegistry()
                     let resolver = ContextResolver()
                     await resolver.push(ViewContext(id: .init("v\(i)"), displayName: "V"))
                     let orchestrator = Orchestrator(
                         llm: LLMClient(provider: MockProvider(finalText: "answer-\(i)")),
-                        tools: registry,
+                        tools: [],
                         memory: InMemoryMemoryStore(),
                         contextResolver: resolver,
                         guardrails: PolicyEngine(),

@@ -38,43 +38,21 @@ private func generatedValue<Value: ConvertibleFromGeneratedContent>(
     try Value(GeneratedContent(data: data))
 }
 
-@Suite struct ToolRegistryTests {
-    @Test func registerInvokeAndMemory() async throws {
-        let registry = ToolRegistry()
+@Suite struct ToolDispatchTests {
+    @Test func invokeRecordsMemoryAndEchoes() async throws {
         let memory = InMemoryMemoryStore()
-        await registry.register(EchoTool(memory: memory))
-        let input = jsonData(EchoTool.Input(text: "hi"))
-        let outData = try await registry.call(name: "echo", jsonArguments: input)
-        let output = try generatedValue(EchoTool.Output.self, from: outData)
+        let output = try EchoTool.Output(
+            await WorkflowExecutor.callTool(
+                EchoTool(memory: memory),
+                with: EchoTool.Input(text: "hi").generatedContent
+            )
+        )
         #expect(output.echoed == "hi")
 
         let recent = try await memory.recent(limit: 10, view: nil)
         #expect(recent.count == 1)
         #expect(recent.first?.kind == .toolInvoked)
         #expect(recent.first?.payloadText == "echo:hi")
-    }
-
-    @Test func manifestSubsetting() async {
-        let registry = ToolRegistry()
-        await registry.register(EchoTool(memory: InMemoryMemoryStore()))
-        await registry.register(SearchMemoryTool(memory: InMemoryMemoryStore()))
-        let subset = await registry.manifest(for: ["echo"])
-        #expect(subset.map(\.name) == ["echo"])
-    }
-
-    @Test func emptyManifestHasNoTools() async {
-        let registry = ToolRegistry()
-        await registry.register(EchoTool(memory: InMemoryMemoryStore()))
-        let manifest = await registry.manifest(for: [])
-        #expect(manifest.isEmpty)
-    }
-
-    @Test func registeredDescriptorsReturnsAllTools() async {
-        let registry = ToolRegistry()
-        await registry.register(EchoTool(memory: InMemoryMemoryStore()))
-        await registry.register(SearchMemoryTool(memory: InMemoryMemoryStore()))
-        let all = await registry.registeredDescriptors()
-        #expect(all.map(\.name) == ["echo", "searchMemory"])
     }
 
     @Test func builtInDescriptorsExposeWorkflowMetadata() {
@@ -85,12 +63,11 @@ private func generatedValue<Value: ConvertibleFromGeneratedContent>(
         #expect(search.outputSchema != nil)
     }
 
-    @Test func unknownToolThrows() async {
-        let registry = ToolRegistry()
-        await #expect(throws: ToolRegistryError.self) {
-            try await registry.call(
-                name: "nope",
-                jsonArguments: Data("{}".utf8)
+    @Test func mismatchedArgumentsFailBeforeTheToolRuns() async {
+        await #expect(throws: GenericToolError.self) {
+            try await WorkflowExecutor.callTool(
+                EchoTool(memory: InMemoryMemoryStore()),
+                with: GeneratedContent(json: #"{"text": 42}"#)
             )
         }
     }
@@ -411,24 +388,21 @@ private func generatedValue<Value: ConvertibleFromGeneratedContent>(
 @Suite struct AIKitConfigurationToolTests {
     @Test func configurationToolsReadAndMutateStore() async throws {
         let store = AIKitConfigurationStore()
-        let registry = ToolRegistry()
-        await AIKitConfigurationTools.register(in: registry, store: store)
+        let tools = AIKitConfigurationTools.all(store: store)
 
-        let names = await registry.registeredNames()
-        #expect(names.contains(GetAIKitConfigurationTool.toolName))
-        #expect(names.contains(SetAIKitConfigurationTool.toolName))
+        #expect(Set(tools.map(\.name)) == AIKitConfigurationTools.toolNames)
 
+        let setTool = try #require(
+            tools.first { $0.name == SetAIKitConfigurationTool.toolName }
+        )
         let setInput = SetAIKitConfigurationTool.Input(
             section: .runtime,
             key: "maxIterations",
             value: .int(4)
         )
-        let setData = jsonData(setInput)
-        let outputData = try await registry.call(
-            name: SetAIKitConfigurationTool.toolName,
-            jsonArguments: setData
+        let output = try SetAIKitConfigurationTool.Output(
+            await WorkflowExecutor.callTool(setTool, with: setInput.generatedContent)
         )
-        let output = try generatedValue(SetAIKitConfigurationTool.Output.self, from: outputData)
 
         #expect(output.applied)
         #expect(output.configuration.objectValue?["runtime"]?.objectValue?["maxIterations"]?.intValue == 4)
@@ -436,12 +410,14 @@ private func generatedValue<Value: ConvertibleFromGeneratedContent>(
         let snapshot = await store.snapshot()
         #expect(snapshot.runtime.maxIterations == 4)
 
-        let getData = jsonData(GetAIKitConfigurationTool.Input())
-        let readData = try await registry.call(
-            name: GetAIKitConfigurationTool.toolName,
-            jsonArguments: getData
+        let getTool = try #require(
+            tools.first { $0.name == GetAIKitConfigurationTool.toolName }
         )
-        let read = try generatedValue(GetAIKitConfigurationTool.Output.self, from: readData)
+        let read = try GetAIKitConfigurationTool.Output(
+            await WorkflowExecutor.callTool(
+                getTool, with: GetAIKitConfigurationTool.Input().generatedContent
+            )
+        )
         #expect(read.configuration.objectValue?["runtime"]?.objectValue?["maxIterations"]?.intValue == 4)
         #expect(read.recentChanges.arrayValue?.count == 1)
     }
@@ -463,7 +439,6 @@ private func generatedValue<Value: ConvertibleFromGeneratedContent>(
 
         #expect(configuration.core.temperature == 0.2)
         #expect(configuration.runtime.workflowPlanning)
-        #expect(configuration.runtime.leanWorkflowSchema)
         #expect(configuration.runtime.twoRoundAutoBind)
         #expect(configuration.runtime.twoRoundStructuredPlannerOutput == false)
     }
@@ -482,7 +457,6 @@ private func generatedValue<Value: ConvertibleFromGeneratedContent>(
         #expect(runtime.streamsResponses == false)
         #expect(runtime.maxIterations == 3)
         #expect(runtime.workflowPlanning)
-        #expect(runtime.leanWorkflowSchema)
         #expect(runtime.twoRoundAutoBind)
         #expect(runtime.twoRoundStructuredPlannerOutput == false)
     }
@@ -492,7 +466,7 @@ private func generatedValue<Value: ConvertibleFromGeneratedContent>(
 
         _ = try await store.set(
             section: .runtime,
-            key: "leanWorkflowSchema",
+            key: "twoRoundAutoBind",
             value: .bool(false)
         )
         _ = try await store.set(
@@ -502,7 +476,7 @@ private func generatedValue<Value: ConvertibleFromGeneratedContent>(
         )
 
         let snapshot = await store.snapshot()
-        #expect(snapshot.runtime.leanWorkflowSchema == false)
+        #expect(snapshot.runtime.twoRoundAutoBind == false)
         #expect(snapshot.runtime.twoRoundStructuredPlannerOutput)
     }
 
