@@ -965,6 +965,17 @@ extension VolcengineArkLanguageModelExecutor: FoundationModels.LanguageModelExec
             // `response_format` JSON-schema constraint.
             extraBody["response_format"] = try VolcengineArkJSONValue.responseFormat(for: schema)
         }
+        // Foundation Models tool-calling mode maps onto Ark's OpenAI-style
+        // `tool_choice`. `required` makes the model emit ONLY tool calls (no
+        // prose preamble) — the lever for single-purpose routing stages.
+        switch request.generationOptions.toolCallingMode?.kind {
+        case .required:
+            extraBody["tool_choice"] = .string("required")
+        case .disallowed:
+            extraBody["tool_choice"] = .string("none")
+        default:
+            break  // .allowed / nil → Ark's default "auto"
+        }
         let arkRequest = VolcengineArkRequest(
             model: model.configuration.model,
             messages: messages.isEmpty ? [.init(role: .user, text: "")] : messages,

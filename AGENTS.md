@@ -2,15 +2,17 @@
 
 This is the reproduction guide for the **scoped workflow (select-then-work)
 agent**: one native `LanguageModelSession` over AIToolKit's
-`ScopedWorkflowProfile`, two staged LLM calls — the model first *declares
-the tool ids* the request needs against the user-visible catalogue, then
-does *all the work* against only the selected tools and the assistive unit
-requests registered on them. **Both steps are ended by the host, in code**
-(throwing hooks), never by a model signal or a closing text turn. The
-pieces live in the sibling package **AIToolKit** (`AssistiveTool.swift`,
+`ScopedWorkflowProfile`, two staged LLM calls — the model first *names the
+finishing tools* the request needs (a plain-text reply against the rendered
+catalogue, tool calling disallowed), then does *all the work* against only
+the selected tools and the assistive unit requests registered on them.
+**Both steps are ended by host configuration, in code** — no model
+completion signal, no closing text turn after acting. The pieces live in
+the sibling package **AIToolKit** (`AssistiveTool.swift`,
 `ScopedWorkflowProfile.swift` — including `WorkTurnMonitor`, the host-side
 stop); the cloud model executor is `VolcengineArkFoundationModels` (nested
-in this repo).
+in this repo), which maps `GenerationOptions.toolCallingMode` to the wire's
+`tool_choice`.
 
 > Earlier paradigms were removed from this guide as they were superseded:
 > the lean-plan DAG (library code survives at AIKit `81d3323` / AIToolKit
@@ -22,11 +24,15 @@ in this repo).
 
 ```
 ONE LanguageModelSession(profile: ScopedWorkflowProfile…)
-  step .scope  →  instructions: select, don't act
-                  tools: the FINISHING catalogue + select_tools
-                  ends ON ARRIVAL of the select_tools call (throwing
-                  onToolCall) — one LLM round, nothing executes
-  host flips session.properties.scopedWorkflowStage = .work
+  step .scope  →  instructions: name the tools, nothing else — the
+                  finishing-tool catalogue is RENDERED INTO the
+                  instructions as text; tool calling is DISALLOWED
+                  (tool_choice: none), so the model answers in plain text
+                  with the bare tool-name list (~3 output tokens) and
+                  cannot act prematurely by configuration.
+                  One round, ends on its own short text turn.
+  host parses the names (parseSelection), flips
+                  session.properties.scopedWorkflowStage = .work,
                   and sets the historyTransform cut index
   step .work   →  instructions: the whole job + injected local deictic state
                   tools: SELECTED finishing tools + their registered
@@ -47,10 +53,11 @@ ONE LanguageModelSession(profile: ScopedWorkflowProfile…)
   and return one compact fact string. Lookup misses return descriptive
   strings ("no contact matches 'x'"), never throw.
 - **The user intent is sent in BOTH calls.** The selection is the only
-  thing that crosses the stage boundary, and it crosses host-side
-  (recorded in the `onToolCall` hook). A cut-index `historyTransform`
-  drops every scope-step entry, so neither call carries the other's tool
-  set or context — the context-budget property: the full catalogue is
+  thing that crosses the stage boundary, and it crosses host-side. A
+  cut-index `historyTransform` drops every scope-step entry, so neither
+  call carries the other's tool set or context. The catalogue rendered as
+  `name: description` text costs ~150 tokens for 4 tools where the JSON
+  manifests with argument schemas cost ~900 — the full tool surface is
   never co-resident with lookups, facts, or local state.
 - **Local/deictic state** is injected into the work-step instructions by
   the host; the scope step never sees it, and no LLM round reads it.
@@ -68,9 +75,9 @@ let model = VolcengineArkLanguageModel(configuration: .init(
 
 let monitor = WorkTurnMonitor(finishingToolNames: finishingNames)
 let profile = ScopedWorkflowProfile(
-    scopeInstructions: { scopeText },           // select, don't act
+    scopeInstructions: { scopeText },           // name the tools, nothing else
     workInstructions: { workText(localState) }, // the whole job + deictic state
-    catalogue: finishing + [SelectToolsTool()],
+    catalogue: finishing,                       // rendered into scope instructions
     workTools: { state.selected() }             // selected + their registered assistive
 )
 .model(model)
@@ -83,15 +90,9 @@ let profile = ScopedWorkflowProfile(
         return i >= state.cutIndex ? e : nil
     }
 }
-.onToolCall { call in                            // fires BEFORE execution
-    guard state.stage == .scope else { return monitor.recordCall(call) }
-    if call.toolName == SelectToolsTool.toolName {
-        state.selection = ScopedWorkflowProfile.parseSelection(
-            (try? TextArgument(call.arguments))?.value ?? "",
-            from: finishingNames)
-        throw ScopeSelectionComplete()
-    }
-    throw ScopeStepViolation(toolName: call.toolName)  // blocks premature actions
+.onToolCall { call in
+    if state.stage == .work { monitor.recordCall(call) }
+    // scope-step calls are impossible: tool_choice is "none" on the wire
 }
 .onToolOutput { call, _ in
     // The work step ends HERE, in code: turn fully executed + ≥1 action.
@@ -102,25 +103,37 @@ let profile = ScopedWorkflowProfile(
 .transcriptErrorHandlingPolicy(.preserveTranscript)
 
 let session = LanguageModelSession(profile: profile)
-_ = try? await session.respond(to: "User request: \(userText)\n\nSelect the task tools this request needs.")
+// call 1 — one short text turn; parse the names out of it
+let text = try await session.respond(to: "User request: \(userText)\n\nSelect the task tools this request needs.").content
+state.selection = ScopedWorkflowProfile.parseSelection(text, from: finishingNames)
 state.cutIndex = session.transcript.count
 state.stage = .work
 session.properties.scopedWorkflowStage = .work
+// call 2… — host-stopped by WorkTurnMonitor; give 2 corrective rounds
 _ = try await session.respond(to: "User request: \(userText)\n\nComplete this request now.")
 ```
 
 For token accounting, install `VolcengineArkUsageMonitor.setHandler { … }` —
 the FM session surface does not expose provider usage.
 
-## 3. The host stop (why it is safe, and the traps)
+## 3. Why the selection is text, and the host stop
 
-`WorkTurnMonitor` counts the current tool turn from the hooks. Verified on
-the OS 27 SDK: ALL of a parallel batch's `onToolCall`s fire **before the
-first tool executes**, so the monitor knows the turn's size before any
-output lands. Completion = `outputs == calls` AND ≥1 finishing output.
-Therefore: a batched sibling action is never cancelled by the throw; a
-pure-lookup turn never stops the session; a refusal (no finishing call)
-ends on its normal text turn with no special case.
+**Text, not a tool call:** on an OpenAI-style wire, any tool call bills
+~30+ output tokens — the function-call envelope costs ~20 invisible tokens
+on top of the visible JSON (measured on Doubao; `tool_choice: required`
+does not shrink it). The bare tool-name list as text is ~3 tokens, and
+`toolCallingMode(.disallowed)` makes premature actions impossible by
+configuration — no hook guard, no violation handling.
+`maximumResponseTokens` (profile init parameter, default 64) is the ramble
+backstop; a truncated reply still substring-parses.
+
+**The host stop:** `WorkTurnMonitor` counts the current tool turn from the
+hooks. Verified on the OS 27 SDK: ALL of a parallel batch's `onToolCall`s
+fire **before the first tool executes**, so the monitor knows the turn's
+size before any output lands. Completion = `outputs == calls` AND ≥1
+finishing output. Therefore: a batched sibling action is never cancelled
+by the throw; a pure-lookup turn never stops the session; a refusal (no
+finishing call) ends on its normal text turn with no special case.
 
 The traps — each one cost a battery:
 
@@ -129,29 +142,34 @@ The traps — each one cost a battery:
    entry in place before the transform runs. A naive `dropFirst(cut)` cuts
    the NEW instructions off and the work step runs with no system prompt
    at all (signature: deictic tasks fail, should-refuse tasks act).
-2. **Unwrap sentinels from `.onToolCall`.** They reach the host wrapped in
-   `LanguageModelSession.ToolCallError(tool:underlyingError:)` — match on
-   `underlyingError`. (`.onToolOutput` throws propagate raw.)
-3. **Validate like a real backend.** Small models batch an action WITH the
+2. **Disallowed tool calling strips the tools from the request.** With
+   `toolCallingMode(.disallowed)` the runtime sends NO tool definitions —
+   a catalogue registered as tools silently vanishes (symptom: the scope
+   step's input tokens collapse and the model guesses names). Render the
+   catalogue into the scope instructions; `ScopedWorkflowProfile` does
+   this itself.
+3. **Unwrap `LanguageModelSession.ToolCallError`.** An error thrown inside
+   a tool's `call` (e.g. argument validation) reaches the host wrapped in
+   `ToolCallError(tool:underlyingError:)` — match on `underlyingError`.
+   (`.onToolOutput` throws — the host stop — propagate raw.)
+4. **Validate like a real backend.** Small models batch an action WITH the
    lookup it depends on, binding `{{placeholders}}` or empty strings.
    Finishing tools must reject empty/unknown ids, garbage timestamps, and
    malformed tokens with a thrown error; a corrective respond (give the
-   work step two) then fixes the run. Accepting an empty recipient
-   silently is the dishonest behavior.
-4. **Echo lineage in chain-shaped tools.** A tool whose output feeds its
+   work step two) then fixes the run.
+5. **Echo lineage in chain-shaped tools.** A tool whose output feeds its
    next call should echo its input (`next token: X (derived from 'Y')`) —
    bare opaque outputs make small models commit the wrong iteration.
-5. **No model-side completion signal.** Don't add a `task_complete` tool:
+6. **No model-side completion signal.** Don't add a `task_complete` tool:
    it reintroduces forgotten-signal rounds and fire-and-forget failures
-   the host stop eliminates.
-6. **Graceful fallbacks.** A text answer in the scope step is parsed for
-   tool names (`parseSelection`, substring match); an empty selection
-   scopes ALL finishing tools.
+   the host stop eliminates — and its call envelope alone costs 10× the
+   text selection.
 
 ## 4. Prompt rails that are measured to matter
 
-Scope step: "that selection is your ONLY job — do NOT perform the request,
-do NOT call any task tool; call select_tools exactly once"; "select every
+Scope step: "that selection is your ONLY job — the tools cannot be called
+in this step and the request must not be performed; reply with ONLY the
+needed task tool names, comma-separated, nothing else"; "select every
 action the request requires; if unsure between two tools, include both;
 lookups and missing details are handled in the next step" (refusal
 decisions belong to the work step, which has the local state).
@@ -160,34 +178,35 @@ Work step: "batch ALL independent lookups into ONE turn as parallel tool
 calls" (with `parallel_tool_calls` on the wire); "NEVER call an action tool
 in the same turn as a lookup it depends on"; "issue ALL the action calls
 together in ONE final turn once every id they need is in hand — the
-session ends when that turn completes; an action issued in a later turn
-will never run" (mandatory: this makes the host stop
+session ends when that turn completes" (mandatory: it makes the host stop
 complete-by-construction); "when the request specifies a NUMBER of
-repeated calls, count your calls"; ALWAYS inject the local-state block
-including explicit "none selected"/"AMBIGUOUS — do not guess" lines, with
-the rail that deictic references "are ALREADY resolved in the local device
-state above — do NOT try to look them up (the tools cannot see the user's
+repeated calls, count your calls"; "never write prose in a turn that
+contains tool calls"; ALWAYS inject the local-state block including
+explicit "none selected"/"AMBIGUOUS — do not guess" lines, with the rail
+that deictic references "are ALREADY resolved in the local device state
+above — do NOT try to look them up (the tools cannot see the user's
 screen)" and the refusal rule (none/AMBIGUOUS → explain, perform NO
 action).
 
-## 5. Cost model (so the latency numbers don't surprise you)
+## 5. Cost model (so the numbers don't surprise you)
 
-Every call is structurally necessary: the scope call, one round per
-dependent hop, the final action turn (stopped mid-flight by the host).
+Every call is structurally necessary: the scope call (~330 input tokens,
+~3 output), one round per dependent hop, the final action turn (~100
+output tokens for a typical action; stopped mid-flight by the host).
 Deictic and refusal tasks = 2 calls; one-lookup actions = 3 (an action
 cannot be issued before the lookup's result exists); a depth-N opaque
 chain = N+2. Nothing below that is reachable in a session paradigm without
 host-side dataflow execution — which is the retired DAG. Measured (20-task
-light/medium battery, host-stop build): pro 20/20, step-1 mean 2.35 s,
-total mean 8.48 s; mini 19/20 (95%), step-1 mean 1.19 s, total mean
-4.70 s.
+light/medium battery, text-selection build): mini **20/20**, step-1 0.76 s
+mean at 3 output tokens, total mean 3.51 s.
 
 ## 6. Reproduce checklist
 
 - [ ] Finishing tools conform to `ScopedFinishingTool` and register their
       assistive tools; assistive misses return strings.
-- [ ] Scope step: catalogue + `SelectToolsTool` only; throwing `onToolCall`
-      records the selection and blocks any other call.
+- [ ] Scope step: catalogue handed to the profile (it renders the text);
+      NO tools callable; reply parsed with `parseSelection`; empty
+      selection falls back to the full finishing set.
 - [ ] Cut-index `historyTransform` that KEEPS entry 0.
 - [ ] `WorkTurnMonitor` fed from both hooks; `WorkflowStageComplete` thrown
       from `onToolOutput` when it reports completion. NO task_complete tool.
