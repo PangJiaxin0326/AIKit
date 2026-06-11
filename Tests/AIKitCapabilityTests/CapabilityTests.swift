@@ -6,6 +6,26 @@ import Testing
 import AIKitCore
 import AIToolKit
 
+
+/// Test-side typed dispatch: decode `GeneratedContent` arguments, run the
+/// official tool, re-encode the output (what the removed workflow executor's
+/// `callTool` used to provide).
+private func callTool<T: Tool>(
+    _ tool: T, with input: GeneratedContent
+) async throws -> GeneratedContent {
+    let arguments: T.Arguments
+    do {
+        arguments = try T.Arguments(input)
+    } catch {
+        throw GenericToolError(message: "arguments failed to decode: \(error)")
+    }
+    let output = try await tool.call(arguments: arguments)
+    guard let convertible = output as? any ConvertibleToGeneratedContent else {
+        throw GenericToolError(message: "output does not convert to GeneratedContent")
+    }
+    return convertible.generatedContent
+}
+
 private struct EchoTool: Tool {
     @Generable
     struct Input: Codable, Sendable { var text: String }
@@ -42,7 +62,7 @@ private func generatedValue<Value: ConvertibleFromGeneratedContent>(
     @Test func invokeRecordsMemoryAndEchoes() async throws {
         let memory = InMemoryMemoryStore()
         let output = try EchoTool.Output(
-            await WorkflowExecutor.callTool(
+            await callTool(
                 EchoTool(memory: memory),
                 with: EchoTool.Input(text: "hi").generatedContent
             )
@@ -65,7 +85,7 @@ private func generatedValue<Value: ConvertibleFromGeneratedContent>(
 
     @Test func mismatchedArgumentsFailBeforeTheToolRuns() async {
         await #expect(throws: GenericToolError.self) {
-            try await WorkflowExecutor.callTool(
+            try await callTool(
                 EchoTool(memory: InMemoryMemoryStore()),
                 with: GeneratedContent(json: #"{"text": 42}"#)
             )
@@ -401,7 +421,7 @@ private func generatedValue<Value: ConvertibleFromGeneratedContent>(
             value: .int(4)
         )
         let output = try SetAIKitConfigurationTool.Output(
-            await WorkflowExecutor.callTool(setTool, with: setInput.generatedContent)
+            await callTool(setTool, with: setInput.generatedContent)
         )
 
         #expect(output.applied)
@@ -414,7 +434,7 @@ private func generatedValue<Value: ConvertibleFromGeneratedContent>(
             tools.first { $0.name == GetAIKitConfigurationTool.toolName }
         )
         let read = try GetAIKitConfigurationTool.Output(
-            await WorkflowExecutor.callTool(
+            await callTool(
                 getTool, with: GetAIKitConfigurationTool.Input().generatedContent
             )
         )
@@ -434,16 +454,13 @@ private func generatedValue<Value: ConvertibleFromGeneratedContent>(
         #expect(snapshot.capability.enabledToolNames == ["navigate", "searchMemory"])
     }
 
-    @Test func runtimeDefaultsFollowWorkflowGuidance() {
+    @Test func runtimeDefaultsFollowGuidance() {
         let configuration = AIKitConfiguration.standard
 
         #expect(configuration.core.temperature == 0.2)
-        #expect(configuration.runtime.workflowPlanning)
-        #expect(configuration.runtime.twoRoundAutoBind)
-        #expect(configuration.runtime.twoRoundStructuredPlannerOutput == false)
     }
 
-    @Test func runtimeDecodesMissingWorkflowFieldsWithDefaults() throws {
+    @Test func runtimeDecodesMissingFieldsWithDefaults() throws {
         let data = Data("""
         {
           "streamsResponses": false,
@@ -456,28 +473,6 @@ private func generatedValue<Value: ConvertibleFromGeneratedContent>(
 
         #expect(runtime.streamsResponses == false)
         #expect(runtime.maxIterations == 3)
-        #expect(runtime.workflowPlanning)
-        #expect(runtime.twoRoundAutoBind)
-        #expect(runtime.twoRoundStructuredPlannerOutput == false)
-    }
-
-    @Test func configurationStoreAcceptsWorkflowRuntimeUpdates() async throws {
-        let store = AIKitConfigurationStore()
-
-        _ = try await store.set(
-            section: .runtime,
-            key: "twoRoundAutoBind",
-            value: .bool(false)
-        )
-        _ = try await store.set(
-            section: .runtime,
-            key: "twoRoundStructuredPlannerOutput",
-            value: .bool(true)
-        )
-
-        let snapshot = await store.snapshot()
-        #expect(snapshot.runtime.twoRoundAutoBind == false)
-        #expect(snapshot.runtime.twoRoundStructuredPlannerOutput)
     }
 
     @Test func coreStoresProviderConfigurationsIndependently() {

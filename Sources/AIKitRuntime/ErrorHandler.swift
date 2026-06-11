@@ -25,12 +25,6 @@ public actor ErrorHandler {
             return .abort(error)
 
         case .malformedOutput:
-            if case OutputParser.ParserError.malformedWorkflow = error {
-                return .abort(error)
-            }
-            if error is WorkflowError {
-                return .abort(error)
-            }
             let detail: String
             if case OutputParser.ParserError.malformedToolInput(let name, let raw) = error {
                 detail = "Your previous tool call to '\(name)' had malformed JSON input: \(raw)."

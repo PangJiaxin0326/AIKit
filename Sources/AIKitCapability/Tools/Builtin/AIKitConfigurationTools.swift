@@ -109,8 +109,7 @@ public struct SetAIKitConfigurationTool: Tool {
     runtime, and safety. Useful keys include model, activeProvider (Volcengine \
     Ark or Apple Intelligence), availableModels, \
     endpointURL, enabledToolNames, systemPromptFragment, maxIterations, \
-    streamsResponses, toolCallFallback, workflowPlanning, twoRoundAutoBind, \
-    twoRoundStructuredPlannerOutput, enabledGuardrailIDs, and \
+    streamsResponses, toolCallFallback, enabledGuardrailIDs, and \
     outputLengthLimit.
     """
     public var name: String { Self.toolName }

@@ -8,7 +8,7 @@ import AIKitCore
 /// `Orchestrator` provides it by default: it is auto-registered on first
 /// use and advertised alongside any view that exposes at least one tool,
 /// so hosts neither register it nor list it in `ViewContext.toolNames`.
-/// The runtime intercepts it by name — as a direct call, a workflow node,
+/// The runtime intercepts it by name — as a direct call,
 /// or a two-round plan node — and ends the turn in a failure state
 /// carrying `reason`, so it never actually runs `call`.
 public struct ReportFailureTool: Tool {
@@ -43,7 +43,7 @@ public struct ReportFailureTool: Tool {
         "The assistant could not confidently complete this request."
 
     /// The trimmed `reason` from a `reportFailure` invocation's arguments
-    /// (a direct tool call's arguments or a workflow node's `input`), or
+    /// (a direct tool call's arguments), or
     /// `fallbackReason` when the model omitted it.
     public static func reason(from arguments: GeneratedContent) -> String {
         guard let fields = arguments.objectValue,

@@ -30,7 +30,6 @@ public enum PromptBuilder {
         memory: [UsageEvent],
         transcript: [TranscriptEntry],
         toolManifest: [ToolDescriptor],
-        workflow: WorkflowTool? = nil,
         model: String,
         temperature: Double? = nil,
         maxTokens: Int? = nil,
@@ -57,13 +56,7 @@ public enum PromptBuilder {
                 || $0.name == ReportFailureTool.toolName
         }
 
-        // In planning mode the model sees ONE tool — the workflow — whose
-        // schema and instructions AIToolKit builds from the leaf tools. The
-        // instructions carry the manifest and the load-bearing worked example.
-        if let workflow, !tools.isEmpty {
-            systemParts.append(workflow.instructions())
-            tools = [workflow.descriptor]
-        } else if toolCallFallbackHint, !tools.isEmpty {
+        if toolCallFallbackHint, !tools.isEmpty {
             systemParts.append(toolFallbackInstruction)
         }
 

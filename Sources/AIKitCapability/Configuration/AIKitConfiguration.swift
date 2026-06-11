@@ -195,36 +195,24 @@ public struct AIKitConfiguration: Codable, Sendable, Hashable {
         public var maxIterations: Int
         public var maxTurnDuration: TimeInterval?
         public var toolCallFallback: ToolCallFallbackMode
-        public var workflowPlanning: Bool
-        public var twoRoundAutoBind: Bool
-        public var twoRoundStructuredPlannerOutput: Bool
 
         private enum CodingKeys: String, CodingKey {
             case streamsResponses
             case maxIterations
             case maxTurnDuration
             case toolCallFallback
-            case workflowPlanning
-            case twoRoundAutoBind
-            case twoRoundStructuredPlannerOutput
         }
 
         public init(
             streamsResponses: Bool = true,
             maxIterations: Int = 8,
             maxTurnDuration: TimeInterval? = nil,
-            toolCallFallback: ToolCallFallbackMode = .automatic,
-            workflowPlanning: Bool = true,
-            twoRoundAutoBind: Bool = true,
-            twoRoundStructuredPlannerOutput: Bool = false
+            toolCallFallback: ToolCallFallbackMode = .automatic
         ) {
             self.streamsResponses = streamsResponses
             self.maxIterations = maxIterations
             self.maxTurnDuration = maxTurnDuration
             self.toolCallFallback = toolCallFallback
-            self.workflowPlanning = workflowPlanning
-            self.twoRoundAutoBind = twoRoundAutoBind
-            self.twoRoundStructuredPlannerOutput = twoRoundStructuredPlannerOutput
         }
 
         public init(from decoder: any Decoder) throws {
@@ -245,18 +233,6 @@ public struct AIKitConfiguration: Codable, Sendable, Hashable {
                 ToolCallFallbackMode.self,
                 forKey: .toolCallFallback
             ) ?? .automatic
-            self.workflowPlanning = try container.decodeIfPresent(
-                Bool.self,
-                forKey: .workflowPlanning
-            ) ?? true
-            self.twoRoundAutoBind = try container.decodeIfPresent(
-                Bool.self,
-                forKey: .twoRoundAutoBind
-            ) ?? true
-            self.twoRoundStructuredPlannerOutput = try container.decodeIfPresent(
-                Bool.self,
-                forKey: .twoRoundStructuredPlannerOutput
-            ) ?? false
         }
 
         public func encode(to encoder: any Encoder) throws {
@@ -265,12 +241,6 @@ public struct AIKitConfiguration: Codable, Sendable, Hashable {
             try container.encode(maxIterations, forKey: .maxIterations)
             try container.encodeIfPresent(maxTurnDuration, forKey: .maxTurnDuration)
             try container.encode(toolCallFallback, forKey: .toolCallFallback)
-            try container.encode(workflowPlanning, forKey: .workflowPlanning)
-            try container.encode(twoRoundAutoBind, forKey: .twoRoundAutoBind)
-            try container.encode(
-                twoRoundStructuredPlannerOutput,
-                forKey: .twoRoundStructuredPlannerOutput
-            )
         }
     }
 
@@ -515,12 +485,6 @@ extension AIKitConfiguration {
             runtime.maxTurnDuration = try value.optionalDouble(section: .runtime, key: originalKey)
         case "toolfallback", "toolcallfallback":
             runtime.toolCallFallback = try value.toolCallFallbackMode(section: .runtime, key: originalKey)
-        case "workflow", "workflowplanning":
-            runtime.workflowPlanning = try value.bool(section: .runtime, key: originalKey)
-        case "tworoundautobind", "autobind":
-            runtime.twoRoundAutoBind = try value.bool(section: .runtime, key: originalKey)
-        case "tworoundstructuredplanner", "tworoundstructuredplanneroutput", "structuredplanneroutput":
-            runtime.twoRoundStructuredPlannerOutput = try value.bool(section: .runtime, key: originalKey)
         default:
             throw AIKitConfigurationError.unknownKey(section: .runtime, key: originalKey)
         }

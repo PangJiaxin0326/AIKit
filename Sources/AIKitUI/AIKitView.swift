@@ -1143,15 +1143,6 @@ public struct AIKitView: View {
                 aiKitText("Tool fallback")
             }
             .pickerStyle(.segmented)
-            Toggle(isOn: binding(\.runtime.workflowPlanning)) {
-                aiKitText("Workflow planning")
-            }
-            Toggle(isOn: binding(\.runtime.twoRoundAutoBind)) {
-                aiKitText("Two-round auto-bind")
-            }
-            Toggle(isOn: binding(\.runtime.twoRoundStructuredPlannerOutput)) {
-                aiKitText("Structured planner output")
-            }
         }
     }
 

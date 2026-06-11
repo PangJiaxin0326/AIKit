@@ -175,23 +175,18 @@ a pure function or an actor owning a small slice of state. One `run(_:)` call is
 one turn: it may loop through several LLM↔tool iterations, with guardrails run
 at four stages (`prePrompt`, `preToolUse`, `postToolUse`, `finalResult`).
 
-For low-latency mobile agents, AIKit also supports AIToolKit `WorkflowSpec`:
-the model can emit one topological JSON DAG containing multiple ordered or
-dependent tool nodes, and the device executes those nodes locally without a
-second LLM pass. In workflow-planning mode, providers see only the synthetic
-`workflow_run` tool; app tools are supplied as catalog context. AIKit defaults
-this path to AIToolKit's lean schema, fixed worked example, and temperature
-0.2 guidance to reduce output tokens while keeping graph structure reliable.
+For multi-step agents, the recommended paradigm is AIToolKit's
+**profile-based workflow**: one native `LanguageModelSession` over
+`WorkflowProfile`, staged by the `\.workflowStage` session property — a
+gather stage seeing only `AssistiveTool` unit requests (scalar arguments,
+tiny manifests), then an act stage seeing only the user-visible finishing
+tools with local deictic state injected into its instructions. The DAG
+workflow layer of earlier generations (`WorkflowSpec`, `workflow_run`,
+planner/binder) was removed; it survives at `81d3323` and earlier.
 
-For local/private context tasks, use `runWorkflowTask(...)` or the built-in
-tool pair `WorkflowPlanTool` → `WorkflowExecuteTool`: the planner can declare
-context slots, AIKit harvests trusted local candidates, auto-bind skips the
-binder when the result is unambiguous, and `WorkflowPlanCache` can skip
-repeated planner calls.
-
-The current two-round-trip reproduction recipe is intentionally not duplicated
-here. Treat [AGENTS.md](AGENTS.md) as the single source of truth for paradigm
-choice, prompt/schema contract, model settings, and measured expectations.
+The current reproduction recipe is intentionally not duplicated here. Treat
+[AGENTS.md](AGENTS.md) as the single source of truth for the paradigm,
+prompt rails, model settings, and the honest cost model.
 
 ## Testing
 

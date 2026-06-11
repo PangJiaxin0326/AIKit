@@ -974,7 +974,15 @@ extension VolcengineArkLanguageModelExecutor: FoundationModels.LanguageModelExec
             extraBody: extraBody
         )
 
+        let started = ContinuousClock.now
         let response = try await complete(arkRequest)
+        let elapsed = ContinuousClock.now - started
+        VolcengineArkUsageMonitor.report(
+            usage: response.usage,
+            model: response.model ?? model.configuration.model,
+            duration: Double(elapsed.components.seconds)
+                + Double(elapsed.components.attoseconds) / 1e18
+        )
         let entryID = response.id ?? UUID().uuidString
         await channel.send(.response(
             entryID: entryID,

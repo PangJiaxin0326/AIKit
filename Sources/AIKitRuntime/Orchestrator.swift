@@ -34,22 +34,6 @@ private extension String {
     }
 }
 
-/// Captures the host-observability `WorkflowResult` a `WorkflowTool` reports
-/// via `onResult`, so the orchestrator can record node activity after the
-/// call returns (the model itself only sees the final value).
-private actor WorkflowResultBox {
-    private var latest: WorkflowResult?
-
-    func record(_ result: WorkflowResult) {
-        latest = result
-    }
-
-    func take() -> WorkflowResult? {
-        defer { latest = nil }
-        return latest
-    }
-}
-
 /// A UI-friendly snapshot of the runtime state the orchestrator already owns.
 public struct OrchestratorSnapshot: Sendable, Hashable {
     public var contexts: [ViewContext]
@@ -327,12 +311,6 @@ public actor Orchestrator {
         /// prompted to emit a redundant fenced block. Set `true`/`false` to
         /// force it (e.g. a tool-less model behind a native-looking provider).
         public var toolCallFallback: Bool?
-        /// Advertises AIToolKit's unified `WorkflowTool` (built over the
-        /// view's tool subset) as the single model-facing tool. This lets the
-        /// model describe multiple dependent tool calls in one response; the
-        /// device executes the DAG locally and emits the final answer without
-        /// a second LLM pass.
-        public var workflowPlanning: Bool
 
         public init(
             model: String? = nil,
@@ -343,8 +321,7 @@ public actor Orchestrator {
             memoryWindow: Int = 20,
             temperature: Double? = 0.2,
             maxTokens: Int? = nil,
-            toolCallFallback: Bool? = nil,
-            workflowPlanning: Bool = true
+            toolCallFallback: Bool? = nil
         ) {
             self.model = model
             self.maxIterations = maxIterations
@@ -355,13 +332,12 @@ public actor Orchestrator {
             self.temperature = temperature
             self.maxTokens = maxTokens
             self.toolCallFallback = toolCallFallback
-            self.workflowPlanning = workflowPlanning
         }
     }
 
     private let llm: LLMClient
     /// The host's official tools plus AIKit's built-ins, in registration
-    /// order — the `[any Tool]` currency handed to runners and workflows.
+    /// order — the `[any Tool]` currency of the runtime.
     private let allTools: [any Tool]
     /// Name-indexed dispatch table over `allTools`.
     private let tools: ToolSet
@@ -634,14 +610,6 @@ public actor Orchestrator {
             .map { ReportFailureTool.reason(from: $0.arguments) }
     }
 
-    /// The `reportFailure` reason among a workflow plan's nodes, if the model
-    /// planned the refusal as a node instead of a direct call.
-    private func failureReason(inPlan arguments: GeneratedContent) -> String? {
-        guard let nodes = try? arguments.contentArray("nodes") else { return nil }
-        return nodes.first { $0.optionalString("tool") == ReportFailureTool.toolName }
-            .map { ReportFailureTool.reason(from: $0.property("input") ?? .object([:])) }
-    }
-
     /// A concise, user-facing message for a terminal error.
     private func errorMessage(_ error: any Error) -> String {
         if let violation = error as? GuardrailViolation {
@@ -713,203 +681,6 @@ public actor Orchestrator {
         await finishTurn(turnID)
     }
 
-    // MARK: - Workflow turns
-
-    /// Drives a two-round-trip workflow (plan → harvest → bind → execute) as a
-    /// tracked turn, so DAG tasks light up the same activity stream, busy
-    /// state, and failure surface as `run` — and the executed nodes are
-    /// recorded to memory under the current leaf view, exactly like a
-    /// sequential turn's tool calls.
-    ///
-    /// Hosts should prefer this over driving the built-in workflow tools
-    /// (`WorkflowPlanTool` → `WorkflowExecuteTool`) off to the side: a
-    /// side-run workflow is invisible to `activityUpdates()` (so a floating
-    /// assistant button never reflects it) and never lands in the activity
-    /// history (so it can't be scoped to the active view). The `harvester`,
-    /// planner tool subset, and harvest `sources` are the same ones you would
-    /// hand the tools; `model`, temperature, and the tool `viewID` are taken
-    /// from this orchestrator's own configuration and the resolver's current
-    /// leaf.
-    public func runWorkflowTask(
-        intent: String,
-        harvester: any ContextHarvesting,
-        plannerToolNames: Set<String>,
-        sources: [String],
-        useStructuredPlannerOutput: Bool = false,
-        autoBind: Bool = true,
-        planCache: WorkflowPlanCache? = nil
-    ) -> AsyncThrowingStream<OrchestratorEvent, any Error> {
-        let turnID = nextTurnID()
-        startTask(intent, turn: turnID)
-        // A new turn supersedes any prior failure.
-        lastFailureReason = nil
-        setPhase(.preparing, turn: turnID)
-        return AsyncThrowingStream { continuation in
-            let task = Task {
-                await self.runWorkflowTurn(
-                    intent: intent,
-                    harvester: harvester,
-                    plannerToolNames: plannerToolNames,
-                    sources: sources,
-                    useStructuredPlannerOutput: useStructuredPlannerOutput,
-                    autoBind: autoBind,
-                    planCache: planCache,
-                    turnID: turnID,
-                    emit: { continuation.yield($0) }
-                )
-                continuation.finish()
-            }
-            registerTask(task, turn: turnID)
-            continuation.onTermination = { _ in task.cancel() }
-        }
-    }
-
-    private func runWorkflowTurn(
-        intent: String,
-        harvester: any ContextHarvesting,
-        plannerToolNames: Set<String>,
-        sources: [String],
-        useStructuredPlannerOutput: Bool,
-        autoBind: Bool,
-        planCache: WorkflowPlanCache?,
-        turnID: Int,
-        emit: @escaping @Sendable (OrchestratorEvent) -> Void
-    ) async {
-        let context = await contextResolver.merged()
-        let viewID = context.leafID
-        setTaskViewID(viewID, turn: turnID)
-        await recordActivity(
-            viewID: viewID, kind: .userInstruction, text: intent, turn: turnID
-        )
-
-        guard let selectedModel = (options.model ?? llm.defaultModel)?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .emptyAsNil else {
-            let error = LLMError.missingModel
-            await recordFailure(errorMessage(error), turn: turnID)
-            emit(.error(error))
-            return
-        }
-
-        // The plan and bind rounds are model calls; surface them as "thinking"
-        // so the pet pulses for the whole turn. (The DAG executes locally, so
-        // there's no per-node phase to forward.)
-        setPhase(.thinking, turn: turnID)
-        if Task.isCancelled {
-            await finishTurn(turnID, outcome: .cancelled)
-            return
-        }
-
-        // The built-in two-round pair: the plan tool's LLM call sees the tool
-        // manifest + intent and minimal context; the execute tool's optional
-        // Binder call sees the DAG + harvested context and no manifest.
-        let planTool = WorkflowPlanTool(
-            llm: llm,
-            tools: allTools,
-            plannerToolNames: plannerToolNames,
-            sources: sources,
-            options: .init(
-                model: selectedModel,
-                temperature: options.temperature,
-                useStructuredPlannerOutput: useStructuredPlannerOutput
-            ),
-            guardrails: guardrails,
-            planCache: planCache
-        )
-        let planned = await planTool.plan(intent: intent)
-        if Task.isCancelled {
-            await finishTurn(turnID, outcome: .cancelled)
-            return
-        }
-        for call in planned.calls {
-            addUsage(call.usage, turn: turnID)
-            emit(.usage(call.usage))
-        }
-
-        let result: WorkflowExecuteTool.Result
-        switch planned.outcome {
-        case .refused(let reason):
-            result = .init(outcome: .refused(reason), calls: [], trace: [])
-        case .failed(let reason):
-            result = .init(outcome: .failed(reason), calls: [], trace: [])
-        case .planned(let plan):
-            let executeTool = WorkflowExecuteTool(
-                llm: llm,
-                tools: allTools,
-                harvester: harvester,
-                sources: sources,
-                options: .init(
-                    model: selectedModel,
-                    temperature: options.temperature,
-                    autoBind: autoBind
-                ),
-                guardrails: guardrails
-            )
-            result = await executeTool.execute(plan: plan)
-            if Task.isCancelled {
-                await finishTurn(turnID, outcome: .cancelled)
-                return
-            }
-            for call in result.calls {
-                addUsage(call.usage, turn: turnID)
-                emit(.usage(call.usage))
-            }
-        }
-
-        switch result.outcome {
-        case .executed(let workflow):
-            await recordWorkflowNodes(workflow, viewID: viewID, turnID: turnID, emit: emit)
-            let finalText = workflow.finalText ?? ""
-            if !finalText.isEmpty {
-                await recordActivity(
-                    viewID: viewID, kind: .llmResponse, text: finalText, turn: turnID
-                )
-            }
-            emit(.finalAnswer(finalText))
-            await finishTurn(turnID)
-        case .refused(let reason):
-            await recordActivity(viewID: viewID, kind: .error, text: reason, turn: turnID)
-            await recordFailure(reason, turn: turnID, outcome: .refused)
-            emit(.failure(reason: reason))
-        case .failed(let reason):
-            await recordActivity(viewID: viewID, kind: .error, text: reason, turn: turnID)
-            await recordFailure(reason, turn: turnID)
-            emit(.failure(reason: reason))
-        }
-    }
-
-    /// Records each executed workflow node to memory (and the event stream) as
-    /// a tool invocation + result, so a hosted workflow's steps appear in the
-    /// activity history just like a sequential turn's tool calls.
-    private func recordWorkflowNodes(
-        _ workflow: WorkflowResult,
-        viewID: ViewContext.ID,
-        turnID: Int,
-        emit: @escaping @Sendable (OrchestratorEvent) -> Void
-    ) async {
-        for node in workflow.trace.nodes {
-            guard let tool = node.tool else { continue }
-            let outputText: String
-            if let output = workflow.nodeOutputs[node.nodeID] {
-                let data = output.data()
-                outputText = String(decoding: data, as: UTF8.self)
-            } else if let error = node.error {
-                outputText = error
-            } else {
-                outputText = node.status.rawValue
-            }
-            emit(.toolCall(name: tool, input: Data("{}".utf8)))
-            emit(.toolResult(name: tool, output: Data(outputText.utf8)))
-            await recordActivity(
-                viewID: viewID, kind: .toolInvoked, text: tool, turn: turnID
-            )
-            await recordActivity(
-                viewID: viewID, kind: .toolResult,
-                text: "\(tool) -> \(outputText)", turn: turnID
-            )
-        }
-    }
-
     public func snapshot(
         recentActivityLimit: Int = 10,
         recentTaskLimit: Int = 8
@@ -956,17 +727,10 @@ public actor Orchestrator {
             ContinuousClock.now.advanced(by: .seconds($0))
         }
 
-        // The view's tool subset is fixed for the turn. The unified
-        // WorkflowTool over that subset handles any workflow_run call —
-        // whether or not planning mode advertised it. A tool-less context
-        // stays pure chat (a WorkflowTool needs at least one leaf tool).
+        // The view's tool subset is fixed for the turn. A tool-less context
+        // stays pure chat.
         let activeTools = tools.subset(for: Self.withBuiltinTools(context.toolNames))
         let manifest = activeTools.map(\.descriptor)
-        let workflowResults = WorkflowResultBox()
-        let workflow: WorkflowTool? = activeTools.isEmpty ? nil : WorkflowTool(
-            tools: activeTools,
-            onResult: { await workflowResults.record($0) }
-        )
 
         var transcript: [TranscriptEntry] = []
         var pendingCorrection: String?
@@ -1006,7 +770,6 @@ public actor Orchestrator {
                     memory: recent,
                     transcript: transcript,
                     toolManifest: manifest,
-                    workflow: options.workflowPlanning ? workflow : nil,
                     model: selectedModel,
                     temperature: options.temperature,
                     maxTokens: options.maxTokens,
@@ -1068,7 +831,6 @@ public actor Orchestrator {
                 case .toolCalls(let calls):
                     let ended = try await handleToolCalls(
                         calls, narration: nil,
-                        workflow: workflow, workflowResults: workflowResults,
                         viewID: viewID, turnID: turnID, deadline: deadline,
                         transcript: &transcript, emit: emit
                     )
@@ -1077,7 +839,6 @@ public actor Orchestrator {
                 case .mixed(let text, let calls):
                     let ended = try await handleToolCalls(
                         calls, narration: text,
-                        workflow: workflow, workflowResults: workflowResults,
                         viewID: viewID, turnID: turnID, deadline: deadline,
                         transcript: &transcript, emit: emit
                     )
@@ -1287,42 +1048,22 @@ public actor Orchestrator {
     }
 
     /// Routes one parsed batch of calls: a `reportFailure` refusal ends the
-    /// turn; a `workflow_run` call goes to the unified `WorkflowTool`; in
-    /// planning mode anything else is a malformed plan; otherwise the calls
-    /// execute sequentially. Returns `true` when the turn ended.
+    /// turn; otherwise the calls execute sequentially. Returns `true` when
+    /// the turn ended.
     private func handleToolCalls(
         _ calls: [ToolCall],
         narration: String?,
-        workflow: WorkflowTool?,
-        workflowResults: WorkflowResultBox,
         viewID: ViewContext.ID,
         turnID: Int,
         deadline: ContinuousClock.Instant?,
         transcript: inout [TranscriptEntry],
         emit: @escaping @Sendable (OrchestratorEvent) -> Void
     ) async throws -> Bool {
-        // A `reportFailure` call is a refusal in any mode — in planning mode
-        // the model is still told it may bail out, so it must end the turn,
-        // not read as a malformed plan.
+        // A `reportFailure` call is a refusal: it ends the turn.
         if let reason = failureReason(in: calls) {
             await recordFailure(reason, turn: turnID, outcome: .refused)
             emit(.failure(reason: reason))
             return true
-        }
-        if let workflow,
-           let call = calls.first(where: { $0.name == WorkflowSpec.toolName }) {
-            // The parser guarantees a workflow call arrives alone.
-            return try await executeWorkflowCall(
-                call, narration: narration,
-                workflow: workflow, workflowResults: workflowResults,
-                viewID: viewID, turnID: turnID, deadline: deadline,
-                transcript: &transcript, emit: emit
-            )
-        }
-        if options.workflowPlanning {
-            throw OutputParser.ParserError.malformedWorkflow(
-                raw: "Expected a single \(WorkflowSpec.toolName) call or workflow JSON, not direct tool calls."
-            )
         }
         // Non-stream mode never emitted deltas, so surface the narration
         // that accompanies the tool calls instead of dropping it.
@@ -1337,93 +1078,6 @@ public actor Orchestrator {
             transcript: &transcript, emit: emit
         )
         return false
-    }
-
-    /// Dispatches a `workflow_run` call to the unified `WorkflowTool` and
-    /// interprets its structured status: `completed` and `cannot_plan` end
-    /// the turn; every other status (invalid plan, clarification, execution
-    /// failure) rides the ordinary tool loop back to the model so it can
-    /// self-correct. Returns `true` when the turn ended.
-    private func executeWorkflowCall(
-        _ call: ToolCall,
-        narration: String?,
-        workflow: WorkflowTool,
-        workflowResults: WorkflowResultBox,
-        viewID: ViewContext.ID,
-        turnID: Int,
-        deadline: ContinuousClock.Instant?,
-        transcript: inout [TranscriptEntry],
-        emit: @escaping @Sendable (OrchestratorEvent) -> Void
-    ) async throws -> Bool {
-        if !options.stream, let narration, !narration.isEmpty {
-            emit(.llmDelta(narration))
-        }
-
-        // A planned `reportFailure` node is the model refusing, not a step to
-        // run: end the turn in the failure state instead of executing it as a
-        // no-op tool and reporting success.
-        if let reason = failureReason(inPlan: call.arguments) {
-            await recordFailure(reason, turn: turnID, outcome: .refused)
-            emit(.failure(reason: reason))
-            return true
-        }
-
-        // The preToolUse rails see the whole plan — every node input — so
-        // payload rewrites (e.g. PII redaction) land before execution.
-        let prepared = try await prepareToolCall(
-            call, viewID: viewID, turnID: turnID, deadline: deadline, emit: emit
-        )
-        let output = try await withTurnDeadline(deadline) {
-            try await workflow.call(arguments: prepared.call.arguments)
-        }
-        let result = await workflowResults.take()
-        if let result {
-            await recordWorkflowNodes(result, viewID: viewID, turnID: turnID, emit: emit)
-        }
-        try await finishToolCallSuccess(
-            prepared.call, output: output.data(),
-            viewID: viewID, turnID: turnID, deadline: deadline, emit: emit
-        )
-
-        switch output.optionalString("status") {
-        case "completed":
-            let finalText = result?.finalText ?? output.optionalString("final_text")
-            let finalValue = result?.finalValue ?? output.property("result")
-            let final = (finalText ?? finalValue.map(WorkflowFinalRenderer.displayString) ?? "")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-                .emptyAsNil
-                ?? "Done."
-            setPhase(.verifying, turn: turnID)
-            _ = try await withTurnDeadline(deadline) {
-                try await self.guardrails.verify(
-                    .finalResult, .finalResult(final)
-                )
-            }
-            emit(.verification(stage: .finalResult, outcome: .pass))
-            await recordActivity(viewID: viewID, kind: .llmResponse, text: final, turn: turnID)
-            emit(.finalAnswer(final))
-            return true
-
-        case "cannot_plan":
-            let reason = output.optionalString("message")?
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-                .emptyAsNil
-                ?? ReportFailureTool.fallbackReason
-            await recordFailure(reason, turn: turnID, outcome: .refused)
-            emit(.failure(reason: reason))
-            return true
-
-        default:
-            let (entry, resolved) = Self.assistantTurn(text: narration, calls: [prepared.call])
-            transcript.append(entry)
-            transcript.append(.toolResult(
-                id: resolved.first?.id ?? prepared.call.name,
-                name: prepared.call.name,
-                content: String(decoding: output.data(), as: UTF8.self),
-                isError: false
-            ))
-            return false
-        }
     }
 
     private func appendSkippedToolResults(

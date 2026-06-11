@@ -8,27 +8,6 @@ import AIKitCapability
 import AIKitSafety
 import AIKitTestSupport
 
-/// A `ContextHarvesting` that resolves nothing — sufficient for self-contained
-/// workflow plans, which never trigger a harvest.
-private struct StubHarvester: ContextHarvesting {
-    func harvest(_ slots: [WorkflowContextSlot]) async -> ContextPacket {
-        ContextPacket(slots: slots.map {
-            HarvestedSlot(
-                slotID: $0.slotID, source: $0.source,
-                status: .missing, candidates: [], required: $0.required
-            )
-        })
-    }
-}
-
-private struct FixedHarvester: ContextHarvesting {
-    var packet: ContextPacket
-
-    func harvest(_ slots: [WorkflowContextSlot]) async -> ContextPacket {
-        packet
-    }
-}
-
 @Suite struct PromptBuilderTests {
     @Test func systemPromptIncludesPreambleFragmentAndMemory() {
         let context = ResolvedContext(
@@ -70,40 +49,6 @@ private struct FixedHarvester: ContextHarvesting {
         )
         #expect(request.tools.isEmpty)
         #expect(request.system?.contains(PromptBuilder.toolFallbackInstruction) == false)
-    }
-
-    @Test func workflowPlanningAdvertisesUnifiedWorkflowTool() throws {
-        let context = ResolvedContext(
-            stack: [.init("home")],
-            systemPromptFragment: "",
-            toolNames: ["navigate"],
-            metadata: [:]
-        )
-        let navigate = NavigateTool { _ in .init(navigated: true) }
-        let request = PromptBuilder.build(
-            instruction: "Open settings",
-            context: context,
-            memory: [],
-            transcript: [],
-            toolManifest: [navigate.descriptor],
-            workflow: WorkflowTool(tools: [navigate]),
-            model: "test-model"
-        )
-
-        #expect(request.system?.contains("topological DAG") == true)
-        #expect(request.system?.contains("Example workflow") == true)
-        #expect(request.tools.map(\.name) == [WorkflowSpec.toolName])
-
-        let schemaJSON = try #require(try request.tools.first?.argumentsSchema.jsonString())
-        let schemaObject = try #require(GeneratedContent(json: schemaJSON).objectValue)
-        let required = try #require(schemaObject["required"]?.arrayValue)
-        #expect(required.compactMap(\.stringValue).contains("nodes"))
-        let properties = try #require(schemaObject["properties"]?.objectValue)
-        #expect(properties["nodes"] != nil)
-        // No harvester: the slot vocabulary is omitted entirely.
-        #expect(properties["context_slots"] == nil)
-        #expect(properties["final"] == nil)
-        #expect(properties["limits"] == nil)
     }
 }
 
@@ -206,497 +151,6 @@ private struct FixedHarvester: ContextHarvesting {
     }
 }
 
-@Suite struct WorkflowSpecTests {
-    @Test func parsesTopologicalWorkflowJSONAndResolvesReferences() throws {
-        let spec = WorkflowSpec(
-            workflowID: "wf_join",
-            intent: "Join two source values.",
-            nodes: [
-                WorkflowNode(
-                    id: "a",
-                    tool: "tool1",
-                    input: .object(["x": .string("LLM value")])
-                ),
-                WorkflowNode(
-                    id: "b",
-                    tool: "tool2",
-                    input: .object(["y": .string("LLM value")])
-                ),
-                WorkflowNode(
-                    id: "c",
-                    tool: "tool3",
-                    dependsOn: ["a", "b"],
-                    input: .object([
-                        "left": workflowRef(node: "a", path: "/value"),
-                        "right": workflowRef(node: "b", path: "/value"),
-                    ])
-                ),
-            ],
-            final: .nodeOutput("c")
-        )
-        let json = try workflowJSONString(spec)
-        let response = LLMResponse(content: [.text(json)], stopReason: .endTurn)
-        guard case .toolCalls(let calls) = try OutputParser.parse(response),
-              let call = calls.first, call.name == WorkflowSpec.toolName else {
-            Issue.record("expected recovered workflow call")
-            return
-        }
-        let plan = try WorkflowSpec.decodeToolCallArguments(call.arguments)
-
-        let validated = try WorkflowValidator.validate(
-            plan,
-            policy: WorkflowValidationPolicy(availableTools: ["tool1", "tool2", "tool3"])
-        )
-        #expect(validated.levels.map { $0.map(\.id).sorted() } == [["a", "b"], ["c"]])
-
-        let input = try WorkflowReferenceResolver.resolve(
-            plan.nodes[2].input,
-            outputs: [
-                "a": .object(["value": .string("left-value")]),
-                "b": .object(["value": .string("right-value")]),
-            ],
-            currentNodeID: "c"
-        )
-        #expect(input.objectValue?["left"]?.stringValue == "left-value")
-        #expect(input.objectValue?["right"]?.stringValue == "right-value")
-    }
-
-    @Test func rejectsNonTopologicalWorkflowOrder() throws {
-        let plan = WorkflowSpec(
-            workflowID: "wf_bad_order",
-            intent: "Reference a later node.",
-            nodes: [
-                WorkflowNode(
-                    id: "c",
-                    tool: "tool3",
-                    dependsOn: ["a"],
-                    input: .object(["left": workflowRef(node: "a", path: "/value")])
-                ),
-                WorkflowNode(id: "a", tool: "tool1"),
-            ],
-            final: .nodeOutput("c")
-        )
-        #expect(throws: WorkflowError.self) {
-            _ = try WorkflowValidator.validate(
-                plan,
-                policy: WorkflowValidationPolicy(availableTools: ["tool1", "tool3"])
-            )
-        }
-    }
-
-    @Test func parsesNativeWorkflowToolCall() throws {
-        let spec = WorkflowSpec(
-            workflowID: "wf_open_settings",
-            intent: "Open settings.",
-            nodes: [
-                WorkflowNode(
-                    id: "open_settings",
-                    tool: "navigate",
-                    input: .object(["destination": .string("settings")])
-                ),
-            ],
-            final: .nodeOutput("open_settings")
-        )
-        let input = try GeneratedContent(json: workflowJSONString(spec))
-        let response = LLMResponse(
-            content: [.toolUse(id: "wf", name: WorkflowSpec.toolName, arguments: input)],
-            stopReason: .toolUse
-        )
-        guard case .toolCalls(let calls) = try OutputParser.parse(response),
-              let call = calls.first, call.name == WorkflowSpec.toolName else {
-            Issue.record("expected workflow call")
-            return
-        }
-        let plan = try WorkflowSpec.decodeToolCallArguments(call.arguments)
-        #expect(plan.nodes.compactMap(\.tool) == ["navigate"])
-    }
-
-    @Test func workflowGuardrailViolationIgnoresContinueWithNullPolicy() async throws {
-        let flag = InvocationFlag()
-        let tools: [any Tool] = [NavigateTool { _ in
-            await flag.mark()
-            return .init(navigated: true)
-        }]
-        let resolver = ContextResolver()
-        await resolver.push(ViewContext(
-            id: .init("home"), displayName: "Home", toolNames: ["navigate"]
-        ))
-        let spec = WorkflowSpec(
-            workflowID: "wf_guardrail_terminal",
-            intent: "Prove guardrails cannot be swallowed by node policy.",
-            nodes: [
-                WorkflowNode(
-                    id: "go",
-                    tool: "navigate",
-                    input: .object(["destination": .string("email me at a@b.com")]),
-                    policy: WorkflowNodePolicy(onError: .continueWithNull)
-                ),
-            ],
-            final: .message("done")
-        )
-        let provider = MockProvider(responses: [
-            LLMResponse(
-                content: [.text(try workflowJSONString(spec))],
-                stopReason: .endTurn
-            ),
-        ])
-        let orchestrator = Orchestrator(
-            llm: LLMClient(provider: provider),
-            tools: tools,
-            memory: InMemoryMemoryStore(),
-            contextResolver: resolver,
-            guardrails: PolicyEngine(rails: [PIIRedactor()]),
-            options: .init(model: "test", stream: false)
-        )
-
-        var caught: (any Error)?
-        var final: String?
-        for try await event in await orchestrator.run("open it") {
-            if case .error(let error) = event { caught = error }
-            if case .finalAnswer(let text) = event { final = text }
-        }
-        #expect(caught is GuardrailViolation)
-        #expect(final == nil)
-        #expect(await flag.didInvoke == false)
-    }
-
-    @Test func workflowPostToolUseReceivesToolOutput() async throws {
-        let recorder = PostToolUseOutputRecorder()
-        let tools: [any Tool] = [SensitiveOutputTool()]
-        let resolver = ContextResolver()
-        await resolver.push(ViewContext(
-            id: .init("home"), displayName: "Home", toolNames: [SensitiveOutputTool.toolName]
-        ))
-        let spec = WorkflowSpec(
-            workflowID: "wf_post_outputs",
-            intent: "Inspect post-tool output payloads.",
-            nodes: [
-                WorkflowNode(id: "read", tool: SensitiveOutputTool.toolName),
-            ],
-            final: .message("done")
-        )
-        let provider = MockProvider(responses: [
-            LLMResponse(
-                content: [.text(try workflowJSONString(spec))],
-                stopReason: .endTurn
-            ),
-        ])
-        let orchestrator = Orchestrator(
-            llm: LLMClient(provider: provider),
-            tools: tools,
-            memory: InMemoryMemoryStore(),
-            contextResolver: resolver,
-            guardrails: PolicyEngine(rails: [
-                RecordingPostToolUseOutputRail(recorder: recorder)
-            ]),
-            options: .init(model: "test", stream: false)
-        )
-
-        for try await event in await orchestrator.run("read") {
-            if case .error(let error) = event {
-                Issue.record("unexpected error: \(error)")
-            }
-        }
-        let entries = await recorder.entries
-        #expect(entries.count == 1)
-        #expect(entries.first?.text.contains("top-secret") == true)
-    }
-
-    @Test func workflowInstructionsCarryToolManifest() {
-        let context = ResolvedContext(
-            stack: [.init("home")],
-            systemPromptFragment: "",
-            toolNames: ["navigate", "setProfile"],
-            metadata: [:]
-        )
-        let navigate = NavigateTool { _ in .init(navigated: true) }
-        let setProfile = SetProfileTool { _ in .init(applied: true) }
-        let request = PromptBuilder.build(
-            instruction: "Open settings and remember my theme",
-            context: context,
-            memory: [],
-            transcript: [],
-            toolManifest: [navigate.descriptor, setProfile.descriptor],
-            workflow: WorkflowTool(tools: [navigate, setProfile]),
-            model: "test-model"
-        )
-        #expect(request.system?.contains("- navigate:") == true)
-        #expect(request.system?.contains("Arguments schema:") == true)
-        #expect(request.system?.contains("- setProfile:") == true)
-        #expect(request.tools.map { $0.name } == [WorkflowSpec.toolName])
-    }
-}
-
-@Suite struct WorkflowBuiltinToolsTests {
-    private func destinationPacket(
-        candidates: [HarvestedCandidate]
-    ) -> ContextPacket {
-        ContextPacket(slots: [
-            HarvestedSlot(
-                slotID: "destination",
-                source: "current_destination",
-                status: .resolved,
-                candidates: candidates,
-                required: true
-            ),
-        ])
-    }
-
-    /// Drives the built-in pair the way a host does: one `workflow_plan` call,
-    /// then (when planned) one `workflow_execute` call.
-    private func planAndExecute(
-        provider: MockProvider,
-        tools: [any Tool],
-        harvester: any ContextHarvesting,
-        sources: [String],
-        useStructuredPlannerOutput: Bool = false,
-        executeGuardrails: PolicyEngine = PolicyEngine(),
-        planCache: WorkflowPlanCache? = nil,
-        intent: String
-    ) async -> (planned: WorkflowPlanTool.Outcome, executed: WorkflowExecuteTool.Outcome?) {
-        let llm = LLMClient(provider: provider)
-        let planTool = WorkflowPlanTool(
-            llm: llm,
-            tools: tools,
-            plannerToolNames: ["navigate"],
-            sources: sources,
-            options: .init(
-                model: "test",
-                useStructuredPlannerOutput: useStructuredPlannerOutput
-            ),
-            planCache: planCache
-        )
-        let planned = await planTool.plan(intent: intent)
-        guard case .planned(let plan) = planned.outcome else {
-            return (planned.outcome, nil)
-        }
-        let executeTool = WorkflowExecuteTool(
-            llm: llm,
-            tools: tools,
-            harvester: harvester,
-            sources: sources,
-            options: .init(model: "test"),
-            guardrails: executeGuardrails
-        )
-        let result = await executeTool.execute(plan: plan)
-        return (planned.outcome, result.outcome)
-    }
-
-    @Test func structuredOutputCanBePlannerOnly() async throws {
-        let tools: [any Tool] = [NavigateTool { input in
-            .init(navigated: input.destination == "settings")
-        }]
-        let plan = """
-        {"nodes":[{"id":"go","tool":"navigate","input":{"destination":{"$slot":"destination"}}}],
-         "context_slots":[{"slot_id":"destination","source":"current_destination"}]}
-        """
-        let binding = """
-        {"binding_status":"complete",
-         "nodes":[{"id":"go","tool":"navigate","input":{"destination":{"$bind":"dest_1"}}}],
-         "missing_slots":[],"message":null}
-        """
-        let provider = MockProvider(responses: [
-            LLMResponse(content: [.text(plan)], stopReason: .endTurn),
-            LLMResponse(content: [.text(binding)], stopReason: .endTurn),
-        ])
-        let packet = destinationPacket(candidates: [
-            HarvestedCandidate(
-                candidateID: "dest_1",
-                label: "Settings",
-                kind: "screen",
-                value: .string("settings"),
-                isCurrent: false
-            ),
-            HarvestedCandidate(
-                candidateID: "dest_2",
-                label: "Home",
-                kind: "screen",
-                value: .string("home"),
-                isCurrent: false
-            ),
-        ])
-
-        let (_, executed) = await planAndExecute(
-            provider: provider,
-            tools: tools,
-            harvester: FixedHarvester(packet: packet),
-            sources: ["current_destination"],
-            useStructuredPlannerOutput: true,
-            intent: "open it"
-        )
-        guard case .executed = executed else {
-            Issue.record("expected execution, got \(String(describing: executed))")
-            return
-        }
-
-        let requests = provider.receivedRequests
-        #expect(requests.count == 2)
-        #expect(requests[0].responseSchema != nil)
-        #expect(requests[1].responseSchema == nil)
-    }
-
-    @Test func planCacheAndAutoBindSkipPlannerOnRepeat() async throws {
-        let invocations = ToolInvocationRecorder()
-        let tools: [any Tool] = [NavigateTool { input in
-            await invocations.record(input.destination)
-            return .init(navigated: true)
-        }]
-        let plan = """
-        {"nodes":[{"id":"go","tool":"navigate","input":{"destination":{"$slot":"destination"}}}],
-         "context_slots":[{"slot_id":"destination","source":"current_destination"}]}
-        """
-        let provider = MockProvider(responses: [
-            LLMResponse(content: [.text(plan)], stopReason: .endTurn),
-        ])
-        let packet = destinationPacket(candidates: [
-            HarvestedCandidate(
-                candidateID: "dest_1",
-                label: "Settings",
-                kind: "screen",
-                value: .string("settings"),
-                isCurrent: true
-            ),
-        ])
-        let cache = WorkflowPlanCache()
-
-        let (_, first) = await planAndExecute(
-            provider: provider,
-            tools: tools,
-            harvester: FixedHarvester(packet: packet),
-            sources: ["current_destination"],
-            planCache: cache,
-            intent: "open this"
-        )
-        let (_, second) = await planAndExecute(
-            provider: provider,
-            tools: tools,
-            harvester: FixedHarvester(packet: packet),
-            sources: ["current_destination"],
-            planCache: cache,
-            intent: "  Open   This  "
-        )
-
-        guard case .executed = first else {
-            Issue.record("expected first execution")
-            return
-        }
-        guard case .executed = second else {
-            Issue.record("expected second execution")
-            return
-        }
-        #expect(provider.receivedRequests.count == 1)
-        #expect(await cache.hits == 1)
-        #expect(await invocations.destinations == ["settings", "settings"])
-    }
-
-    @Test func safetyRedactsToolInputBeforeTwoRoundExecution() async throws {
-        let seen = SeenInput()
-        let tools: [any Tool] = [NavigateTool { input in
-            await seen.record(input.destination)
-            return .init(navigated: true)
-        }]
-        let plan = """
-        {"nodes":[{"id":"go","tool":"navigate","input":{"destination":"email me at a@b.com"}}],
-         "context_slots":[]}
-        """
-        let provider = MockProvider(responses: [
-            LLMResponse(content: [.text(plan)], stopReason: .endTurn),
-        ])
-
-        let (_, executed) = await planAndExecute(
-            provider: provider,
-            tools: tools,
-            harvester: StubHarvester(),
-            sources: [],
-            executeGuardrails: PolicyEngine(rails: [PIIRedactor(mode: .redact)]),
-            intent: "open it"
-        )
-        guard case .executed = executed else {
-            Issue.record("expected execution, got \(String(describing: executed))")
-            return
-        }
-        let destination = await seen.value
-        #expect(destination?.contains("[REDACTED]") == true)
-        #expect(destination?.contains("a@b.com") == false)
-    }
-
-    @Test func plannedReportFailureNodeRefusesInsteadOfExecuting() async throws {
-        let invocations = ToolInvocationRecorder()
-        let tools: [any Tool] = [NavigateTool { input in
-            await invocations.record(input.destination)
-            return .init(navigated: true)
-        }]
-        // The planner phrases its refusal as a reportFailure node (it is not
-        // even in the planner manifest): the plan tool must refuse with the
-        // node's reason, not return an executable plan — or trip validation.
-        let plan = """
-        {"nodes":[{"id":"bail","tool":"\(ReportFailureTool.toolName)",\
-        "input":{"reason":"Nothing here can archive entries."}}],
-         "context_slots":[]}
-        """
-        let provider = MockProvider(responses: [
-            LLMResponse(content: [.text(plan)], stopReason: .endTurn),
-        ])
-
-        let (planned, executed) = await planAndExecute(
-            provider: provider,
-            tools: tools,
-            harvester: StubHarvester(),
-            sources: [],
-            intent: "archive everything"
-        )
-        guard case .refused(let reason) = planned else {
-            Issue.record("expected refusal, got \(planned)")
-            return
-        }
-        #expect(executed == nil)
-        #expect(reason == "Nothing here can archive entries.")
-        #expect(await invocations.destinations.isEmpty)
-    }
-
-    @Test func sessionFacingCallsRoundTripThePlan() async throws {
-        // The session story: an outer model calls workflow_plan with just the
-        // intent, then passes the returned plan object to workflow_execute
-        // unchanged. Both surfaces are exercised through `call(arguments:)`.
-        let invocations = ToolInvocationRecorder()
-        let tools: [any Tool] = [NavigateTool { input in
-            await invocations.record(input.destination)
-            return .init(navigated: true)
-        }]
-        let plan = """
-        {"nodes":[{"id":"go","tool":"navigate","input":{"destination":"settings"}}],
-         "context_slots":[]}
-        """
-        let provider = MockProvider(responses: [
-            LLMResponse(content: [.text(plan)], stopReason: .endTurn),
-        ])
-        let llm = LLMClient(provider: provider)
-        let planTool = WorkflowPlanTool(
-            llm: llm,
-            tools: tools,
-            plannerToolNames: ["navigate"],
-            sources: [],
-            options: .init(model: "test")
-        )
-        let executeTool = WorkflowExecuteTool(
-            llm: llm,
-            tools: tools,
-            harvester: StubHarvester(),
-            sources: [],
-            options: .init(model: "test")
-        )
-
-        let plannedPayload = try await planTool.call(
-            arguments: .object(["intent": .string("open settings")]))
-        #expect(plannedPayload.optionalString("status") == "planned")
-        let planObject = try #require(plannedPayload.property("plan"))
-
-        let executedPayload = try await executeTool.call(arguments: planObject)
-        #expect(executedPayload.optionalString("status") == "completed")
-        #expect(await invocations.destinations == ["settings"])
-    }
-}
-
 @Suite struct RetryPolicyTests {
     @Test func exponentialBackoffCaps() {
         let backoff = RetryPolicy.Backoff.exponential(base: 0.4, cap: 4.0)
@@ -765,7 +219,7 @@ private struct FixedHarvester: ContextHarvesting {
             contextResolver: resolver,
             guardrails: guardrails,
             usageRecorder: usageRecorder,
-            options: .init(model: "test", stream: false, workflowPlanning: false)
+            options: .init(model: "test", stream: false)
         )
     }
 
@@ -901,143 +355,6 @@ private struct FixedHarvester: ContextHarvesting {
         #expect(summary.usage == .zero)
     }
 
-    @Test func runWorkflowTaskHostsTwoRoundAsTrackedTurn() async throws {
-        let tools: [any Tool] = [NavigateTool { input in
-            .init(navigated: input.destination == "settings")
-        }]
-        let resolver = ContextResolver()
-        await resolver.push(ViewContext(
-            id: .init("home"),
-            displayName: "Home",
-            systemPromptFragment: "You can navigate.",
-            toolNames: ["navigate"]
-        ))
-        let memory = InMemoryMemoryStore()
-        // A self-contained plan: the runner executes the DAG locally without a
-        // binder round, so one scripted planner response is enough.
-        let planJSON = """
-        {"nodes":[{"id":"go","tool":"navigate","input":{"destination":"settings"}}],
-         "context_slots":[]}
-        """
-        let provider = MockProvider(responses: [
-            LLMResponse(content: [.text(planJSON)], stopReason: .endTurn),
-        ])
-        let orchestrator = Orchestrator(
-            llm: LLMClient(provider: provider),
-            tools: tools,
-            memory: memory,
-            contextResolver: resolver,
-            guardrails: PolicyEngine(),
-            options: .init(model: "test", stream: false, workflowPlanning: false)
-        )
-
-        var toolNames: [String] = []
-        var sawFinal = false
-        for try await event in await orchestrator.runWorkflowTask(
-            intent: "open settings",
-            harvester: StubHarvester(),
-            plannerToolNames: ["navigate"],
-            sources: []
-        ) {
-            switch event {
-            case .toolCall(let name, _): toolNames.append(name)
-            case .finalAnswer: sawFinal = true
-            case .error(let error): Issue.record("unexpected error: \(error)")
-            default: break
-            }
-        }
-        #expect(toolNames.contains("navigate"))
-        #expect(sawFinal)
-
-        // The hosted workflow's node is recorded under the leaf view, so it
-        // lands in the activity history scoped to that view — the whole point
-        // of hosting it on the orchestrator instead of a side-run runner.
-        let recent = try await memory.recent(limit: 20, view: .init("home"))
-        #expect(recent.contains { $0.kind == .toolInvoked && $0.payloadText.contains("navigate") })
-        #expect(recent.contains { $0.kind == .toolResult && $0.payloadText.contains("navigate") })
-
-        // The turn finished, so the orchestrator is idle again (no leaked turn).
-        let activity = await orchestrator.snapshot()
-        #expect(activity.recentActivities.isEmpty == false)
-    }
-
-    @Test func runWorkflowTaskAppliesFinalResultGuardrail() async throws {
-        let tools: [any Tool] = [NavigateTool { _ in
-            .init(navigated: true)
-        }]
-        let resolver = ContextResolver()
-        await resolver.push(ViewContext(
-            id: .init("home"), displayName: "Home", toolNames: ["navigate"]
-        ))
-        let planJSON = """
-        {"nodes":[{"id":"go","tool":"navigate","input":{"destination":"settings"}}],
-         "context_slots":[]}
-        """
-        let provider = MockProvider(responses: [
-            LLMResponse(content: [.text(planJSON)], stopReason: .endTurn),
-        ])
-        let orchestrator = Orchestrator(
-            llm: LLMClient(provider: provider),
-            tools: tools,
-            memory: InMemoryMemoryStore(),
-            contextResolver: resolver,
-            guardrails: PolicyEngine(rails: [OutputLengthCap(maxCharacters: 1)]),
-            options: .init(model: "test", stream: false, workflowPlanning: false)
-        )
-
-        var final: String?
-        var failure: String?
-        for try await event in await orchestrator.runWorkflowTask(
-            intent: "open settings",
-            harvester: StubHarvester(),
-            plannerToolNames: ["navigate"],
-            sources: []
-        ) {
-            if case .finalAnswer(let text) = event { final = text }
-            if case .failure(let reason) = event { failure = reason }
-            if case .error(let error) = event { Issue.record("unexpected error: \(error)") }
-        }
-        #expect(final == nil)
-        #expect(failure?.contains("builtin.outputLengthCap") == true)
-    }
-
-    @Test func workflowPlanningRejectsDirectToolCallsWithoutInvokingTool() async throws {
-        let flag = InvocationFlag()
-        let tools: [any Tool] = [NavigateTool { _ in
-            await flag.mark()
-            return .init(navigated: true)
-        }]
-        let resolver = ContextResolver()
-        await resolver.push(ViewContext(
-            id: .init("home"), displayName: "Home", toolNames: ["navigate"]
-        ))
-        let provider = MockProvider(responses: [
-            LLMResponse(
-                content: [.toolUse(
-                    id: "t1", name: "navigate",
-                    arguments: .object(["destination": .string("settings")])
-                )],
-                stopReason: .toolUse
-            ),
-        ])
-        let orchestrator = Orchestrator(
-            llm: LLMClient(provider: provider),
-            tools: tools,
-            memory: InMemoryMemoryStore(),
-            contextResolver: resolver,
-            guardrails: PolicyEngine(),
-            options: .init(model: "test", stream: false)
-        )
-
-        var caught: (any Error)?
-        for try await event in await orchestrator.run("Go to settings") {
-            if case .error(let error) = event { caught = error }
-        }
-        #expect(caught is OutputParser.ParserError)
-        #expect(await flag.didInvoke == false)
-        #expect(provider.receivedRequests.count == 1)
-    }
-
     @Test func malformedToolInputCorrectedOnSecondAttemptWithoutOrphanToolMessage() async throws {
         let tools: [any Tool] = [NavigateTool { input in
             .init(navigated: input.destination == "settings")
@@ -1065,8 +382,7 @@ private struct FixedHarvester: ContextHarvesting {
             guardrails: PolicyEngine(),
             options: .init(
                 model: "test", stream: false,
-                retry: .init(maxAttempts: 2, backoff: .none),
-                workflowPlanning: false
+                retry: .init(maxAttempts: 2, backoff: .none)
             )
         )
 
@@ -1123,8 +439,7 @@ private struct FixedHarvester: ContextHarvesting {
             guardrails: PolicyEngine(),
             options: .init(
                 model: "test", stream: false,
-                retry: .init(maxAttempts: 2, backoff: .none),
-                workflowPlanning: false
+                retry: .init(maxAttempts: 2, backoff: .none)
             )
         )
 
@@ -1175,8 +490,7 @@ private struct FixedHarvester: ContextHarvesting {
             guardrails: PolicyEngine(),
             options: .init(
                 model: "test", stream: false,
-                retry: .init(maxAttempts: 2, backoff: .none),
-                workflowPlanning: false
+                retry: .init(maxAttempts: 2, backoff: .none)
             )
         )
 
@@ -1243,8 +557,7 @@ private struct FixedHarvester: ContextHarvesting {
             guardrails: PolicyEngine(),
             options: .init(
                 model: "test", stream: false,
-                retry: .init(maxAttempts: 2, backoff: .none),
-                workflowPlanning: false
+                retry: .init(maxAttempts: 2, backoff: .none)
             )
         )
 
@@ -1291,8 +604,7 @@ private struct FixedHarvester: ContextHarvesting {
             guardrails: PolicyEngine(rails: [RecordingPostToolUseRail(recorder: recorder)]),
             options: .init(
                 model: "test", stream: false,
-                retry: .init(maxAttempts: 1, backoff: .none),
-                workflowPlanning: false
+                retry: .init(maxAttempts: 1, backoff: .none)
             )
         )
 
@@ -1326,8 +638,7 @@ private struct FixedHarvester: ContextHarvesting {
             guardrails: PolicyEngine(rails: [BlockingPostToolUseRail()]),
             options: .init(
                 model: "test", stream: false,
-                retry: .init(maxAttempts: 1, backoff: .none),
-                workflowPlanning: false
+                retry: .init(maxAttempts: 1, backoff: .none)
             )
         )
 
@@ -1455,7 +766,7 @@ private struct FixedHarvester: ContextHarvesting {
             memory: InMemoryMemoryStore(),
             contextResolver: resolver,
             guardrails: PolicyEngine(rails: [PIIRedactor(mode: .redact)]),
-            options: .init(stream: false, workflowPlanning: false)
+            options: .init(stream: false)
         )
         for try await event in await orchestrator.run("go") {
             if case .error(let e) = event { Issue.record("unexpected: \(e)") }
@@ -1464,161 +775,6 @@ private struct FixedHarvester: ContextHarvesting {
         #expect(destination?.contains("[REDACTED]") == true)
         #expect(destination?.contains("a@b.com") == false)
     }
-
-    @Test func workflowPlanExecutesTopologicalDAGWithoutSecondLLMCall() async throws {
-        let recorder = WorkflowRecorder()
-        let tools: [any Tool] = [
-            FindContactTool(recorder: recorder),
-            CreateReminderTool(recorder: recorder),
-            NavigateTool { input in
-                await recorder.record("navigate:\(input.destination)")
-                return .init(navigated: true)
-            },
-        ]
-        let resolver = ContextResolver()
-        await resolver.push(ViewContext(
-            id: .init("home"),
-            displayName: "Home",
-            toolNames: ["findContact", "createReminder", "navigate"]
-        ))
-        // A lean plan, as the unified WorkflowTool's contract prescribes:
-        // ordering comes from $ref data edges, not depends_on.
-        let plan = """
-        {"nodes":[\
-        {"id":"find_alex","tool":"findContact","input":{"query":"Alex"}},\
-        {"id":"make_reminder","tool":"createReminder","input":{\
-        "title":"Call Alex","contactID":{"$ref":{"source":"node",\
-        "node":"find_alex","path":"/contactID"}}}},\
-        {"id":"open_reminders","tool":"navigate","input":{\
-        "destination":{"$ref":{"source":"node","node":"make_reminder",\
-        "path":"/title"}}}}\
-        ]}
-        """
-        let provider = MockProvider(responses: [
-            LLMResponse(content: [.text(plan)], stopReason: .endTurn),
-        ])
-        let orchestrator = Orchestrator(
-            llm: LLMClient(provider: provider),
-            tools: tools,
-            memory: InMemoryMemoryStore(),
-            contextResolver: resolver,
-            guardrails: PolicyEngine(),
-            options: .init(model: "test", stream: false)
-        )
-
-        var toolNames: [String] = []
-        var final: String?
-        for try await event in await orchestrator.run(
-            "Find Alex, create a reminder to call them, then open reminders."
-        ) {
-            if case .toolCall(let name, _) = event { toolNames.append(name) }
-            if case .finalAnswer(let answer) = event { final = answer }
-            if case .error(let error) = event { Issue.record("unexpected: \(error)") }
-        }
-
-        // The workflow_run dispatch frames the per-node activity events.
-        #expect(toolNames == [
-            WorkflowSpec.toolName, "findContact", "createReminder", "navigate",
-        ])
-        // The final answer is the last node's output — no second LLM pass.
-        #expect(final?.contains("navigated") == true)
-        #expect(provider.receivedRequests.count == 1)
-        #expect(await recorder.events == [
-            "find:Alex",
-            "reminder:Call Alex:contact-alex",
-            "navigate:Call Alex",
-        ])
-    }
-}
-
-private func workflowJSONString(_ spec: WorkflowSpec) throws -> String {
-    workflowContent(spec).jsonString
-}
-
-private func workflowContent(_ spec: WorkflowSpec) -> GeneratedContent {
-    .object([
-        "schema_version": .string(spec.schemaVersion),
-        "workflow_id": .string(spec.workflowID),
-        "intent": .string(spec.intent),
-        "mode": .string(spec.mode.rawValue),
-        "nodes": .array(spec.nodes.map(workflowNodeContent)),
-        "final": workflowFinalContent(spec.final),
-    ])
-}
-
-private func workflowNodeContent(_ node: WorkflowNode) -> GeneratedContent {
-    var object: [String: GeneratedContent] = [
-        "id": .string(node.id),
-        "kind": .string(node.kind.rawValue),
-        "input": node.input,
-    ]
-    if let tool = node.tool {
-        object["tool"] = .string(tool)
-    }
-    if !node.dependsOn.isEmpty {
-        object["depends_on"] = .array(node.dependsOn.map { .string($0) })
-    }
-    if node.policy != .default {
-        object["policy"] = workflowNodePolicyContent(node.policy)
-    }
-    return .object(object)
-}
-
-private func workflowNodePolicyContent(_ policy: WorkflowNodePolicy) -> GeneratedContent {
-    var object: [String: GeneratedContent] = [
-        "on_error": .string(policy.onError.rawValue),
-    ]
-    if policy.timeoutMS != WorkflowNodePolicy.defaultTimeoutMS {
-        object["timeout_ms"] = .int(policy.timeoutMS)
-    }
-    if policy.retry != .default {
-        object["retry"] = .object([
-            "max_attempts": .int(policy.retry.maxAttempts),
-            "backoff_ms": .int(policy.retry.backoffMS),
-            "retry_only_if_tool_error_is_retriable": .bool(
-                policy.retry.retryOnlyIfToolErrorIsRetriable
-            ),
-        ])
-    }
-    if let defaultOutput = policy.defaultOutput {
-        object["default_output"] = defaultOutput
-    }
-    return .object(object)
-}
-
-private func workflowFinalContent(_ final: WorkflowFinal) -> GeneratedContent {
-    var object: [String: GeneratedContent] = [
-        "kind": .string(final.kind.rawValue),
-    ]
-    if let value = final.value {
-        object["value"] = value
-    }
-    if let template = final.template {
-        object["template"] = .string(template)
-    }
-    if !final.bindings.isEmpty {
-        object["bindings"] = .object(final.bindings)
-    }
-    if let node = final.node {
-        object["node"] = .string(node)
-    }
-    if let path = final.path {
-        object["path"] = .string(path)
-    }
-    if let message = final.message {
-        object["message"] = .string(message)
-    }
-    return .object(object)
-}
-
-private func workflowRef(node: String, path: String) -> GeneratedContent {
-    .object([
-        "$ref": .object([
-            "source": .string("node"),
-            "node": .string(node),
-            "path": .string(path),
-        ]),
-    ])
 }
 
 private actor SeenInput {
@@ -1645,14 +801,6 @@ private actor ToolInvocationRecorder {
 
     func record(_ destination: String) {
         destinations.append(destination)
-    }
-}
-
-private actor WorkflowRecorder {
-    private(set) var events: [String] = []
-
-    func record(_ event: String) {
-        events.append(event)
     }
 }
 
@@ -1747,6 +895,15 @@ private func hasOnlyMatchedToolResults(in messages: [Message]) -> Bool {
     return true
 }
 
+private actor ToolEventRecorder {
+    private(set) var events: [String] = []
+
+    func record(_ event: String) {
+        events.append(event)
+    }
+}
+
+
 private struct FindContactTool: Tool {
     @Generable
     struct Input: Codable, Sendable {
@@ -1762,7 +919,7 @@ private struct FindContactTool: Tool {
     static let toolName = "findContact"
     let name = Self.toolName
     let description = "Find a contact by name."
-    let recorder: WorkflowRecorder
+    let recorder: ToolEventRecorder
 
     func call(arguments input: Input) async throws -> Output {
         await recorder.record("find:\(input.query)")
@@ -1787,7 +944,7 @@ private struct CreateReminderTool: Tool {
     static let toolName = "createReminder"
     let name = Self.toolName
     let description = "Create a reminder, optionally attached to a contact."
-    let recorder: WorkflowRecorder
+    let recorder: ToolEventRecorder
 
     func call(arguments input: Input) async throws -> Output {
         await recorder.record("reminder:\(input.title):\(input.contactID)")
@@ -1859,7 +1016,10 @@ private struct MalformedStreamingToolProvider: LLMProvider {
     ) -> AsyncThrowingStream<LLMResponseChunk, any Error> {
         AsyncThrowingStream { continuation in
             continuation.yield(.toolUseStart(id: "bad_1", name: EmptyInputTool.toolName))
-            continuation.yield(.toolUseInputDelta(id: "bad_1", json: "{\"unterminated\":"))
+            // Truly unparseable bytes — the FM partial-JSON parser recovers a
+            // merely-truncated object, so use garbage to pin the malformed
+            // marker path.
+            continuation.yield(.toolUseInputDelta(id: "bad_1", json: "]not json["))
             continuation.yield(.toolUseStop(id: "bad_1"))
             continuation.yield(.stop(.toolUse))
             continuation.finish()
@@ -1927,7 +1087,7 @@ private final class SlowProvider: LLMProvider, @unchecked Sendable {
             guardrails: PolicyEngine(),
             options: .init(
                 model: "test", stream: false,
-                toolCallFallback: true, workflowPlanning: false
+                toolCallFallback: true
             )
         )
 
@@ -1982,7 +1142,7 @@ private final class SlowProvider: LLMProvider, @unchecked Sendable {
                 memory: InMemoryMemoryStore(),
                 contextResolver: resolver,
                 guardrails: PolicyEngine(),
-                options: .init(model: "test", stream: false, workflowPlanning: false)
+                options: .init(model: "test", stream: false)
             )
             for try await _ in await orchestrator.run("hi") {}
             return try #require(provider.receivedRequests.first?.system)
@@ -2035,7 +1195,7 @@ private struct SlowGuardrail: Guardrail {
             guardrails: PolicyEngine(),
             options: .init(
                 model: "test", stream: false,
-                toolCallFallback: fallback, workflowPlanning: false
+                toolCallFallback: fallback
             )
         )
         var toolRan = false
@@ -2170,7 +1330,7 @@ private struct SlowGuardrail: Guardrail {
             guardrails: PolicyEngine(),
             options: .init(
                 model: "test", stream: false,
-                toolCallFallback: true, workflowPlanning: false
+                toolCallFallback: true
             )
         )
         var warned = false
@@ -2261,8 +1421,7 @@ private struct SlowGuardrail: Guardrail {
             guardrails: PolicyEngine(),
             options: .init(
                 model: "test", stream: false,
-                retry: .init(maxAttempts: 1), maxTurnDuration: 0.2,
-                workflowPlanning: false
+                retry: .init(maxAttempts: 1), maxTurnDuration: 0.2
             )
         )
         let start = ContinuousClock.now
@@ -2298,160 +1457,5 @@ private struct SlowGuardrail: Guardrail {
         }
         #expect(caught is TurnDeadlineExceeded)
         #expect(ContinuousClock.now - start < .seconds(3))
-    }
-}
-
-/// Unit coverage for the string-aware JSON extraction the built-in workflow
-/// tools rely on. Their integration tests only feed it clean JSON; these
-/// pin the documented edge cases — code fences, a stray trailing brace from a
-/// weak model's `{{slot}}` brace miscount, and `{{label}}` tokens inside string
-/// values — that the scanner exists to survive.
-@Suite struct WorkflowJSONExtractionTests {
-    // MARK: firstBalancedObject
-
-    @Test func returnsWholeObject() {
-        #expect(WorkflowJSONExtraction.firstBalancedObject(in: #"{"a":1}"#) == #"{"a":1}"#)
-    }
-
-    @Test func dropsStrayTrailingBrace() {
-        // Weak planners on the {{slot}} authoring path append an extra "}".
-        #expect(WorkflowJSONExtraction.firstBalancedObject(in: #"{"a":1}}"#) == #"{"a":1}"#)
-    }
-
-    @Test func ignoresBracesInsideStrings() {
-        let input = #"{"body":"Hi {{name}}!"}"#
-        #expect(WorkflowJSONExtraction.firstBalancedObject(in: input) == input)
-    }
-
-    @Test func honoursEscapedQuotes() {
-        let input = #"{"a":"say \"hi\""}"#
-        #expect(WorkflowJSONExtraction.firstBalancedObject(in: input) == input)
-    }
-
-    @Test func skipsLeadingProse() {
-        #expect(WorkflowJSONExtraction.firstBalancedObject(in: #"sure: {"a":1} done"#) == #"{"a":1}"#)
-    }
-
-    @Test func handlesNesting() {
-        let input = #"{"a":{"b":2}}"#
-        #expect(WorkflowJSONExtraction.firstBalancedObject(in: input) == input)
-    }
-
-    @Test func returnsNilWithoutBraces() {
-        #expect(WorkflowJSONExtraction.firstBalancedObject(in: "no json here") == nil)
-    }
-
-    @Test func repairsStrayBraceInsideArray() {
-        // The observed mid-plan brace miscount: an extra "}" after a node
-        // while the `nodes` array is still open. A brace-only counter sees
-        // depth 0 there and truncates; the opener stack knows the innermost
-        // open scope is "[", so the impossible closer is dropped and the
-        // complete plan survives.
-        let malformed = #"{"nodes":[{"id":"a","input":{"x":1}}},{"id":"b","input":{}}]}"#
-        let repaired = #"{"nodes":[{"id":"a","input":{"x":1}},{"id":"b","input":{}}]}"#
-        #expect(WorkflowJSONExtraction.firstBalancedObject(in: malformed) == repaired)
-    }
-
-    @Test func repairsStrayBracketInsideObject() {
-        let malformed = #"{"a":[1,2],]"b":2}"#
-        let repaired = #"{"a":[1,2],"b":2}"#
-        #expect(WorkflowJSONExtraction.firstBalancedObject(in: malformed) == repaired)
-    }
-
-    @Test func dropsStrayQuoteAfterClosedValue() {
-        // Observed lite tail: …"documentID":{"$ref":"…"}}"}]} — a quote right
-        // after a closed object can never start a valid string.
-        let malformed = #"{"nodes":[{"id":"a","input":{"x":{"$ref":"b/c"}}"}]}"#
-        let repaired = #"{"nodes":[{"id":"a","input":{"x":{"$ref":"b/c"}}}]}"#
-        #expect(WorkflowJSONExtraction.firstBalancedObject(in: malformed) == repaired)
-    }
-
-    @Test func completesUnderClosedDocument() {
-        // Observed lite tail: the last node object is never closed before
-        // `]}` — the mismatched `]` is dropped, the `}` closes the node, and
-        // the still-open scopes are completed at end of text.
-        let malformed = #"{"nodes":[{"id":"a","input":{"x":1}]}"#
-        let repaired = #"{"nodes":[{"id":"a","input":{"x":1}}]}"#
-        #expect(WorkflowJSONExtraction.firstBalancedObject(in: malformed) == repaired)
-    }
-
-    @Test func doesNotCompleteTruncationInsideAString() {
-        // Closing the stack mid-string would fabricate a value the model
-        // never finished — that stays a failure.
-        #expect(WorkflowJSONExtraction.firstBalancedObject(in: #"{"a":"trunc"#) == nil)
-    }
-
-    @Test func repairsRealWorldStrayQuoteTail() throws {
-        // Verbatim failure capture (doubao lite, l5_two_meetings): complete
-        // two-event plan with one stray quote before the final `]}`.
-        let malformed = #"{"nodes":[{"id":"s1","tool":"find_calendar_slot","input":{"dateHint":"next Tuesday","durationMinutes":30}},{"id":"e1","tool":"schedule_event","input":{"title":"Q3 plan review","startISO":{"$ref":"s1/startISO"},"durationMinutes":30}"}]}"#
-        let response = LLMResponse(content: [.text(malformed)], stopReason: .endTurn)
-        let value = try #require(WorkflowJSONExtraction.extractJSONObject(from: response))
-        let nodes = try #require(try value.contentArray("nodes"))
-        #expect(nodes.count == 2)
-    }
-
-    @Test func repairsRealWorldUnderClosedTail() throws {
-        // Verbatim failure capture (doubao lite, l5_two_meetings): the last
-        // node's object never closes before `]}`.
-        let malformed = #"{"nodes":[{"id":"slot1","tool":"find_calendar_slot","input":{"dateHint":"Tuesday","durationMinutes":30}},{"id":"e2","tool":"schedule_event","input":{"title":"Onboarding sync","documentID":{"$ref":"doc_onboarding/hits/0/documentID"}}]}"#
-        let response = LLMResponse(content: [.text(malformed)], stopReason: .endTurn)
-        let value = try #require(WorkflowJSONExtraction.extractJSONObject(from: response))
-        let nodes = try #require(try value.contentArray("nodes"))
-        #expect(nodes.count == 2)
-        #expect(nodes.last?.optionalString("tool") == "schedule_event")
-    }
-
-    // MARK: extractJSONObject
-
-    @Test func extractsToolUseInput() throws {
-        let response = LLMResponse(
-            content: [.toolUse(
-                id: "t1", name: "navigate",
-                arguments: .object(["destination": .string("settings")])
-            )],
-            stopReason: .toolUse
-        )
-        let value = try #require(WorkflowJSONExtraction.extractJSONObject(from: response))
-        let object = try #require(value.objectValue)
-        #expect(object["destination"]?.stringValue == "settings")
-    }
-
-    @Test func extractsFromFencedJSONBlock() throws {
-        let response = LLMResponse(
-            content: [.text("```json\n{\"k\":\"v\"}\n```")],
-            stopReason: .endTurn
-        )
-        let value = try #require(WorkflowJSONExtraction.extractJSONObject(from: response))
-        let object = try #require(value.objectValue)
-        #expect(object["k"]?.stringValue == "v")
-    }
-
-    @Test func extractsDespiteTrailingBrace() throws {
-        let response = LLMResponse(
-            content: [.text("{\"k\":\"v\"}}")],
-            stopReason: .endTurn
-        )
-        let value = try #require(WorkflowJSONExtraction.extractJSONObject(from: response))
-        let object = try #require(value.objectValue)
-        #expect(object["k"]?.stringValue == "v")
-    }
-
-    @Test func extractsAfterLeadingProse() throws {
-        let response = LLMResponse(
-            content: [.text("Here is the plan:\n{\"k\":\"v\"}")],
-            stopReason: .endTurn
-        )
-        let value = try #require(WorkflowJSONExtraction.extractJSONObject(from: response))
-        let object = try #require(value.objectValue)
-        #expect(object["k"]?.stringValue == "v")
-    }
-
-    @Test func returnsNilWhenNoJSONPresent() {
-        let response = LLMResponse(
-            content: [.text("just some prose, no json")],
-            stopReason: .endTurn
-        )
-        #expect(WorkflowJSONExtraction.extractJSONObject(from: response) == nil)
     }
 }
