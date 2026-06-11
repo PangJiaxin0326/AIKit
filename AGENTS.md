@@ -1,184 +1,185 @@
 # AGENTS.md — Recommended practice for AI agents using AIKit
 
-This is a reproduction guide for the **profile-based workflow agent**: one
-native `LanguageModelSession` over a staged `DynamicProfile`, with the tool
-set split into LLM-visible-only *assistive* unit requests and user-visible
-*finishing* actions. The pieces live in the sibling package **AIToolKit**
-(`AssistiveTool.swift`, `WorkflowProfile.swift`); the cloud model executor is
-`VolcengineArkFoundationModels` (nested in this repo). Both are on GitHub.
+This is the reproduction guide for the **scoped workflow (select-then-work)
+agent**: one native `LanguageModelSession` over AIToolKit's
+`ScopedWorkflowProfile`, two staged LLM calls — the model first *declares
+the tool ids* the request needs against the user-visible catalogue, then
+does *all the work* against only the selected tools and the assistive unit
+requests registered on them. The pieces live in the sibling package
+**AIToolKit** (`AssistiveTool.swift`, `ScopedWorkflowProfile.swift`,
+`WorkflowProfile.swift` for the shared `TaskCompleteTool`/
+`WorkflowStageComplete` early-stop primitives); the cloud model executor is
+`VolcengineArkFoundationModels` (nested in this repo).
 
-> The previous paradigm — the lean-plan DAG with planner/binder rounds
-> (WorkflowSpec, validator, executor, `WorkflowTool`, the built-in
-> plan/execute tool pair) — was **removed end to end** in the profile
-> refactor. It survives at AIKit `81d3323` / AIToolKit `9fd1ea6`, and its
-> validated numbers are recorded in the experiment repo
-> (`Findings.md` Parts IX–XVI). The decision record with the OS 27 API
-> verification is the experiment repo's `VIABILITY.md`.
+> Earlier paradigms were removed from this guide as they were superseded:
+> the lean-plan DAG (library code survives at AIKit `81d3323` / AIToolKit
+> `9fd1ea6`) and the gather→act profile workflow (recipe survives in this
+> file's git history). Their measured numbers and root-cause analyses are
+> recorded in the experiment repo (`Findings.md` Parts I–XVII).
 
 ## 1. The paradigm
 
 ```
-ONE LanguageModelSession(profile: WorkflowProfile…)
-  stage .gather  →  instructions: collect facts; tools: ASSISTIVE only
-                    (scalar-argument unit requests; tiny manifest)
-  host flips session.properties.workflowStage = .act
-  stage .act     →  instructions: complete the request + injected local
-                    deictic state; tools: FINISHING only (user-visible)
+ONE LanguageModelSession(profile: ScopedWorkflowProfile…)
+  step .scope  →  instructions: select, don't act
+                  tools: the FINISHING catalogue + select_tools
+                  ends ON ARRIVAL of the select_tools call (throwing
+                  onToolCall) — one LLM round, nothing executes
+  host flips session.properties.scopedWorkflowStage = .work
+                  and sets the historyTransform cut index
+  step .work   →  instructions: the whole job + injected local deictic state
+                  tools: SELECTED finishing tools + their registered
+                  assistive tools + task_complete
+                  ends on the task_complete early stop — no closing text turn
 ```
 
+- **Finishing tools** (`ScopedFinishingTool`) are ordinary
+  `@Generable`-argument tools — the semantically complete actions a user
+  could tap. Each registers the assistive unit requests that can resolve
+  its arguments (`registeredAssistiveTools`); the work step's assistive
+  scope is the union over the *selected* finishing tools, never the task's
+  ground truth.
 - **Assistive tools** (`AssistiveTool`) take one plain-text string, one
-  integer, or nothing (`TextArgument` / `IntegerArgument` /
-  `EmptyArguments`) and return one compact fact string. Any tier of model
-  can emit the call directly — there is no structured plan to author and
-  therefore nothing to repair. Their schemas cost a few tokens each, which
-  is the context-budget lever on a 32K-class on-device/PCC window.
-- **Finishing tools** are ordinary `@Generable`-argument tools — the
-  semantically complete actions a user could tap. Only these are
-  user-visible; filter with `tool.isAssistive`.
-- **Local/deictic state** is *injected* into the act-stage instructions by
-  the host (render it from your store) — no LLM round is spent reading it,
-  and the gather stage never sees it.
-- Return lookup misses as descriptive strings ("no contact matches 'x'"),
-  never throw: a thrown tool error fails the session turn; a "no match"
-  fact lets the model adjust.
+  integer, or nothing (`TextArgument`/`IntegerArgument`/`EmptyArguments`)
+  and return one compact fact string. Lookup misses return descriptive
+  strings ("no contact matches 'x'"), never throw.
+- **The user intent is sent in BOTH calls.** The selection is the only
+  thing that crosses the stage boundary, and it crosses host-side
+  (recorded in the `onToolCall` hook). A cut-index `historyTransform`
+  drops every scope-step entry, so neither call carries the other's tool
+  set or context — the context-budget property: the full catalogue is
+  never co-resident with lookups, facts, or local state.
+- **Local/deictic state** is injected into the work-step instructions by
+  the host; the scope step never sees it, and no LLM round reads it.
 
 ## 2. Stand up the session (copy this)
 
 ```swift
-import AIToolKit                       // AssistiveTool, WorkflowProfile
+import AIToolKit                       // ScopedWorkflowProfile, AssistiveTool
 import VolcengineArkFoundationModels   // VolcengineArkLanguageModel
 
 var extraBody = VolcengineArkConfiguration.defaultWireExtraBody
-extraBody["parallel_tool_calls"] = .bool(true)   // batch independent lookups in one round
+extraBody["parallel_tool_calls"] = .bool(true)
 let model = VolcengineArkLanguageModel(configuration: .init(
     apiKey: key, model: modelID, defaultExtraBody: extraBody))
 
-let profile = WorkflowProfile(
-    gatherInstructions: { gatherText },          // collect facts; no actions
-    actInstructions: { actText(localState) },    // inject deictic state here
-    assistiveTools: tools.filter(\.isAssistive),
-    finishingTools: tools.filter { !$0.isAssistive }
+let profile = ScopedWorkflowProfile(
+    scopeInstructions: { scopeText },           // select, don't act
+    workInstructions: { workText(localState) }, // the whole job + deictic state
+    catalogue: finishing + [SelectToolsTool()],
+    workTools: { state.selected() + [TaskCompleteTool()] }
 )
 .model(model)
 .temperature(0.2)
-
-let session = LanguageModelSession(profile: profile)
-let facts = try await session.respond(to: "User request: \(userText)\n\nGather the facts…")
-session.properties.workflowStage = .act
-let final = try await session.respond(to: "Now complete the user's request using the action tools.")
-```
-
-Skip the gather respond when no assistive tools are in scope. For token
-accounting, install `VolcengineArkUsageMonitor.setHandler { … }` — the FM
-session surface does not expose provider usage.
-
-## 3. Prompt rails that are measured to matter
-
-- Gather: "batch ALL independent lookups into ONE turn as parallel tool
-  calls" (with `parallel_tool_calls` on the wire) — this took a 3-lookup
-  task from 6 LLM calls to 4.
-- Gather: "compute derived values with tools — never by your own
-  arithmetic" (the bytes→kB lesson from the DAG era still applies).
-- Act: "perform EVERY action the user asked for"; "never invent ids: every
-  id must come from the gathered facts or the local device state below".
-- Act: ALWAYS inject the local-state block, including explicit
-  "none selected" / "AMBIGUOUS — do not guess" lines, plus "if the state
-  the user refers to reads none/AMBIGUOUS, explain and perform NO action".
-  Skipping the block when context is empty measurably causes acted-on-guess
-  failures on missing-context tasks.
-
-## 4. The early stop (the closing text turn is NOT mandatory)
-
-The session loop only ends on a model text turn — but the HOST can end it on
-a tool result. There is no `ToolCallingMode` for it (`allowed`/`required`/
-`disallowed` only); the supported combination is:
-
-- append `TaskCompleteTool()` (AIToolKit) to each stage's tool set, and rail
-  the instructions: "call task_complete IN THE SAME turn as your final tool
-  call(s), listed last";
-- attach `.onToolOutput { call, output in record(call, output); if
-  call.toolName == TaskCompleteTool.toolName { throw WorkflowStageComplete() } }`
-  and `.transcriptErrorHandlingPolicy(.preserveTranscript)`;
-- catch `WorkflowStageComplete` around `respond(...)` as success.
-
-Two facts to respect: (1) the aborted turn's tool CALLS stay in the
-preserved transcript but its OUTPUTS do not — record them in the
-`onToolOutput` hook and inject the facts into the act-stage instructions
-(the host is the data plane); (2) a model that forgets the signal just pays
-the normal text turn — graceful fallback. Measured effect: deictic tasks
-2→1 calls (~2–4 s — under a 5 s budget), multi-lookup 4→3, depth-5 chain
-8→7; the gather stage usually keeps its verify round (the model reasonably
-wants to see lookup results before declaring completion).
-
-## 4b. The scoped workflow (select-then-work) — the inverted staging
-
-`ScopedWorkflowProfile` (AIToolKit) stages the *manifest* instead of the
-facts. Step 1: user intent + the finishing-tool catalogue; the model
-declares the needed tool ids through ONE `select_tools` call (an
-`AssistiveTool`), which the host aborts on arrival — one LLM round,
-nothing executes. Step 2: the intent re-sent against the selected
-finishing tools plus only the assistive tools *registered on them*
-(`ScopedFinishingTool.registeredAssistiveTools`); all lookups and actions
-happen here, early-stopped by `task_complete`. The selection crosses the
-stage boundary host-side; nothing else does.
-
-```swift
-let profile = ScopedWorkflowProfile(
-    scopeInstructions: { scopeText },          // select, don't act
-    workInstructions: { workText(localState) },// the whole job + deictic state
-    catalogue: finishing + [SelectToolsTool()],
-    workTools: { state.selectedTools() + [TaskCompleteTool()] }
-)
-.historyTransform { entries in                 // the between-steps diet
+.historyTransform { entries in
     // The runtime SWAPS the head instructions entry in place with the
-    // current stage's instructions — always keep entry 0, cut 1..<cut.
+    // current stage's instructions — ALWAYS keep entry 0, cut 1..<cut.
     entries.enumerated().compactMap { i, e in
         if i == 0, case .instructions = e { return e }
-        return i >= cutIndex ? e : nil
+        return i >= state.cutIndex ? e : nil
     }
 }
-.onToolCall { call in                          // fires BEFORE execution
-    guard inScopeStep else { return }
+.onToolCall { call in                            // fires BEFORE execution
+    guard state.stage == .scope else { return }
     if call.toolName == SelectToolsTool.toolName {
-        record(try TextArgument(call.arguments).value)
+        state.selection = ScopedWorkflowProfile.parseSelection(
+            (try? TextArgument(call.arguments))?.value ?? "",
+            from: finishingNames)
         throw ScopeSelectionComplete()
     }
     throw ScopeStepViolation(toolName: call.toolName)  // blocks premature actions
 }
+.onToolOutput { call, _ in
+    if call.toolName == TaskCompleteTool.toolName {
+        guard state.finishingOutputs > 0 else { throw PrematureCompletion() }
+        throw WorkflowStageComplete()
+    }
+    if finishingNames.contains(call.toolName) { state.finishingOutputs += 1 }
+}
+.transcriptErrorHandlingPolicy(.preserveTranscript)
+
+let session = LanguageModelSession(profile: profile)
+_ = try? await session.respond(to: "User request: \(userText)\n\nSelect the task tools this request needs.")
+state.cutIndex = session.transcript.count
+state.stage = .work
+session.properties.scopedWorkflowStage = .work
+_ = try await session.respond(to: "User request: \(userText)\n\nComplete this request now.")
 ```
 
-Hard-won specifics:
-- A sentinel thrown from `.onToolCall` reaches the host wrapped in
-  `LanguageModelSession.ToolCallError(tool:underlyingError:)` — unwrap one
-  level before matching (`.onToolOutput` throws propagate raw).
-- Guard the early stop: `task_complete` before any FINISHING tool output is
-  a small-model fire-and-forget — surface it as a recoverable error, not a
-  stage end.
-- Small models batch an action WITH the lookup it depends on, binding
-  `{{placeholders}}` — your finishing tools must VALIDATE ids like a real
-  backend (reject empty/unknown ids; a corrective respond then fixes the
-  run). Measured: 20-task battery, pro 20/20 (step-1 2.56 s), mini 19/20
-  (step-1 1.23 s); step-1 stays under 3 s on all tiers.
+For token accounting, install `VolcengineArkUsageMonitor.setHandler { … }` —
+the FM session surface does not expose provider usage.
+
+## 3. The traps (each one cost a battery)
+
+1. **Keep entry 0 in the history transform.** The FM runtime does not
+   append a second instructions entry on stage flip — it swaps the head
+   entry in place before the transform runs. A naive `dropFirst(cut)` cuts
+   the NEW instructions off and the work step runs with no system prompt
+   at all (signature: deictic tasks fail, should-refuse tasks act).
+2. **Unwrap sentinels from `.onToolCall`.** They reach the host wrapped in
+   `LanguageModelSession.ToolCallError(tool:underlyingError:)` — match on
+   `underlyingError`. (`.onToolOutput` throws propagate raw.)
+3. **Guard the early stop.** Small models fire `task_complete` before doing
+   any work, or batch it with the lookups. Only honor it after at least one
+   FINISHING tool output; otherwise surface a recoverable error — a
+   corrective respond sends the model back to work. Give the work step two
+   corrective rounds.
+4. **Validate like a real backend.** Small models batch an action WITH the
+   lookup it depends on, binding `{{placeholders}}` or empty strings.
+   Finishing tools must reject empty/unknown ids, garbage timestamps, and
+   malformed tokens with a thrown error; the corrective respond then fixes
+   the run. Accepting an empty recipient silently is the dishonest behavior.
+5. **Echo lineage in chain-shaped tools.** A tool whose output feeds its
+   next call should echo its input (`next token: X (derived from 'Y')`) —
+   bare opaque outputs make small models commit the wrong iteration.
+6. **Graceful fallbacks everywhere.** A text answer in the scope step is
+   parsed for tool names (`parseSelection`, substring match); an empty
+   selection scopes ALL finishing tools; a model that forgets
+   task_complete pays the normal closing text turn. None of these are
+   failures.
+
+## 4. Prompt rails that are measured to matter
+
+Scope step: "that selection is your ONLY job — do NOT perform the request,
+do NOT call any task tool; call select_tools exactly once"; "select every
+action the request requires; if unsure between two tools, include both;
+lookups and missing details are handled in the next step" (refusal
+decisions belong to the work step, which has the local state).
+
+Work step: "batch ALL independent lookups into ONE turn as parallel tool
+calls" (with `parallel_tool_calls` on the wire); "NEVER call an action tool
+in the same turn as a lookup it depends on"; "when the request specifies a
+NUMBER of repeated calls, count your calls"; "include task_complete IN THE
+SAME turn as the final action call, listed last — do NOT wait to see the
+action's result"; ALWAYS inject the local-state block including explicit
+"none selected"/"AMBIGUOUS — do not guess" lines, with the rail that
+deictic references "are ALREADY resolved in the local device state above —
+do NOT try to look them up (the tools cannot see the user's screen)" and
+the refusal rule (none/AMBIGUOUS → explain, perform NO action).
 
 ## 5. Cost model (so the latency numbers don't surprise you)
 
-The session pays one model round per tool batch. With the early stop:
-deictic/simple tasks = 1 call (~2–4 s); a multi-lookup task = 3 calls
-(lookup batch + completion-signal round + action batch, ~9–12 s); a depth-N
-dependent chain = N+2 — each dependent call must round-trip its
-predecessor's output through the model; that is the irreducible cost. The
-DAG paradigm this replaced did every shape in one call (~4–5 s, 100%/98.3%
-at 117 runs) because the model declared the dataflow once and the device
-executed it locally. The profile paradigm buys API-native simplicity,
-scalar-argument robustness, and the manifest split; it spends round trips
-on dependent steps. Measure before promising latency.
+One model round per dependent hop is the irreducible cost: deictic tasks =
+2 calls (scope + one work turn batching the action with task_complete);
+single-lookup actions = 3 calls; a depth-N dependent chain = N+2±1. The
+scope step is the paradigm's fixed cost — ~1,200 input tokens, 0.6–3 s —
+and it buys manifest isolation, not extra rounds. Measured (20-task
+light/medium battery): pro 20/20 with step-1 mean 2.56 s; mini 19/20 (95%)
+with step-1 mean 1.23 s; step-1 stays under the 3 s budget on all tiers.
 
 ## 6. Reproduce checklist
 
-- [ ] Tools split assistive/finishing; assistive misses return strings.
-- [ ] `parallel_tool_calls` enabled; gather prompt demands one-turn batching.
-- [ ] Local state injected in act instructions unconditionally.
-- [ ] Early stop wired (task_complete + onToolOutput throw + preserveTranscript
-      + host-side fact log for the gather outputs).
-- [ ] temperature 0.2; thinking off (provider default).
-- [ ] Score by side effects on your domain store, never by the model's prose.
+- [ ] Finishing tools conform to `ScopedFinishingTool` and register their
+      assistive tools; assistive misses return strings.
+- [ ] Scope step: catalogue + `SelectToolsTool` only; throwing `onToolCall`
+      records the selection and blocks any other call.
+- [ ] Cut-index `historyTransform` that KEEPS entry 0.
+- [ ] Early stop wired (task_complete + onToolOutput throw +
+      preserveTranscript) and guarded by a finishing-output count.
+- [ ] Finishing tools validate ids/timestamps/tokens like a real backend.
+- [ ] User intent verbatim in both prompts; local state injected in work
+      instructions unconditionally.
+- [ ] `parallel_tool_calls` enabled; temperature 0.2; thinking off
+      (provider default).
+- [ ] Score by side effects on your domain store, never by the model's
+      prose.
