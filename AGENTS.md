@@ -14,11 +14,12 @@ stop); the cloud model executor is `VolcengineArkFoundationModels` (nested
 in this repo), which maps `GenerationOptions.toolCallingMode` to the wire's
 `tool_choice`.
 
-> Earlier paradigms were removed from this guide as they were superseded:
-> the lean-plan DAG (library code survives at AIKit `81d3323` / AIToolKit
-> `9fd1ea6`) and the gather→act profile workflow (recipe survives in this
-> file's git history). Their measured numbers and root-cause analyses are
-> recorded in the experiment repo (`Findings.md` Parts I–XVII).
+> Earlier paradigms were removed from code and docs as they were
+> superseded: the lean-plan DAG (library code survives at AIKit `81d3323`
+> / AIToolKit `9fd1ea6`) and the gather→act profile workflow
+> (`WorkflowProfile`, removed from AIToolKit; recipe and code survive in
+> git history). The experiment repo's history holds the comparative
+> batteries.
 
 ## 1. The paradigm
 
@@ -197,8 +198,8 @@ Deictic and refusal tasks = 2 calls; one-lookup actions = 3 (an action
 cannot be issued before the lookup's result exists); a depth-N opaque
 chain = N+2. Nothing below that is reachable in a session paradigm without
 host-side dataflow execution — which is the retired DAG. Measured (20-task
-light/medium battery, text-selection build): mini **20/20**, step-1 0.76 s
-mean at 3 output tokens, total mean 3.51 s.
+light/medium battery, single-method build): mini **20/20**, step-1 0.79 s
+mean at 3 output tokens, total mean 4.03 s.
 
 ## 6. Reproduce checklist
 
