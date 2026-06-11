@@ -9,10 +9,9 @@ let swiftSettings: [SwiftSetting] = [
 let package = Package(
     name: "VolcengineArkFoundationModels",
     platforms: [
-        .iOS("26.5"),
-        .macOS("26.5"),
-        .visionOS("26.5"),
-        .watchOS("27.0"),
+        .iOS("27.0"),
+        .macOS("27.0"),
+        .visionOS("27.0"),
     ],
     products: [
         .library(

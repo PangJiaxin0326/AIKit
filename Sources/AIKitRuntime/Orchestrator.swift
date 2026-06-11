@@ -721,14 +721,15 @@ public actor Orchestrator {
     /// recorded to memory under the current leaf view, exactly like a
     /// sequential turn's tool calls.
     ///
-    /// Hosts should prefer this over driving a `WorkflowTwoRoundRunner` off to
-    /// the side: a side-run workflow is invisible to `activityUpdates()` (so a
-    /// floating assistant button never reflects it) and never lands in the
-    /// activity history (so it can't be scoped to the active view). The
-    /// `harvester`, planner tool subset, and harvest `sources` are the same
-    /// ones you would hand the runner; `model`, temperature, and the tool
-    /// `viewID` are taken from this orchestrator's own configuration and the
-    /// resolver's current leaf.
+    /// Hosts should prefer this over driving the built-in workflow tools
+    /// (`WorkflowPlanTool` → `WorkflowExecuteTool`) off to the side: a
+    /// side-run workflow is invisible to `activityUpdates()` (so a floating
+    /// assistant button never reflects it) and never lands in the activity
+    /// history (so it can't be scoped to the active view). The `harvester`,
+    /// planner tool subset, and harvest `sources` are the same ones you would
+    /// hand the tools; `model`, temperature, and the tool `viewID` are taken
+    /// from this orchestrator's own configuration and the resolver's current
+    /// leaf.
     public func runWorkflowTask(
         intent: String,
         harvester: any ContextHarvesting,
@@ -791,38 +792,68 @@ public actor Orchestrator {
         }
 
         // The plan and bind rounds are model calls; surface them as "thinking"
-        // so the pet pulses for the whole turn. (The runner executes the DAG
-        // locally, so there's no per-node phase to forward.)
+        // so the pet pulses for the whole turn. (The DAG executes locally, so
+        // there's no per-node phase to forward.)
         setPhase(.thinking, turn: turnID)
         if Task.isCancelled {
             await finishTurn(turnID, outcome: .cancelled)
             return
         }
 
-        let runner = WorkflowTwoRoundRunner(
+        // The built-in two-round pair: the plan tool's LLM call sees the tool
+        // manifest + intent and minimal context; the execute tool's optional
+        // Binder call sees the DAG + harvested context and no manifest.
+        let planTool = WorkflowPlanTool(
             llm: llm,
             tools: allTools,
-            harvester: harvester,
             plannerToolNames: plannerToolNames,
+            sources: sources,
             options: .init(
                 model: selectedModel,
-                sources: sources,
                 temperature: options.temperature,
-                useStructuredPlannerOutput: useStructuredPlannerOutput,
-                autoBind: autoBind
+                useStructuredPlannerOutput: useStructuredPlannerOutput
             ),
             guardrails: guardrails,
             planCache: planCache
         )
-
-        let result = await runner.run(intent: intent)
+        let planned = await planTool.plan(intent: intent)
         if Task.isCancelled {
             await finishTurn(turnID, outcome: .cancelled)
             return
         }
-        for call in result.calls {
+        for call in planned.calls {
             addUsage(call.usage, turn: turnID)
             emit(.usage(call.usage))
+        }
+
+        let result: WorkflowExecuteTool.Result
+        switch planned.outcome {
+        case .refused(let reason):
+            result = .init(outcome: .refused(reason), calls: [], trace: [])
+        case .failed(let reason):
+            result = .init(outcome: .failed(reason), calls: [], trace: [])
+        case .planned(let plan):
+            let executeTool = WorkflowExecuteTool(
+                llm: llm,
+                tools: allTools,
+                harvester: harvester,
+                sources: sources,
+                options: .init(
+                    model: selectedModel,
+                    temperature: options.temperature,
+                    autoBind: autoBind
+                ),
+                guardrails: guardrails
+            )
+            result = await executeTool.execute(plan: plan)
+            if Task.isCancelled {
+                await finishTurn(turnID, outcome: .cancelled)
+                return
+            }
+            for call in result.calls {
+                addUsage(call.usage, turn: turnID)
+                emit(.usage(call.usage))
+            }
         }
 
         switch result.outcome {

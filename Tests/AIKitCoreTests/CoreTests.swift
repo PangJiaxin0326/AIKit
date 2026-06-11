@@ -16,9 +16,9 @@ import AIKitTestSupport
             contentsOf: packageRoot.appendingPathComponent("Package.swift"),
             encoding: .utf8
         )
-        #expect(manifest.contains(".iOS(\"26.5\")"))
-        #expect(manifest.contains(".macOS(\"26.5\")"))
-        #expect(manifest.contains(".visionOS(\"26.5\")"))
+        #expect(manifest.contains(".iOS(\"27.0\")"))
+        #expect(manifest.contains(".macOS(\"27.0\")"))
+        #expect(manifest.contains(".visionOS(\"27.0\")"))
     }
 }
 

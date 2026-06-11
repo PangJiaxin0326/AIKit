@@ -1166,7 +1166,7 @@ private extension ContextOptions.ReasoningLevel {
         case .custom(let value):
             value
         @unknown default:
-            "medium"
+            "minimal"
         }
     }
 }

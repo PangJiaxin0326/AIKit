@@ -183,10 +183,11 @@ second LLM pass. In workflow-planning mode, providers see only the synthetic
 this path to AIToolKit's lean schema, fixed worked example, and temperature
 0.2 guidance to reduce output tokens while keeping graph structure reliable.
 
-For local/private context tasks, use `runWorkflowTask(...)` or
-`WorkflowTwoRoundRunner`: the planner can declare context slots, AIKit harvests
-trusted local candidates, auto-bind skips the binder when the result is
-unambiguous, and `WorkflowPlanCache` can skip repeated planner calls.
+For local/private context tasks, use `runWorkflowTask(...)` or the built-in
+tool pair `WorkflowPlanTool` → `WorkflowExecuteTool`: the planner can declare
+context slots, AIKit harvests trusted local candidates, auto-bind skips the
+binder when the result is unambiguous, and `WorkflowPlanCache` can skip
+repeated planner calls.
 
 The current two-round-trip reproduction recipe is intentionally not duplicated
 here. Treat [AGENTS.md](AGENTS.md) as the single source of truth for paradigm

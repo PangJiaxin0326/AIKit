@@ -390,7 +390,7 @@ public struct AIKitChatbotTabBar<Item: AIKitChatbotTab, TabContent: View, TabFab
                 }
             }
 
-            Tab(value: .none, role: .search) {
+            Tab(value: .none, role: .prominent) {
                 // The selection wrapper refuses this tab, but SwiftUI still
                 // renders its content for one frame on tap. An EmptyView paints
                 // that frame white — a visible flash in the content area. Fill
@@ -412,9 +412,14 @@ public struct AIKitChatbotTabBar<Item: AIKitChatbotTab, TabContent: View, TabFab
         .tabBarMinimizeBehavior(.onScrollDown)
         // External (e.g. AI-driven) navigation sets `activeTab`; mirror it into
         // the TabView's `selectedTab` storage. The reverse direction (user taps)
-        // flows through `tabSelection`'s setter.
+        // flows through `tabSelection`'s setter. The mirror write is deferred
+        // one hop: we're mid-update here, and the accessory field must resign
+        // BEFORE the selection write (the setter's proven resign-then-write
+        // order) or the focus re-resolution storms AttributeGraph.
         .onChange(of: activeTab) { _, newValue in
-            if let newValue, newValue != selectedTab {
+            guard let newValue, newValue != selectedTab else { return }
+            Task { @MainActor in
+                dismissKeyboard()
                 selectedTab = newValue
                 lastActiveTab = newValue
             }
@@ -454,6 +459,14 @@ public struct AIKitChatbotTabBar<Item: AIKitChatbotTab, TabContent: View, TabFab
                     Task { @MainActor in toggleFABPanel() }
                     return
                 }
+                // Resign the accessory text field BEFORE the selection write.
+                // A focused field inside tabViewBottomAccessory spans the
+                // focus system across the accessory and the tab content;
+                // re-resolving that focus during the selection transaction is
+                // what AttributeGraph reports as a cycle storm. This setter
+                // runs from UIKit event handling — before SwiftUI's update —
+                // so resigning synchronously here is safe and early enough.
+                dismissKeyboard()
                 selectedTab = newValue
                 lastActiveTab = newValue
                 if activeTab != newValue { activeTab = newValue }
@@ -464,6 +477,13 @@ public struct AIKitChatbotTabBar<Item: AIKitChatbotTab, TabContent: View, TabFab
 
     @MainActor
     private func toggleFABPanel() {
+        // Same pre-transaction resignation as in `tabSelection`'s setter:
+        // toggling the panel re-renders the tab content under a focused
+        // accessory field, which storms AttributeGraph the same way a tab
+        // switch does. Both call sites (the selection setter's `.none`
+        // branch and the tab-bar tap interceptor) arrive from UIKit event
+        // handling, so resigning here is still ahead of SwiftUI's update.
+        dismissKeyboard()
         showsRuntimeDetails = false
         isFABExpanded.toggle()
         Task { await refreshSnapshot() }
@@ -2429,6 +2449,11 @@ private struct AIKitTabFabPanel<CustomContent: View>: View {
     /// Tracks the software keyboard so the first free-space tap dismisses it
     /// rather than resizing the panel.
     @State private var keyboardVisible = false
+    /// The sticky failure the user dismissed in place. Dismissal is local to
+    /// the panel — the orchestrator keeps the sticky reason so the input bar
+    /// can still build a clarification follow-up — and is forgotten when a
+    /// new run clears the sticky reason.
+    @State private var dismissedFailureReason: String?
 
     init(
         context: AIKitOverlayContext,
@@ -2484,6 +2509,18 @@ private struct AIKitTabFabPanel<CustomContent: View>: View {
         .frame(height: panelHeight, alignment: .top)
         .contentShape(.rect)
         .onTapGesture { handleFreeSpaceTap() }
+        // After the tap gesture, so the failure surface absorbs taps instead
+        // of resizing the panel beneath it.
+        .overlay {
+            if let reason = visibleFailureReason {
+                failureOverlay(reason)
+                    .transition(.opacity)
+            }
+        }
+        .animation(.snappy(duration: 0.2), value: visibleFailureReason)
+        .onChange(of: activity.failureReason) { _, reason in
+            if reason == nil { dismissedFailureReason = nil }
+        }
         .onReceive(NotificationCenter.default.publisher(
             for: UIResponder.keyboardWillShowNotification
         )) { _ in
@@ -2494,6 +2531,45 @@ private struct AIKitTabFabPanel<CustomContent: View>: View {
         )) { _ in
             keyboardVisible = false
         }
+    }
+
+    /// The sticky failure — an LLM error or the model's request for
+    /// clarification — to surface over the panel, unless already dismissed.
+    private var visibleFailureReason: String? {
+        guard let reason = activity.failureReason,
+              reason != dismissedFailureReason
+        else { return nil }
+        return reason
+    }
+
+    /// Fills the whole panel with the failure message until the user
+    /// dismisses it back to the panel's regular content.
+    private func failureOverlay(_ reason: String) -> some View {
+        VStack(spacing: 14) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.title2)
+                .foregroundStyle(.orange)
+            ScrollView {
+                Text(reason)
+                    .font(.callout)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity)
+            }
+            .scrollIndicators(.hidden)
+            Button {
+                dismissedFailureReason = reason
+            } label: {
+                aiKitText("Dismiss")
+                    .font(.callout.weight(.medium))
+                    .padding(.horizontal, 8)
+            }
+            .buttonStyle(.bordered)
+            .buttonBorderShape(.capsule)
+        }
+        .padding(AIKitMetrics.panelPadding)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(.regularMaterial)
     }
 
     /// A tap on the panel's free space toggles its height — but while the
@@ -2593,8 +2669,13 @@ private struct AssistantTabBottomAccessory: View {
         // No background of our own: the system tab accessory already
         // renders the row on its glass surface, so an extra tinted capsule
         // only leaves uncovered gaps around the row.
+        //
+        // No .ignoresSafeArea(.keyboard) either: the system positions the
+        // accessory relative to the keyboard, so a keyboard-dependent
+        // safe-area attribute inside it makes the layout self-referential —
+        // AttributeGraph reports a cycle storm while the accessory
+        // re-anchors (e.g. switching tabs with the keyboard up).
         .frame(maxWidth: .infinity, minHeight: 44)
-        .ignoresSafeArea(.keyboard, edges: .bottom)
         .task {
             for await update in orchestrator.activityUpdates() {
                 activity = update
