@@ -2,10 +2,13 @@
 
 This is the reproduction guide for the **scoped workflow (select-then-work)
 agent**: one native `LanguageModelSession` over AIToolKit's
-`ScopedWorkflowProfile`, two staged LLM calls — the model first *names the
-finishing tools* the request needs (a plain-text reply against the rendered
-catalogue, tool calling disallowed), then does *all the work* against only
-the selected tools and the assistive unit requests registered on them.
+`ScopedWorkflowProfile`, two staged LLM calls — the model first returns a
+TYPED `ScopedToolSelection` (guided generation against the rendered
+catalogue, tool calling disallowed) naming the finishing tools the request
+needs, then does *all the work* against only the selected tools and the
+assistive unit requests registered on them. The flow this powers: user
+intent → step 1 (fast) → the typed selection drives a per-tool progress
+view → step 2 runs and is host-stopped → result presented.
 **Both steps are ended by host configuration, in code** — no model
 completion signal, no closing text turn after acting. The pieces live in
 the sibling package **AIToolKit** (`AssistiveTool.swift`,
@@ -28,11 +31,13 @@ ONE LanguageModelSession(profile: ScopedWorkflowProfile…)
   step .scope  →  instructions: name the tools, nothing else — the
                   finishing-tool catalogue is RENDERED INTO the
                   instructions as text; tool calling is DISALLOWED
-                  (tool_choice: none), so the model answers in plain text
-                  with the bare tool-name list (~3 output tokens) and
-                  cannot act prematurely by configuration.
-                  One round, ends on its own short text turn.
-  host parses the names (parseSelection), flips
+                  (tool_choice: none) and the reply is GUIDED
+                  (respond(generating: ScopedToolSelection.self) → wire
+                  response_format): a typed array of tool names, usually
+                  one, ~9 output tokens. The model cannot act prematurely
+                  by configuration. One fast round.
+  host validates the selection (validated(against:)), shows the
+                  progress hint, flips
                   session.properties.scopedWorkflowStage = .work,
                   and sets the historyTransform cut index
   step .work   →  instructions: the whole job + injected local deictic state
@@ -72,7 +77,9 @@ import VolcengineArkFoundationModels   // VolcengineArkLanguageModel
 var extraBody = VolcengineArkConfiguration.defaultWireExtraBody
 extraBody["parallel_tool_calls"] = .bool(true)
 let model = VolcengineArkLanguageModel(configuration: .init(
-    apiKey: key, model: modelID, defaultExtraBody: extraBody))
+    apiKey: key, model: modelID, defaultExtraBody: extraBody,
+    capabilities: [.toolCalling, .reasoning, .guidedGeneration]))
+    // ^ FM gates respond(generating:) on the declared capability
 
 let monitor = WorkTurnMonitor(finishingToolNames: finishingNames)
 let profile = ScopedWorkflowProfile(
@@ -104,29 +111,37 @@ let profile = ScopedWorkflowProfile(
 .transcriptErrorHandlingPolicy(.preserveTranscript)
 
 let session = LanguageModelSession(profile: profile)
-// call 1 — one short text turn; parse the names out of it
-let text = try await session.respond(to: "User request: \(userText)\n\nSelect the task tools this request needs.").content
-state.selection = ScopedWorkflowProfile.parseSelection(text, from: finishingNames)
+// step 1 — one fast guided round; the TYPED selection is the UI hint
+let selection = try await session.respond(
+    to: "User request: \(userText)\n\nSelect the task tools this request needs.",
+    generating: ScopedToolSelection.self
+).content
+state.selection = selection.validated(against: finishingNames)
+showProgressView(for: state.selection)          // "Drafting an email…"
 state.cutIndex = session.transcript.count
 state.stage = .work
 session.properties.scopedWorkflowStage = .work
-// call 2… — host-stopped by WorkTurnMonitor; give 2 corrective rounds
+// step 2… — host-stopped by WorkTurnMonitor; give 2 corrective rounds
 _ = try await session.respond(to: "User request: \(userText)\n\nComplete this request now.")
+presentResult()
 ```
 
 For token accounting, install `VolcengineArkUsageMonitor.setHandler { … }` —
 the FM session surface does not expose provider usage.
 
-## 3. Why the selection is text, and the host stop
+## 3. Why the selection is guided, and the host stop
 
-**Text, not a tool call:** on an OpenAI-style wire, any tool call bills
-~30+ output tokens — the function-call envelope costs ~20 invisible tokens
-on top of the visible JSON (measured on Doubao; `tool_choice: required`
-does not shrink it). The bare tool-name list as text is ~3 tokens, and
-`toolCallingMode(.disallowed)` makes premature actions impossible by
-configuration — no hook guard, no violation handling.
-`maximumResponseTokens` (profile init parameter, default 64) is the ramble
-backstop; a truncated reply still substring-parses.
+**Guided generation, not a tool call:** on an OpenAI-style wire, any tool
+call bills ~30+ output tokens — the function-call envelope costs ~20
+invisible tokens on top of the visible JSON (measured on Doubao;
+`tool_choice: required` does not shrink it). The guided
+`{"toolNames":["send_message"]}` is ~9 tokens and arrives as a TYPED
+value the orchestrator can switch UI on; `toolCallingMode(.disallowed)`
+makes premature actions impossible by configuration.
+`maximumResponseTokens` (profile init parameter, default 64) is the
+ramble backstop. NOTE: FM gates `respond(generating:)` on the model's
+declared capabilities and fails BEFORE any network call — declare
+`.guidedGeneration` in the executor configuration.
 
 **The host stop:** `WorkTurnMonitor` counts the current tool turn from the
 hooks. Verified on the OS 27 SDK: ALL of a parallel batch's `onToolCall`s
@@ -198,16 +213,18 @@ Deictic and refusal tasks = 2 calls; one-lookup actions = 3 (an action
 cannot be issued before the lookup's result exists); a depth-N opaque
 chain = N+2. Nothing below that is reachable in a session paradigm without
 host-side dataflow execution — which is the retired DAG. Measured (20-task
-light/medium battery, single-method build): mini **20/20**, step-1 0.79 s
-mean at 3 output tokens, total mean 4.03 s.
+light/medium battery, mini — the experiment's only model by decision):
+**19/20** (the miss is mini's flaky depth-2 chain), step-1 0.66 s mean at
+9 output tokens (~520 in), total mean 3.31 s.
 
 ## 6. Reproduce checklist
 
 - [ ] Finishing tools conform to `ScopedFinishingTool` and register their
       assistive tools; assistive misses return strings.
 - [ ] Scope step: catalogue handed to the profile (it renders the text);
-      NO tools callable; reply parsed with `parseSelection`; empty
-      selection falls back to the full finishing set.
+      NO tools callable; reply generated as `ScopedToolSelection` and
+      `validated(against:)` the catalogue; empty selection falls back to
+      the full finishing set; `.guidedGeneration` declared on the model.
 - [ ] Cut-index `historyTransform` that KEEPS entry 0.
 - [ ] `WorkTurnMonitor` fed from both hooks; `WorkflowStageComplete` thrown
       from `onToolOutput` when it reports completion. NO task_complete tool.
