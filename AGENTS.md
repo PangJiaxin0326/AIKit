@@ -110,6 +110,56 @@ the normal text turn — graceful fallback. Measured effect: deictic tasks
 8→7; the gather stage usually keeps its verify round (the model reasonably
 wants to see lookup results before declaring completion).
 
+## 4b. The scoped workflow (select-then-work) — the inverted staging
+
+`ScopedWorkflowProfile` (AIToolKit) stages the *manifest* instead of the
+facts. Step 1: user intent + the finishing-tool catalogue; the model
+declares the needed tool ids through ONE `select_tools` call (an
+`AssistiveTool`), which the host aborts on arrival — one LLM round,
+nothing executes. Step 2: the intent re-sent against the selected
+finishing tools plus only the assistive tools *registered on them*
+(`ScopedFinishingTool.registeredAssistiveTools`); all lookups and actions
+happen here, early-stopped by `task_complete`. The selection crosses the
+stage boundary host-side; nothing else does.
+
+```swift
+let profile = ScopedWorkflowProfile(
+    scopeInstructions: { scopeText },          // select, don't act
+    workInstructions: { workText(localState) },// the whole job + deictic state
+    catalogue: finishing + [SelectToolsTool()],
+    workTools: { state.selectedTools() + [TaskCompleteTool()] }
+)
+.historyTransform { entries in                 // the between-steps diet
+    // The runtime SWAPS the head instructions entry in place with the
+    // current stage's instructions — always keep entry 0, cut 1..<cut.
+    entries.enumerated().compactMap { i, e in
+        if i == 0, case .instructions = e { return e }
+        return i >= cutIndex ? e : nil
+    }
+}
+.onToolCall { call in                          // fires BEFORE execution
+    guard inScopeStep else { return }
+    if call.toolName == SelectToolsTool.toolName {
+        record(try TextArgument(call.arguments).value)
+        throw ScopeSelectionComplete()
+    }
+    throw ScopeStepViolation(toolName: call.toolName)  // blocks premature actions
+}
+```
+
+Hard-won specifics:
+- A sentinel thrown from `.onToolCall` reaches the host wrapped in
+  `LanguageModelSession.ToolCallError(tool:underlyingError:)` — unwrap one
+  level before matching (`.onToolOutput` throws propagate raw).
+- Guard the early stop: `task_complete` before any FINISHING tool output is
+  a small-model fire-and-forget — surface it as a recoverable error, not a
+  stage end.
+- Small models batch an action WITH the lookup it depends on, binding
+  `{{placeholders}}` — your finishing tools must VALIDATE ids like a real
+  backend (reject empty/unknown ids; a corrective respond then fixes the
+  run). Measured: 20-task battery, pro 20/20 (step-1 2.56 s), mini 19/20
+  (step-1 1.23 s); step-1 stays under 3 s on all tiers.
+
 ## 5. Cost model (so the latency numbers don't surprise you)
 
 The session pays one model round per tool batch. With the early stop:
