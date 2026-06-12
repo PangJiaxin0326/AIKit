@@ -21,9 +21,6 @@ public struct LLMRequest: Sendable, Hashable {
     /// map it to a `response_format` JSON-schema constraint. Providers that
     /// support neither ignore it and return freeform text.
     public var responseSchema: GenerationSchema?
-    /// Requests generated voice/audio output from providers that support it.
-    /// Providers that do not support audio output throw `LLMError.unsupported`.
-    public var audioOutput: AudioOutputOptions?
 
     public init(
         model: String,
@@ -32,8 +29,7 @@ public struct LLMRequest: Sendable, Hashable {
         tools: [ToolDescriptor] = [],
         temperature: Double? = nil,
         maxTokens: Int? = nil,
-        responseSchema: GenerationSchema? = nil,
-        audioOutput: AudioOutputOptions? = nil
+        responseSchema: GenerationSchema? = nil
     ) {
         self.model = model
         self.system = system
@@ -42,7 +38,6 @@ public struct LLMRequest: Sendable, Hashable {
         self.temperature = temperature
         self.maxTokens = maxTokens
         self.responseSchema = responseSchema
-        self.audioOutput = audioOutput
     }
 
     public static func == (lhs: Self, rhs: Self) -> Bool {
@@ -52,8 +47,7 @@ public struct LLMRequest: Sendable, Hashable {
         lhs.tools.map(\.aikitHashSignature) == rhs.tools.map(\.aikitHashSignature) &&
         lhs.temperature == rhs.temperature &&
         lhs.maxTokens == rhs.maxTokens &&
-        lhs.responseSchema.aikitSchemaSignature == rhs.responseSchema.aikitSchemaSignature &&
-        lhs.audioOutput == rhs.audioOutput
+        lhs.responseSchema.aikitSchemaSignature == rhs.responseSchema.aikitSchemaSignature
     }
 
     public func hash(into hasher: inout Hasher) {
@@ -64,7 +58,6 @@ public struct LLMRequest: Sendable, Hashable {
         hasher.combine(temperature)
         hasher.combine(maxTokens)
         hasher.combine(responseSchema.aikitSchemaSignature)
-        hasher.combine(audioOutput)
     }
 }
 

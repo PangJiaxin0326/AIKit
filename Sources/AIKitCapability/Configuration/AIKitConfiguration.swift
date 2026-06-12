@@ -175,18 +175,15 @@ public struct AIKitConfiguration: Codable, Sendable, Hashable {
         public var contextDisplayName: String
         public var systemPromptFragment: String
         public var enabledToolNames: Set<String>
-        public var memoryLimit: Int
 
         public init(
             contextDisplayName: String = "Root",
             systemPromptFragment: String = "",
-            enabledToolNames: Set<String> = [],
-            memoryLimit: Int = 20
+            enabledToolNames: Set<String> = []
         ) {
             self.contextDisplayName = contextDisplayName
             self.systemPromptFragment = systemPromptFragment
             self.enabledToolNames = enabledToolNames
-            self.memoryLimit = memoryLimit
         }
     }
 
@@ -464,8 +461,6 @@ extension AIKitConfiguration {
             capability.systemPromptFragment = try value.string(section: .capability, key: originalKey)
         case "tools", "enabledtools", "enabledtoolnames", "toolnames":
             capability.enabledToolNames = try value.stringSet(section: .capability, key: originalKey)
-        case "memorylimit":
-            capability.memoryLimit = try value.int(section: .capability, key: originalKey)
         default:
             throw AIKitConfigurationError.unknownKey(section: .capability, key: originalKey)
         }

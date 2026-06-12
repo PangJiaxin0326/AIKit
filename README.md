@@ -40,7 +40,6 @@ let provider = VolcengineArkProvider(
 // let provider = AppleIntelligenceProvider()
 // Or explicitly route through Private Cloud Compute on supported OS releases:
 // let provider = AppleIntelligenceProvider(endpoint: .privateCloudCompute)
-let llm = LLMClient(provider: provider)
 
 // 2. Tools available to the agent — the official [any Tool] currency.
 let memory = try SwiftDataMemoryStore(path: dbPath)
@@ -78,7 +77,7 @@ let policy = PolicyEngine(rails: [
 
 // 5. Orchestrate one turn.
 let orchestrator = Orchestrator(
-    llm: llm,
+    llm: provider,
     tools: tools,
     memory: memory,
     contextResolver: resolver,
@@ -109,14 +108,13 @@ The Core dashboard uses shared `AIKitProviderDefinition` metadata for
 Volcengine Ark and Apple Intelligence, including Ark's model-list and chat
 completion endpoints plus static Apple Intelligence model IDs for
 `apple-intelligence` and `private-cloud-compute`.
-`AppleIntelligenceProvider` uses Apple's on-device Foundation Models framework,
-requires Apple Intelligence to be available on the device, and does not need an
-API key. On iOS/macOS/watchOS/visionOS 27 and newer it can route through
-`PrivateCloudComputeLanguageModel` by using
-`AppleIntelligenceProvider(endpoint: .privateCloudCompute)`, falling back to the
-on-device model only for PCC network failures. It reports
-`supportsNativeTools == false`, so AIKit enables the fenced tool-call fallback
-and keeps dispatching the parsed calls onto the host's tools itself.
+`AppleIntelligenceProvider` uses Apple's Foundation Models framework, requires
+Apple Intelligence to be available on the device, and does not need an API key.
+Requests ride the official `LanguageModel` executor path (the same machinery a
+`LanguageModelSession` uses), so tool calls are native and guided generation
+uses the system implementation. `AppleIntelligenceProvider(endpoint:
+.privateCloudCompute)` routes through `PrivateCloudComputeLanguageModel`,
+falling back to the on-device model only for PCC network failures.
 
 Messages can include multimodal blocks:
 
@@ -133,8 +131,7 @@ let request = LLMRequest(
 ```
 
 Volcengine Ark supports text and image input through chat-completions content
-blocks. Unsupported media modes, including audio input and generated audio
-output, throw `LLMError.unsupported`.
+blocks.
 
 ## SwiftUI
 

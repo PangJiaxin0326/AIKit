@@ -67,6 +67,16 @@ package enum AIKitMalformedToolInput {
         }
         return nil
     }
+
+    /// `GeneratedContent(json:)` is a lenient partial-JSON parser (it exists
+    /// for streaming snapshots), so truncated tool arguments would silently
+    /// decode as partial objects. Callers run this strict pass first and
+    /// route incomplete JSON to the malformed-input sentinel instead.
+    package static func isCompleteJSON(_ json: String) -> Bool {
+        (try? JSONSerialization.jsonObject(
+            with: Data(json.utf8), options: [.fragmentsAllowed]
+        )) != nil
+    }
 }
 
 func validatedProviderData(
@@ -82,21 +92,6 @@ func validatedProviderData(
     }
     try validateProviderHTTPResponse(response, data: data)
     return data
-}
-
-func validatedProviderBytes(
-    for request: URLRequest,
-    session: URLSession
-) async throws -> URLSession.AsyncBytes {
-    let bytes: URLSession.AsyncBytes
-    let response: URLResponse
-    do {
-        (bytes, response) = try await session.bytes(for: request)
-    } catch {
-        throw LLMError.from(transport: error)
-    }
-    try validateProviderHTTPResponse(response, data: Data())
-    return bytes
 }
 
 func validateProviderHTTPResponse(_ response: URLResponse, data: Data) throws {

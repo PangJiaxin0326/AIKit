@@ -263,6 +263,9 @@ enum AIKitMetrics {
     /// Section surfaces and their icon badges share one measured curve.
     static let cardRadius: CGFloat = 18
     static let fieldRadius: CGFloat = 12
+    /// One shared width for every inline value field, so the trailing boxes
+    /// align into a single column and always fit beside their row label.
+    static let fieldWidth: CGFloat = 160
     static let badgeRadius: CGFloat = 9
     static let badgeSize: CGFloat = 32
     /// Comfortable reading measure; the column centers within wider windows.
@@ -906,7 +909,9 @@ public struct AIKitView: View {
                 Button {
                     model.selectModel(nil, for: selectedProvider)
                 } label: {
-                    aiKitText("None")
+                    Text(AIKitUILocalization.string(
+                        "None (\(modelOptions.count) models available)"
+                    ))
                 }
                 Divider()
                 ForEach(modelOptions, id: \.self) { modelName in
@@ -969,23 +974,6 @@ public struct AIKitView: View {
     private var coreSection: some View {
         AIKitConfigurationSection(title: "Core", systemImage: "cpu", tint: .blue) {
             providerCredentialRow
-
-            if let modelCatalogStatus = model.modelCatalogStatus(for: selectedProvider) {
-                Label(
-                    modelCatalogStatus,
-                    systemImage: model.modelCatalogStatusIsError(for: selectedProvider)
-                        ? "exclamationmark.triangle.fill"
-                        : "checkmark.circle.fill"
-                )
-                    .font(.footnote)
-                    .foregroundStyle(
-                        model.modelCatalogStatusIsError(for: selectedProvider) ? .red : .secondary
-                    )
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 9)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .aiKitContainerStyle()
-            }
 
             LabeledContent {
                 TextField(
@@ -1073,15 +1061,6 @@ public struct AIKitView: View {
                     .padding(8)
                     .frame(minHeight: 92)
                     .aiKitContainerStyle()
-            }
-            LabeledContent {
-                Stepper(
-                    "\(model.configuration.capability.memoryLimit)",
-                    value: binding(\.capability.memoryLimit),
-                    in: 0...500
-                )
-            } label: {
-                aiKitText("Memory window")
             }
             if model.availableTools.isEmpty {
                 LabeledContent {
@@ -1488,7 +1467,7 @@ struct AssistantChatbotOverlay<DetailContent: View>: View {
         guard activity.isBusy else { return "pawprint.fill" }
         switch activity.phase {
         case .idle, .preparing: return "hourglass"
-        case .thinking: return "sparkles"
+        case .thinking, .externalWork: return "sparkles"
         case .callingTool: return "wrench.and.screwdriver.fill"
         case .verifying: return "checkmark.shield.fill"
         }
@@ -2104,12 +2083,6 @@ public struct AssistantRuntimeDetailView: View {
 @MainActor
 @Observable
 private final class AIKitConfigurationViewModel {
-    private struct ModelCatalogState {
-        var status: String?
-        var statusIsError = false
-        var isRefreshing = false
-    }
-
     var configuration: AIKitConfiguration
     var availableTools: [ToolDescriptor] = []
     var recentChanges: [AIKitConfigurationChange] = []
@@ -2118,7 +2091,7 @@ private final class AIKitConfigurationViewModel {
     private let store: AIKitConfigurationStore
     private let tools: [any Tool]
     private let modelCatalog: AIKitModelCatalog
-    private var modelCatalogStates: [AIKitProviderKind: ModelCatalogState] = [:]
+    private var refreshingProviders: Set<AIKitProviderKind> = []
     @ObservationIgnored private var saveTask: Task<Void, Never>?
 
     init(
@@ -2150,16 +2123,8 @@ private final class AIKitConfigurationViewModel {
         return configuredModels.isEmpty ? provider.definition.staticModelIDs : configuredModels
     }
 
-    func modelCatalogStatus(for provider: AIKitProviderKind) -> String? {
-        modelCatalogStates[provider]?.status
-    }
-
-    func modelCatalogStatusIsError(for provider: AIKitProviderKind) -> Bool {
-        modelCatalogStates[provider]?.statusIsError ?? false
-    }
-
     func isRefreshingModels(for provider: AIKitProviderKind) -> Bool {
-        modelCatalogStates[provider]?.isRefreshing ?? false
+        refreshingProviders.contains(provider)
     }
 
     func selectProvider(_ provider: AIKitProviderKind) {
@@ -2170,13 +2135,6 @@ private final class AIKitConfigurationViewModel {
     func selectModel(_ model: String?, for provider: AIKitProviderKind) {
         var providerConfiguration = configuration.core.providerConfiguration(for: provider)
         providerConfiguration.defaultModel = model?.emptyAsNil
-        configuration.core.setProviderConfiguration(providerConfiguration, for: provider)
-        saveCurrentConfiguration(status: "Saved")
-    }
-
-    func selectEndpointURL(_ endpointURL: String?, for provider: AIKitProviderKind) {
-        var providerConfiguration = configuration.core.providerConfiguration(for: provider)
-        providerConfiguration.endpointURL = endpointURL?.emptyAsNil
         configuration.core.setProviderConfiguration(providerConfiguration, for: provider)
         saveCurrentConfiguration(status: "Saved")
     }
@@ -2196,7 +2154,6 @@ private final class AIKitConfigurationViewModel {
 
     func resetToDefaults() {
         configuration = .standard
-        modelCatalogStates = [:]
         saveCurrentConfiguration(status: "Reset")
     }
 
@@ -2204,17 +2161,9 @@ private final class AIKitConfigurationViewModel {
         provider: AIKitProviderKind,
         apiKey: String
     ) async {
-        guard !isRefreshingModels(for: provider) else { return }
-        updateModelCatalogState(provider) { state in
-            state.isRefreshing = true
-            state.status = nil
-            state.statusIsError = false
-        }
-        defer {
-            updateModelCatalogState(provider) { state in
-                state.isRefreshing = false
-            }
-        }
+        guard !refreshingProviders.contains(provider) else { return }
+        refreshingProviders.insert(provider)
+        defer { refreshingProviders.remove(provider) }
 
         do {
             let models = try await modelCatalog.fetchModels(
@@ -2222,31 +2171,14 @@ private final class AIKitConfigurationViewModel {
                 apiKey: apiKey,
                 timeout: configuration.core.timeout
             )
-            updateModelCatalogState(provider) { state in
-                state.status = models.isEmpty
-                    ? AIKitUILocalization.string("No models returned.")
-                    : AIKitUILocalization.string("Loaded \(models.count) models.")
-                state.statusIsError = false
-            }
             var providerConfiguration = configuration.core.providerConfiguration(for: provider)
             providerConfiguration.replaceAvailableModels(models)
             configuration.core.setProviderConfiguration(providerConfiguration, for: provider)
             saveCurrentConfiguration(status: "Saved")
         } catch {
-            updateModelCatalogState(provider) { state in
-                state.status = error.localizedDescription
-                state.statusIsError = true
-            }
+            // A refresh deliberately shows no status text; a failed fetch
+            // simply leaves the existing catalog in place.
         }
-    }
-
-    private func updateModelCatalogState(
-        _ provider: AIKitProviderKind,
-        _ update: (inout ModelCatalogState) -> Void
-    ) {
-        var state = modelCatalogStates[provider] ?? ModelCatalogState()
-        update(&state)
-        modelCatalogStates[provider] = state
     }
 
     private func saveCurrentConfiguration(status: String.LocalizationValue) {
@@ -2356,30 +2288,6 @@ private struct AIKitSummaryChip: View {
             }
             .frame(minWidth: 0, alignment: .leading)
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .frame(minWidth: 150, maxWidth: .infinity, minHeight: 44, alignment: .leading)
-        .background(.regularMaterial, in: .capsule)
-        .overlay {
-            Capsule()
-                .strokeBorder(tint.opacity(0.18), lineWidth: 0.5)
-        }
-    }
-}
-
-private struct AIKitPickerCapsule: View {
-    let title: LocalizedStringKey
-    let value: String
-    let systemImage: String
-    let tint: Color
-
-    var body: some View {
-        AIKitPickerCapsuleLabel(
-            title: title,
-            value: value,
-            systemImage: systemImage,
-            tint: tint
-        )
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
         .frame(minWidth: 150, maxWidth: .infinity, minHeight: 44, alignment: .leading)
@@ -3467,6 +3375,11 @@ private extension OrchestratorActivity {
                 return AIKitUILocalization.string("Calling \(name)…")
             case .verifying:
                 return AIKitUILocalization.string("Checking the result…")
+            case .externalWork(let status):
+                // The host's text (e.g. the workflow's resolved finishing
+                // tool — "Creating Entry…") arrives ready to display and
+                // host-localized; only the fallback is ours.
+                return status ?? AIKitUILocalization.string("Thinking…")
             }
         }
         if let failureReason {
@@ -3484,6 +3397,7 @@ private extension OrchestratorPhase {
         case .thinking: return AIKitUILocalization.string("Thinking")
         case .callingTool(let name): return AIKitUILocalization.string("Calling \(name)")
         case .verifying: return AIKitUILocalization.string("Checking result")
+        case .externalWork(let status): return status ?? AIKitUILocalization.string("Thinking")
         }
     }
 }
@@ -3566,9 +3480,7 @@ private extension View {
             .padding(.horizontal, 12)
             .padding(.vertical, 9)
             .frame(minHeight: 44)
-            .containerRelativeFrame(.horizontal) { length, _ in
-                length * 0.5
-            }
+            .frame(width: AIKitMetrics.fieldWidth)
             .aiKitContainerStyle()
     }
 
@@ -3614,5 +3526,5 @@ private extension String {
 }
 
 #Preview {
-    AIKitChatbotOverlay(orchestrator: .init(llm: .init(provider: VolcengineArkProvider(apiKey: "preview", model: "doubao-seed-2-0-lite-260215")), tools: .init(), memory: InMemoryMemoryStore(), contextResolver: .init(), guardrails: .init()))
+    AIKitChatbotOverlay(orchestrator: .init(llm: VolcengineArkProvider(apiKey: "preview", model: "doubao-seed-2-0-lite-260215"), tools: .init(), memory: InMemoryMemoryStore(), contextResolver: .init(), guardrails: .init()))
 }

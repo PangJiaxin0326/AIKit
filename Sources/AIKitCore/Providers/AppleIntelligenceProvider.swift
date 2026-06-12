@@ -2,12 +2,13 @@ import Foundation
 import FoundationModels
 import AIToolKit
 
-/// `LLMProvider` backed by Apple's on-device Foundation Models framework.
+/// `LLMProvider` backed by Apple's Foundation Models — the on-device system
+/// model or Private Cloud Compute.
 ///
-/// This provider is intentionally text-first. Although AIKit tools conform to
-/// Foundation Models' `Tool` protocol, the runtime owns and dispatches them
-/// itself; reporting `supportsNativeTools == false` enables the
-/// fenced-```tool``` fallback on this provider path.
+/// A thin shim over `LanguageModelProvider`: requests ride the official
+/// `LanguageModel` executor path (`Transcript` in, generation-channel events
+/// out), so tool calls, guided generation, and streaming all use the system
+/// implementations instead of hand-rolled prompt flattening.
 public struct AppleIntelligenceProvider: LLMProvider {
     public enum Endpoint: String, Sendable, Hashable, Codable, CaseIterable {
         case onDevice = "apple-intelligence"
@@ -32,7 +33,10 @@ public struct AppleIntelligenceProvider: LLMProvider {
     public let configuration: LLMProviderConfiguration
     public let endpoint: Endpoint
 
-    public var supportsNativeTools: Bool { false }
+    /// Foundation Models executes tool calls natively on both endpoints via
+    /// the executor path, so the runtime never needs the fenced-```tool```
+    /// fallback here.
+    public var supportsNativeTools: Bool { true }
 
     public init(
         endpoint: Endpoint = .onDevice,
@@ -55,284 +59,122 @@ public struct AppleIntelligenceProvider: LLMProvider {
     }
 
     public func complete(_ request: LLMRequest) async throws -> LLMResponse {
-        if request.audioOutput != nil {
-            throw LLMError.unsupported(
-                "AppleIntelligenceProvider does not support generated audio output."
-            )
+        switch resolvedEndpoint(for: request) {
+        case .onDevice:
+            return try await onDeviceAdapter().complete(request)
+        case .privateCloudCompute:
+            do {
+                return try await privateCloudComputeAdapter().complete(request)
+            } catch let error as LLMError where Self.isNetworkFailure(error) {
+                // Private Cloud Compute degrades to the on-device model when
+                // the network is unreachable.
+                return try await onDeviceAdapter().complete(request)
+            }
         }
-        return try await AppleFoundationModels.complete(
-            request,
-            endpoint: Endpoint(modelID: request.model) ?? endpoint
-        )
     }
 
     public func stream(
         _ request: LLMRequest
     ) -> AsyncThrowingStream<LLMResponseChunk, any Error> {
+        switch resolvedEndpoint(for: request) {
+        case .onDevice:
+            return onDeviceAdapter().stream(request)
+        case .privateCloudCompute:
+            return privateCloudComputeStream(request)
+        }
+    }
+
+    private static let defaultModels = Endpoint.allCases.map(\.rawValue)
+
+    private func resolvedEndpoint(for request: LLMRequest) -> Endpoint {
+        Endpoint(modelID: request.model) ?? endpoint
+    }
+
+    // MARK: - Adapters
+
+    private func onDeviceAdapter() -> LanguageModelProvider<SystemLanguageModel> {
+        LanguageModelProvider(
+            configuration: configuration,
+            providerName: providerName,
+            makeModel: { _ in SystemLanguageModel.default },
+            makeExecutor: { model in
+                guard model.isAvailable else {
+                    throw LLMError.provider(
+                        message: "Apple Intelligence is unavailable: \(model.availability)"
+                    )
+                }
+                return SystemLanguageModel.Executor(
+                    configuration: model.executorConfiguration
+                )
+            }
+        )
+    }
+
+    private func privateCloudComputeAdapter()
+        -> LanguageModelProvider<PrivateCloudComputeLanguageModel> {
+        LanguageModelProvider(
+            configuration: configuration,
+            providerName: providerName,
+            makeModel: { _ in PrivateCloudComputeLanguageModel() },
+            makeExecutor: { model in
+                guard model.isAvailable else {
+                    throw LLMError.provider(
+                        message: "Private Cloud Compute is unavailable: \(model.availability)"
+                    )
+                }
+                return PrivateCloudComputeLanguageModel.Executor(
+                    configuration: model.executorConfiguration
+                )
+            },
+            mapError: { error in
+                if case PrivateCloudComputeLanguageModel.Error.networkFailure = error {
+                    return .transport(Self.networkFailureDetail)
+                }
+                return nil
+            }
+        )
+    }
+
+    /// Streams from Private Cloud Compute, restarting on-device when the
+    /// network fails before any output was produced.
+    private func privateCloudComputeStream(
+        _ request: LLMRequest
+    ) -> AsyncThrowingStream<LLMResponseChunk, any Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
+                var yieldedAny = false
                 do {
-                    let response = try await complete(request)
-                    for block in response.content {
-                        switch block {
-                        case .text(let text):
-                            if !text.isEmpty {
-                                continuation.yield(.textDelta(text))
-                            }
-                        case .reasoning(let text):
-                            if !text.isEmpty {
-                                continuation.yield(.reasoningDelta(text))
-                            }
-                        case .image:
-                            break
-                        case .audio(let audio):
-                            continuation.yield(.audio(audio))
-                        case .toolUse(let id, let name, let arguments):
-                            continuation.yield(.toolUseStart(id: id, name: name))
-                            let data = arguments.data()
-                            if let json = String(data: data, encoding: .utf8) {
-                                continuation.yield(.toolUseInputDelta(id: id, json: json))
-                            }
-                            continuation.yield(.toolUseStop(id: id))
-                        case .toolResult:
-                            break
-                        }
+                    for try await chunk in privateCloudComputeAdapter().stream(request) {
+                        yieldedAny = true
+                        continuation.yield(chunk)
                     }
-                    continuation.yield(.usage(response.usage))
-                    continuation.yield(.stop(response.stopReason))
                     continuation.finish()
-                } catch is CancellationError {
-                    continuation.finish()
-                } catch let error as LLMError {
-                    continuation.finish(throwing: error)
+                } catch let error as LLMError
+                    where Self.isNetworkFailure(error) && !yieldedAny {
+                    do {
+                        for try await chunk in onDeviceAdapter().stream(request) {
+                            continuation.yield(chunk)
+                        }
+                        continuation.finish()
+                    } catch {
+                        continuation.finish(throwing: error)
+                    }
                 } catch {
-                    continuation.finish(throwing: LLMError.provider(
-                        message: error.localizedDescription
-                    ))
+                    continuation.finish(throwing: error)
                 }
             }
             continuation.onTermination = { _ in task.cancel() }
         }
     }
 
-    private static let defaultModels = Endpoint.allCases.map(\.rawValue)
+    // MARK: - PCC network-failure marker
 
-    struct RenderedPrompt: Sendable, Hashable {
-        var instructions: String?
-        var prompt: String
-    }
+    private static let networkFailureDetail = "private-cloud-compute-network-failure"
 
-    static func renderedPrompt(for request: LLMRequest) -> RenderedPrompt {
-        var instructionParts: [String] = []
-        if let system = request.system?.trimmedNonEmpty {
-            instructionParts.append(system)
+    private static func isNetworkFailure(_ error: LLMError) -> Bool {
+        if case .transport(let detail) = error {
+            return detail == networkFailureDetail
         }
-
-        var promptParts: [String] = []
-        for message in request.messages {
-            switch message.role {
-            case .system:
-                if let text = renderedText(for: message).trimmedNonEmpty {
-                    instructionParts.append(text)
-                }
-            case .user:
-                append(message, label: "User", to: &promptParts)
-            case .assistant:
-                append(message, label: "Assistant", to: &promptParts)
-            case .tool:
-                append(message, label: "Tool", to: &promptParts)
-            }
-        }
-
-        if let manifest = toolManifestBlock(request.tools) {
-            instructionParts.append(manifest)
-        }
-
-        return RenderedPrompt(
-            instructions: instructionParts.joined(separator: "\n\n").trimmedNonEmpty,
-            prompt: promptParts.joined(separator: "\n\n").trimmedNonEmpty ?? ""
-        )
-    }
-
-    private static func append(
-        _ message: Message,
-        label: String,
-        to promptParts: inout [String]
-    ) {
-        guard let text = renderedText(for: message).trimmedNonEmpty else { return }
-        promptParts.append("\(label):\n\(text)")
-    }
-
-    private static func renderedText(for message: Message) -> String {
-        message.content.compactMap { block in
-            switch block {
-            case .text(let text):
-                return text
-            case .reasoning:
-                return nil
-            case .image(let image):
-                return "Image attachment: \(image.source.description)."
-            case .audio(let audio):
-                var parts = ["Audio attachment: \(audio.source.description)."]
-                if let transcript = audio.transcript, !transcript.isEmpty {
-                    parts.append("Transcript: \(transcript)")
-                }
-                return parts.joined(separator: " ")
-            case .toolUse(_, let name, let arguments):
-                return "Requested tool \(name) with input \(arguments.jsonString)."
-            case .toolResult(_, let content, let isError):
-                return isError ? "Tool error: \(content)" : "Tool result: \(content)"
-            }
-        }
-        .joined(separator: "\n")
-    }
-
-    private static func toolManifestBlock(_ tools: [ToolDescriptor]) -> String? {
-        guard !tools.isEmpty else { return nil }
-        let lines = tools.map { descriptor in
-            let schema = (try? descriptor.argumentsSchema.jsonString()) ?? "{}"
-            return """
-            - \(descriptor.name): \(descriptor.description)
-              input schema: \(schema)
-            """
-        }
-        .joined(separator: "\n")
-        return """
-        Available AIKit tools:
-        \(lines)
-        """
-    }
-
-}
-
-private enum AppleFoundationModels {
-    static func complete(
-        _ request: LLMRequest,
-        endpoint: AppleIntelligenceProvider.Endpoint
-    ) async throws -> LLMResponse {
-        if endpoint == .privateCloudCompute {
-            if #available(iOS 27.0, macOS 27.0, visionOS 27.0, watchOS 27.0, *) {
-                do {
-                    return try await completeWithPrivateCloudCompute(request)
-                } catch PrivateCloudComputeLanguageModel.Error.networkFailure(_) {
-                    return try await completeOnDevice(request)
-                } catch {
-                    throw LLMError.provider(message: error.localizedDescription)
-                }
-            }
-        }
-        return try await completeOnDevice(request)
-    }
-
-    private static func completeOnDevice(_ request: LLMRequest) async throws -> LLMResponse {
-        let model = SystemLanguageModel.default
-        guard model.isAvailable else {
-            throw LLMError.provider(
-                message: "Apple Intelligence is unavailable: \(model.availability)"
-            )
-        }
-        let rendered = AppleIntelligenceProvider.renderedPrompt(for: request)
-        let session = makeSession(model: model, rendered: rendered, request: request)
-        return try await respond(session: session, prompt: rendered.prompt, request: request)
-    }
-
-    @available(iOS 27.0, macOS 27.0, visionOS 27.0, watchOS 27.0, *)
-    private static func completeWithPrivateCloudCompute(
-        _ request: LLMRequest
-    ) async throws -> LLMResponse {
-        let model = PrivateCloudComputeLanguageModel()
-        guard model.isAvailable else {
-            throw LLMError.provider(
-                message: "Private Cloud Compute is unavailable: \(model.availability)"
-            )
-        }
-        let rendered = AppleIntelligenceProvider.renderedPrompt(for: request)
-        let session = makeProfileSession(model: model, rendered: rendered, request: request)
-        return try await respond(session: session, prompt: rendered.prompt, request: request)
-    }
-
-    /// Builds the per-request session. On OS 27 the session is declared with
-    /// the official `DynamicProfile` DSL (instructions + generation knobs as
-    /// profile modifiers); earlier systems fall back to the plain initializer
-    /// and pass the knobs per call instead.
-    private static func makeSession(
-        model: SystemLanguageModel,
-        rendered: AppleIntelligenceProvider.RenderedPrompt,
-        request: LLMRequest
-    ) -> LanguageModelSession {
-        if #available(iOS 27.0, macOS 27.0, visionOS 27.0, watchOS 27.0, *) {
-            return makeProfileSession(model: model, rendered: rendered, request: request)
-        }
-        if let instructions = rendered.instructions {
-            return LanguageModelSession(model: model, instructions: instructions)
-        }
-        return LanguageModelSession(model: model)
-    }
-
-    @available(iOS 27.0, macOS 27.0, visionOS 27.0, watchOS 27.0, *)
-    private static func makeProfileSession(
-        model: some LanguageModel,
-        rendered: AppleIntelligenceProvider.RenderedPrompt,
-        request: LLMRequest
-    ) -> LanguageModelSession {
-        let profile = LanguageModelSession.Profile {
-            if let instructions = rendered.instructions {
-                Instructions(instructions)
-            }
-        }
-        .model(model)
-        .temperature(request.temperature)
-        .maximumResponseTokens(request.maxTokens)
-        return LanguageModelSession(profile: profile)
-    }
-
-    private static func respond(
-        session: LanguageModelSession,
-        prompt: String,
-        request: LLMRequest
-    ) async throws -> LLMResponse {
-        let options = GenerationOptions(
-            samplingMode: nil,
-            temperature: request.temperature,
-            maximumResponseTokens: request.maxTokens
-        )
-
-        do {
-            // A response schema rides Foundation Models guided generation, the
-            // official structured-output path; the constrained JSON value is
-            // returned to the runtime as text.
-            if let schema = request.responseSchema {
-                let response = try await session.respond(
-                    to: prompt,
-                    schema: schema,
-                    options: options
-                )
-                return LLMResponse(
-                    content: [.text(response.content.jsonString)],
-                    stopReason: .endTurn
-                )
-            }
-            let response = try await session.respond(
-                to: prompt,
-                options: options
-            )
-            return LLMResponse(
-                content: [.text(response.content)],
-                stopReason: .endTurn
-            )
-        } catch is CancellationError {
-            throw LLMError.cancelled
-        } catch let error as LLMError {
-            throw error
-        } catch {
-            throw LLMError.provider(message: error.localizedDescription)
-        }
-    }
-}
-
-private extension String {
-    var trimmedNonEmpty: String? {
-        let trimmed = trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
+        return false
     }
 }

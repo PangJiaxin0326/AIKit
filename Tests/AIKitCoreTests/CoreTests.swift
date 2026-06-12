@@ -109,51 +109,23 @@ import AIKitTestSupport
     }
 
     @Test func nativeToolGuarantees() {
-        #expect(AppleIntelligenceProvider().supportsNativeTools == false)
+        // Both providers ride the Foundation Models executor path, which
+        // carries tool definitions natively.
+        #expect(AppleIntelligenceProvider().supportsNativeTools == true)
         #expect(VolcengineArkProvider(apiKey: "k", model: "ep-test").supportsNativeTools == true)
     }
 
     @Test func providerNamesAreStableDisplayLabels() {
         #expect(
-            LLMClient(provider: VolcengineArkProvider(apiKey: "k", model: "ep-test")).providerName ==
+            VolcengineArkProvider(apiKey: "k", model: "ep-test").providerName ==
             "Volcengine Ark"
         )
         #expect(
-            LLMClient(provider: AppleIntelligenceProvider()).providerName ==
+            AppleIntelligenceProvider().providerName ==
             "Apple Intelligence"
         )
     }
 
-    @Test func appleIntelligencePromptIncludesToolManifest() {
-        let request = LLMRequest(
-            model: "apple-intelligence",
-            system: "You are embedded in an app.",
-            messages: [
-                .init(role: .user, text: "Open settings"),
-                .init(role: .tool, content: [
-                    .toolResult(
-                        toolUseID: "t1",
-                        content: "{\"navigated\":true}",
-                        isError: false
-                    ),
-                ]),
-            ],
-            tools: [
-                ToolDescriptor(
-                    name: "navigate",
-                    description: "Navigate to a screen.",
-                    argumentsSchema: GeneratedContent.generationSchema
-                ),
-            ]
-        )
-
-        let rendered = AppleIntelligenceProvider.renderedPrompt(for: request)
-        #expect(rendered.instructions?.contains("You are embedded in an app.") == true)
-        #expect(rendered.instructions?.contains("Available AIKit tools") == true)
-        #expect(rendered.instructions?.contains("navigate") == true)
-        #expect(rendered.prompt.contains("User:\nOpen settings"))
-        #expect(rendered.prompt.contains("Tool result"))
-    }
 }
 
 @Suite struct MultimodalContentTests {
@@ -163,21 +135,13 @@ import AIKitTestSupport
             mimeType: "image/png",
             detail: .low
         )
-        let audio = AudioContent(
-            data: Data([0x04, 0x05]),
-            mimeType: "audio/wav",
-            format: .wav,
-            transcript: "spoken words"
-        )
         let message = Message(role: .user, content: [
             .text("Describe this"),
             .image(image),
-            .audio(audio),
         ])
 
         #expect(message.plainText == "Describe this")
         #expect(message.images == [image])
-        #expect(message.audio == [audio])
 
         let encoded = try JSONEncoder().encode(message)
         let decoded = try JSONDecoder().decode(Message.self, from: encoded)
@@ -216,27 +180,12 @@ import AIKitTestSupport
         #expect(loaded.apiKey(for: .ark) == "sk-ark-123")
     }
 
-    @Test func legacyPerProviderKeysAreReadWhenDictionaryWasNeverSaved() throws {
+    @Test func clearedKeyStaysCleared() throws {
         let defaults = try makeDefaults()
-        defaults.set(" sk-legacy-ark \n", forKey: "arkAPIKey")
-        let loaded = AIKitProviderCredentialStore.load(defaults: defaults)
-        #expect(loaded.apiKey(for: .ark) == "sk-legacy-ark")
-
-        let older = try makeDefaults()
-        older.set("sk-other", forKey: "otherProviderAPIKey")
-        #expect(
-            AIKitProviderCredentialStore.load(defaults: older)
-                .apiKey(for: .ark) == "sk-other"
-        )
-    }
-
-    @Test func savedDictionaryWinsOverLegacyKeys() throws {
-        let defaults = try makeDefaults()
-        defaults.set("sk-legacy", forKey: "arkAPIKey")
-
-        // Clearing the key in the new UI must stay cleared even though the
-        // legacy value is still on disk.
         var store = AIKitProviderCredentialStore()
+        store.setAPIKey("sk-ark", for: .ark)
+        store.save(defaults: defaults)
+
         store.setAPIKey("", for: .ark)
         store.save(defaults: defaults)
         #expect(
@@ -259,7 +208,7 @@ import AIKitTestSupport
 @Suite struct MockProviderTests {
     @Test func nonStreamingRoundTrip() async throws {
         let provider = MockProvider(finalText: "hello world")
-        let client = LLMClient(provider: provider)
+        let client = provider
         let response = try await client.complete(
             LLMRequest(model: "test", messages: [.init(role: .user, text: "hi")])
         )
@@ -277,7 +226,7 @@ import AIKitTestSupport
                 stopReason: .toolUse
             )
         ])
-        let client = LLMClient(provider: provider)
+        let client = provider
         var chunks: [LLMResponseChunk] = []
         for try await chunk in client.stream(LLMRequest(model: "test")) {
             chunks.append(chunk)
@@ -289,7 +238,7 @@ import AIKitTestSupport
 
     @Test func exhaustionThrows() async {
         let provider = MockProvider(finalText: "once")
-        let client = LLMClient(provider: provider)
+        let client = provider
         _ = try? await client.complete(LLMRequest(model: "test"))
         await #expect(throws: LLMError.self) {
             try await client.complete(LLMRequest(model: "test"))
@@ -421,18 +370,11 @@ import AIKitTestSupport
 
     @Test func arkMalformedFunctionArgumentsArePreserved() async throws {
         let body = """
-        {
-          "choices": [{
-            "message": {
-              "tool_calls": [{
-                "id": "call_bad",
-                "type": "function",
-                "function": {"name": "navigate", "arguments": "{\\"destination\\":"}
-              }]
-            },
-            "finish_reason": "tool_calls"
-          }]
-        }
+        data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_bad","type":"function","function":{"name":"navigate","arguments":"{\\"destination\\":"}}]},"finish_reason":null}]}
+
+        data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}
+
+        data: [DONE]
         """.data(using: .utf8)!
         URLProtocolStub.setStub(.init(body: body))
         let provider = VolcengineArkProvider(
@@ -451,8 +393,11 @@ import AIKitTestSupport
 
     @Test func arkDecodesReasoningContent() async throws {
         let body = """
-        {"choices":[{"message":{"content":"ans","reasoning_content":"cot"},\
-        "finish_reason":"stop"}]}
+        data: {"choices":[{"delta":{"reasoning_content":"cot"},"finish_reason":null}]}
+
+        data: {"choices":[{"delta":{"content":"ans"},"finish_reason":"stop"}]}
+
+        data: [DONE]
         """.data(using: .utf8)!
         URLProtocolStub.setStub(.init(body: body))
         let provider = VolcengineArkProvider(
@@ -492,20 +437,13 @@ import AIKitTestSupport
 
     @Test func arkDecodesChatCompletion() async throws {
         let body = """
-        {
-          "choices": [{
-            "message": {
-              "content": "done",
-              "tool_calls": [{
-                "id": "call_1",
-                "type": "function",
-                "function": {"name": "setSetting", "arguments": "{\\"key\\":\\"theme\\"}"}
-              }]
-            },
-            "finish_reason": "tool_calls"
-          }],
-          "usage": {"prompt_tokens": 5, "completion_tokens": 9}
-        }
+        data: {"choices":[{"delta":{"content":"done"},"finish_reason":null}]}
+
+        data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"setSetting","arguments":"{\\"key\\":\\"theme\\"}"}}]},"finish_reason":"tool_calls"}]}
+
+        data: {"choices":[],"usage":{"prompt_tokens":5,"completion_tokens":9}}
+
+        data: [DONE]
         """.data(using: .utf8)!
         URLProtocolStub.setStub(.init(body: body))
         let provider = VolcengineArkProvider(
@@ -524,7 +462,9 @@ import AIKitTestSupport
 
     @Test func arkProviderUsesDefaultEndpointAndThinking() async throws {
         let body = """
-        {"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}]}
+        data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}
+
+        data: [DONE]
         """.data(using: .utf8)!
         URLProtocolStub.setStub(.init(body: body))
         let provider = VolcengineArkProvider(
@@ -552,7 +492,9 @@ import AIKitTestSupport
 
     @Test func arkMapsResponseSchemaToResponseFormat() async throws {
         let body = """
-        {"choices":[{"message":{"content":"{}"},"finish_reason":"stop"}]}
+        data: {"choices":[{"delta":{"content":"{}"},"finish_reason":"stop"}]}
+
+        data: [DONE]
         """.data(using: .utf8)!
         URLProtocolStub.setStub(.init(body: body))
         let provider = VolcengineArkProvider(
@@ -578,7 +520,9 @@ import AIKitTestSupport
 
     @Test func arkProviderUsesCustomChatCompletionsPath() async throws {
         let body = """
-        {"choices":[{"message":{"content":"custom path"},"finish_reason":"stop"}]}
+        data: {"choices":[{"delta":{"content":"custom path"},"finish_reason":"stop"}]}
+
+        data: [DONE]
         """.data(using: .utf8)!
         URLProtocolStub.setStub(.init(body: body))
         let provider = VolcengineArkProvider(
@@ -603,7 +547,9 @@ import AIKitTestSupport
 
     @Test func arkProviderAcceptsFullChatCompletionsURL() async throws {
         let body = """
-        {"choices":[{"message":{"content":"ark path"},"finish_reason":"stop"}]}
+        data: {"choices":[{"delta":{"content":"ark path"},"finish_reason":"stop"}]}
+
+        data: [DONE]
         """.data(using: .utf8)!
         URLProtocolStub.setStub(.init(body: body))
         let endpoint = URL(string: "https://ark.cn-beijing.volces.com/api/v3/chat/completions")!
@@ -627,7 +573,9 @@ import AIKitTestSupport
 
     @Test func arkEncodesImageContentBlocks() async throws {
         let body = """
-        {"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}]}
+        data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}
+
+        data: [DONE]
         """.data(using: .utf8)!
         URLProtocolStub.setStub(.init(body: body))
         let provider = VolcengineArkProvider(
@@ -658,39 +606,6 @@ import AIKitTestSupport
         #expect(imageURL["url"]?.stringValue == "data:image/png;base64,qrs=")
     }
 
-    @Test func arkRejectsUnsupportedAudioInput() async {
-        URLProtocolStub.setStub(.init(body: Data("{}".utf8)))
-        let request = LLMRequest(
-            model: "ep-test",
-            messages: [
-                Message(role: .user, content: [
-                    .audio(AudioContent(data: Data([0x01]), mimeType: "audio/wav", format: .wav)),
-                ]),
-            ]
-        )
-        let provider = VolcengineArkProvider(
-            apiKey: "test-key",
-            model: "ep-test",
-            session: URLProtocolStub.makeSession()
-        )
-        await #expect(throws: LLMError.self) {
-            try await provider.complete(request)
-        }
-    }
-
-    @Test func arkRejectsGeneratedAudioOutput() async {
-        let provider = VolcengineArkProvider(
-            apiKey: "test-key",
-            model: "ep-test",
-            session: URLProtocolStub.makeSession()
-        )
-        await #expect(throws: LLMError.self) {
-            try await provider.complete(LLMRequest(
-                model: "ep-test",
-                audioOutput: AudioOutputOptions(voice: "alloy", format: .mp3)
-            ))
-        }
-    }
 }
 
 private func recordedRequestJSON() throws -> [String: GeneratedContent] {

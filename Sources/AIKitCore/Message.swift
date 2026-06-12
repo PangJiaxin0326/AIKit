@@ -18,7 +18,6 @@ public enum ContentBlock: Sendable, Codable, Hashable {
     /// rebuilds assistant turns from final text + tool calls only).
     case reasoning(String)
     case image(ImageContent)
-    case audio(AudioContent)
     case toolUse(id: String, name: String, arguments: GeneratedContent)
     case toolResult(toolUseID: String, content: String, isError: Bool)
 
@@ -36,11 +35,6 @@ public enum ContentBlock: Sendable, Codable, Hashable {
         if case .image(let value) = self { return value }
         return nil
     }
-
-    public var audio: AudioContent? {
-        if case .audio(let value) = self { return value }
-        return nil
-    }
 }
 
 public extension ContentBlock {
@@ -51,8 +45,6 @@ public extension ContentBlock {
         case (.reasoning(let lhs), .reasoning(let rhs)):
             lhs == rhs
         case (.image(let lhs), .image(let rhs)):
-            lhs == rhs
-        case (.audio(let lhs), .audio(let rhs)):
             lhs == rhs
         case (.toolUse(let lhsID, let lhsName, let lhsArguments),
               .toolUse(let rhsID, let rhsName, let rhsArguments)):
@@ -80,9 +72,6 @@ public extension ContentBlock {
         case .image(let value):
             hasher.combine("image")
             hasher.combine(value)
-        case .audio(let value):
-            hasher.combine("audio")
-            hasher.combine(value)
         case .toolUse(let id, let name, let arguments):
             hasher.combine("toolUse")
             hasher.combine(id)
@@ -101,7 +90,6 @@ private enum ContentBlockCodingType: String, Codable {
     case text
     case reasoning
     case image
-    case audio
     case toolUse
     case toolResult
 }
@@ -111,7 +99,6 @@ private enum ContentBlockCodingKeys: String, CodingKey {
     case text
     case reasoning
     case image
-    case audio
     case id
     case name
     case argumentsJSON
@@ -130,8 +117,6 @@ public extension ContentBlock {
             self = .reasoning(try container.decode(String.self, forKey: .reasoning))
         case .image:
             self = .image(try container.decode(ImageContent.self, forKey: .image))
-        case .audio:
-            self = .audio(try container.decode(AudioContent.self, forKey: .audio))
         case .toolUse:
             self = .toolUse(
                 id: try container.decode(String.self, forKey: .id),
@@ -161,9 +146,6 @@ public extension ContentBlock {
         case .image(let value):
             try container.encode(ContentBlockCodingType.image, forKey: .type)
             try container.encode(value, forKey: .image)
-        case .audio(let value):
-            try container.encode(ContentBlockCodingType.audio, forKey: .type)
-            try container.encode(value, forKey: .audio)
         case .toolUse(let id, let name, let arguments):
             try container.encode(ContentBlockCodingType.toolUse, forKey: .type)
             try container.encode(id, forKey: .id)
@@ -238,93 +220,6 @@ public struct ImageContent: Sendable, Codable, Hashable {
     }
 }
 
-/// Audio input or generated voice output for audio-capable models.
-public struct AudioContent: Sendable, Codable, Hashable {
-    public var source: MediaSource
-    public var format: AudioFormat?
-    public var transcript: String?
-    public var id: String?
-    public var expiresAt: Date?
-
-    public init(
-        source: MediaSource,
-        format: AudioFormat? = nil,
-        transcript: String? = nil,
-        id: String? = nil,
-        expiresAt: Date? = nil
-    ) {
-        self.source = source
-        self.format = format
-        self.transcript = transcript
-        self.id = id
-        self.expiresAt = expiresAt
-    }
-
-    public init(
-        data: Data,
-        mimeType: String,
-        format: AudioFormat? = nil,
-        transcript: String? = nil,
-        id: String? = nil,
-        expiresAt: Date? = nil
-    ) {
-        self.init(
-            source: .data(mimeType: mimeType, data: data),
-            format: format,
-            transcript: transcript,
-            id: id,
-            expiresAt: expiresAt
-        )
-    }
-
-    public init(
-        url: URL,
-        format: AudioFormat? = nil,
-        transcript: String? = nil,
-        id: String? = nil,
-        expiresAt: Date? = nil
-    ) {
-        self.init(
-            source: .url(url),
-            format: format,
-            transcript: transcript,
-            id: id,
-            expiresAt: expiresAt
-        )
-    }
-}
-
-public enum AudioFormat: String, Sendable, Codable, Hashable {
-    case wav
-    case mp3
-    case flac
-    case opus
-    case aac
-    case pcm16
-
-    public var mimeType: String {
-        switch self {
-        case .wav: return "audio/wav"
-        case .mp3: return "audio/mpeg"
-        case .flac: return "audio/flac"
-        case .opus: return "audio/opus"
-        case .aac: return "audio/aac"
-        case .pcm16: return "audio/pcm"
-        }
-    }
-}
-
-/// Voice and format requested from providers that can synthesize audio.
-public struct AudioOutputOptions: Sendable, Codable, Hashable {
-    public var voice: String
-    public var format: AudioFormat
-
-    public init(voice: String, format: AudioFormat) {
-        self.voice = voice
-        self.format = format
-    }
-}
-
 /// A conversation message.
 public struct Message: Sendable, Codable, Hashable {
     public var role: Role
@@ -347,10 +242,6 @@ public struct Message: Sendable, Codable, Hashable {
     public var images: [ImageContent] {
         content.compactMap(\.image)
     }
-
-    public var audio: [AudioContent] {
-        content.compactMap(\.audio)
-    }
 }
 
 /// Token accounting for a single LLM call.
@@ -371,6 +262,5 @@ public enum StopReason: Sendable, Codable, Hashable {
     case endTurn
     case toolUse
     case maxTokens
-    case stopSequence
     case other(String)
 }

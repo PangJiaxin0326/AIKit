@@ -1,9 +1,9 @@
 # AGENTS.md — Recommended practice for AI agents using AIKit
 
-This is the reproduction guide for the **scoped workflow (select-then-work)
+This is the reproduction guide for the **workflow (select-then-work)
 agent**: one native `LanguageModelSession` over AIToolKit's
-`ScopedWorkflowProfile`, two staged LLM calls — the model first returns a
-TYPED `ScopedToolSelection` (guided generation against the rendered
+`WorkflowProfile`, two staged LLM calls — the model first returns a
+TYPED `ToolSelection` (guided generation against the rendered
 catalogue, tool calling disallowed) naming the finishing tools the request
 needs, then does *all the work* against only the selected tools and the
 assistive unit requests registered on them. The flow this powers: user
@@ -12,33 +12,59 @@ view → step 2 runs and is host-stopped → result presented.
 **Both steps are ended by host configuration, in code** — no model
 completion signal, no closing text turn after acting. The pieces live in
 the sibling package **AIToolKit** (`AssistiveTool.swift`,
-`ScopedWorkflowProfile.swift` — including `WorkTurnMonitor`, the host-side
+`WorkflowProfile.swift` — including `WorkTurnMonitor`, the host-side
 stop); the cloud model executor is `VolcengineArkFoundationModels` (nested
 in this repo), which maps `GenerationOptions.toolCallingMode` to the wire's
-`tool_choice`.
+`tool_choice`. The package is official-protocol-native: the
+`LanguageModel`/`LanguageModelExecutor` conformances sit on the primary
+type declarations, `respond` streams true SSE deltas into the generation
+channel (the finish reason rides entry metadata as `finishReason`; there
+is no channel stop event), prior `.reasoning` transcript entries are never
+replayed to the wire, and the non-stream wire path was deleted. The
+executor speaks only FM structures (`Transcript`,
+`Transcript.ToolDefinition`, `GenerationSchema`, `GenerationOptions`,
+`GeneratedContent` via `jsonString`/`init(json:)`); chat-completions JSON
+exists only in the private wire encoders, built immediately before the
+request is sent. `defaultExtraBody` is `[String: GeneratedContent]` —
+the custom `VolcengineArkJSONValue` currency was removed; the executor
+`Configuration` stays `Hashable` by hashing the extras through
+`jsonString`. Capabilities are the official `LanguageModelCapabilities`,
+stored on the model (not the configuration); the custom capability enum
+and its bridge were removed. Errors surface as the official
+`LanguageModelError` where the taxonomy has a counterpart (HTTP 429 →
+`.rateLimited`, transport timeout → `.timeout`, cancellation →
+`CancellationError`); only provider-specific shapes (other HTTP statuses,
+encoding, auth, transport) remain `VolcengineArkError`. AIKit's
+orchestrator reaches executors
+through the generic `LanguageModelProvider<M: LanguageModel>` (AIKitCore)
+— `VolcengineArkProvider` and `AppleIntelligenceProvider` are thin shims
+over it — so the session paradigm and the orchestrator loop share one
+wire mapping per model family, and both built-in providers report native
+tool calling.
 
 > Earlier paradigms were removed from code and docs as they were
 > superseded: the lean-plan DAG (library code survives at AIKit `81d3323`
-> / AIToolKit `9fd1ea6`) and the gather→act profile workflow
-> (`WorkflowProfile`, removed from AIToolKit; recipe and code survive in
-> git history). The experiment repo's history holds the comparative
+> / AIToolKit `9fd1ea6`) and the gather→act profile workflow (removed
+> from AIToolKit; recipe and code survive in git history — the
+> select-then-work profile has since taken over the `WorkflowProfile`
+> name). The experiment repo's history holds the comparative
 > batteries.
 
 ## 1. The paradigm
 
 ```
-ONE LanguageModelSession(profile: ScopedWorkflowProfile…)
+ONE LanguageModelSession(profile: WorkflowProfile…)
   step .scope  →  instructions: name the tools, nothing else — the
                   finishing-tool catalogue is RENDERED INTO the
                   instructions as text; tool calling is DISALLOWED
                   (tool_choice: none) and the reply is GUIDED
-                  (respond(generating: ScopedToolSelection.self) → wire
+                  (respond(generating: ToolSelection.self) → wire
                   response_format): a typed array of tool names, usually
                   one, ~9 output tokens. The model cannot act prematurely
                   by configuration. One fast round.
   host validates the selection (validated(against:)), shows the
                   progress hint, flips
-                  session.properties.scopedWorkflowStage = .work,
+                  session.properties.workflowStage = .work,
                   and sets the historyTransform cut index
   step .work   →  instructions: the whole job + injected local deictic state
                   tools: SELECTED finishing tools + their registered
@@ -48,7 +74,7 @@ ONE LanguageModelSession(profile: ScopedWorkflowProfile…)
                   onToolOutput) — no completion signal, no text turn
 ```
 
-- **Finishing tools** (`ScopedFinishingTool`) are ordinary
+- **Finishing tools** (`FinishingTool`) are ordinary
   `@Generable`-argument tools — the semantically complete actions a user
   could tap. Each registers the assistive unit requests that can resolve
   its arguments (`registeredAssistiveTools`); the work step's assistive
@@ -71,18 +97,19 @@ ONE LanguageModelSession(profile: ScopedWorkflowProfile…)
 ## 2. Stand up the session (copy this)
 
 ```swift
-import AIToolKit                       // ScopedWorkflowProfile, WorkTurnMonitor
+import AIToolKit                       // WorkflowProfile, WorkTurnMonitor
 import VolcengineArkFoundationModels   // VolcengineArkLanguageModel
 
 var extraBody = VolcengineArkConfiguration.defaultWireExtraBody
-extraBody["parallel_tool_calls"] = .bool(true)
-let model = VolcengineArkLanguageModel(configuration: .init(
-    apiKey: key, model: modelID, defaultExtraBody: extraBody,
-    capabilities: [.toolCalling, .reasoning, .guidedGeneration]))
+extraBody["parallel_tool_calls"] = GeneratedContent(true)
+let model = VolcengineArkLanguageModel(
+    configuration: .init(apiKey: key, model: modelID, defaultExtraBody: extraBody),
+    capabilities: LanguageModelCapabilities(
+        capabilities: [.toolCalling, .reasoning, .guidedGeneration]))
     // ^ FM gates respond(generating:) on the declared capability
 
 let monitor = WorkTurnMonitor(finishingToolNames: finishingNames)
-let profile = ScopedWorkflowProfile(
+let profile = WorkflowProfile(
     scopeInstructions: { scopeText },           // name the tools, nothing else
     workInstructions: { workText(localState) }, // the whole job + deictic state
     catalogue: finishing,                       // rendered into scope instructions
@@ -111,18 +138,26 @@ let profile = ScopedWorkflowProfile(
 .transcriptErrorHandlingPolicy(.preserveTranscript)
 
 let session = LanguageModelSession(profile: profile)
+// Surface the run on AIKit's activity stream: the chatbot tab bar
+// accessory goes busy ("Thinking…") and the accessory's Cancel reaches
+// this run. End it when the run finishes, success or not.
+let workID = await orchestrator.beginExternalWork(onCancel: { cancelRun() })
 // step 1 — one fast guided round; the TYPED selection is the UI hint
 let selection = try await session.respond(
     to: "User request: \(userText)\n\nSelect the task tools this request needs.",
-    generating: ScopedToolSelection.self
+    generating: ToolSelection.self
 ).content
 state.selection = selection.validated(against: finishingNames)
-showProgressView(for: state.selection)          // "Drafting an email…"
+// The progress hint: the FIRST selected tool's FinishingTool.progressText
+// ("Creating Entry…"); nil keeps the accessory's "Thinking…".
+await orchestrator.updateExternalWork(workID,
+    statusText: finishing.progressText(forSelection: state.selection))
 state.cutIndex = session.transcript.count
 state.stage = .work
-session.properties.scopedWorkflowStage = .work
+session.properties.workflowStage = .work
 // step 2… — host-stopped by WorkTurnMonitor; give 2 corrective rounds
 _ = try await session.respond(to: "User request: \(userText)\n\nComplete this request now.")
+await orchestrator.endExternalWork(workID)
 presentResult()
 ```
 
@@ -141,7 +176,7 @@ makes premature actions impossible by configuration.
 `maximumResponseTokens` (profile init parameter, default 64) is the
 ramble backstop. NOTE: FM gates `respond(generating:)` on the model's
 declared capabilities and fails BEFORE any network call — declare
-`.guidedGeneration` in the executor configuration.
+`.guidedGeneration` in the model's `LanguageModelCapabilities`.
 
 **The host stop:** `WorkTurnMonitor` counts the current tool turn from the
 hooks. Verified on the OS 27 SDK: ALL of a parallel batch's `onToolCall`s
@@ -162,7 +197,7 @@ The traps — each one cost a battery:
    `toolCallingMode(.disallowed)` the runtime sends NO tool definitions —
    a catalogue registered as tools silently vanishes (symptom: the scope
    step's input tokens collapse and the model guesses names). Render the
-   catalogue into the scope instructions; `ScopedWorkflowProfile` does
+   catalogue into the scope instructions; `WorkflowProfile` does
    this itself.
 3. **Unwrap `LanguageModelSession.ToolCallError`.** An error thrown inside
    a tool's `call` (e.g. argument validation) reaches the host wrapped in
@@ -219,10 +254,15 @@ light/medium battery, mini — the experiment's only model by decision):
 
 ## 6. Reproduce checklist
 
-- [ ] Finishing tools conform to `ScopedFinishingTool` and register their
-      assistive tools; assistive misses return strings.
+- [ ] Finishing tools conform to `FinishingTool` and register their
+      assistive tools; assistive misses return strings. User-visible
+      progress labels ("Creating Entry…") go in `progressText`.
+- [ ] The run is bracketed by `Orchestrator.beginExternalWork` /
+      `endExternalWork` (cancel hook wired); the landed selection updates
+      it with `progressText(forSelection:)` — the accessory shows the
+      FIRST selected tool's text, "Thinking…" until then and as fallback.
 - [ ] Scope step: catalogue handed to the profile (it renders the text);
-      NO tools callable; reply generated as `ScopedToolSelection` and
+      NO tools callable; reply generated as `ToolSelection` and
       `validated(against:)` the catalogue; empty selection falls back to
       the full finishing set; `.guidedGeneration` declared on the model.
 - [ ] Cut-index `historyTransform` that KEEPS entry 0.

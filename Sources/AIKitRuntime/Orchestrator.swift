@@ -109,6 +109,10 @@ public enum OrchestratorPhase: Sendable, Equatable, Hashable {
     case callingTool(String)
     /// Running a verification (guardrail) stage on a result.
     case verifying
+    /// Host-run work outside the orchestrator's own loop (e.g. a scoped
+    /// workflow session), carrying its own user-facing status text. `nil`
+    /// until the host resolves one — UI shows its generic busy label.
+    case externalWork(String?)
 }
 
 /// A single user task as seen by the orchestrator, with its grouped activity
@@ -181,6 +185,7 @@ public struct OrchestratorActivity: Sendable, Equatable {
             case .thinking: return "Thinking…"
             case .callingTool(let name): return "Calling \(name)…"
             case .verifying: return "Checking the result…"
+            case .externalWork(let status): return status ?? "Thinking…"
             }
         }
         if let failureReason { return failureReason }
@@ -199,6 +204,9 @@ public struct OrchestratorActivity: Sendable, Equatable {
         case .verifying: 2
         case .thinking: 3
         case .callingTool: 4
+        // External work carries the most specific user-facing label (the
+        // workflow's resolved finishing-tool text), so it wins the aggregate.
+        case .externalWork: 5
         }
     }
 }
@@ -301,7 +309,6 @@ public actor Orchestrator {
         /// rail can't overrun it; it is a hard wall-clock cap, not just a
         /// per-iteration-boundary check.
         public var maxTurnDuration: TimeInterval?
-        public var memoryWindow: Int
         public var temperature: Double?
         public var maxTokens: Int?
         /// Controls the fenced-```tool``` fallback (prompt instruction +
@@ -318,7 +325,6 @@ public actor Orchestrator {
             stream: Bool = true,
             retry: RetryPolicy = .default,
             maxTurnDuration: TimeInterval? = nil,
-            memoryWindow: Int = 20,
             temperature: Double? = 0.2,
             maxTokens: Int? = nil,
             toolCallFallback: Bool? = nil
@@ -328,14 +334,13 @@ public actor Orchestrator {
             self.stream = stream
             self.retry = retry
             self.maxTurnDuration = maxTurnDuration
-            self.memoryWindow = memoryWindow
             self.temperature = temperature
             self.maxTokens = maxTokens
             self.toolCallFallback = toolCallFallback
         }
     }
 
-    private let llm: LLMClient
+    private let llm: any LLMProvider
     /// The host's official tools plus AIKit's built-ins, in registration
     /// order — the `[any Tool]` currency of the runtime.
     private let allTools: [any Tool]
@@ -362,6 +367,10 @@ public actor Orchestrator {
     /// state and persistence finalization stays runtime-owned.
     private var finalizedUsageTurns: Set<Int> = []
     private let maxTrackedCompletedTasks = 24
+    /// Cancel callbacks for in-flight external work (see
+    /// `beginExternalWork(statusText:onCancel:)`), keyed by work id, so
+    /// `cancelActiveTurns()` reaches work the orchestrator does not run.
+    private var externalWorkCancelHandlers: [Int: @Sendable () -> Void] = [:]
     /// Sticky reason from the last failed turn; cleared when a new turn
     /// starts or `cancelActiveTurns()` is called.
     private var lastFailureReason: String?
@@ -412,7 +421,7 @@ public actor Orchestrator {
         let resolvedOutcome = outcome
             ?? (record.failureReason == nil ? .completed : .failed)
         let summary = record.usageSummary(
-            modelName: (options.model ?? llm.defaultModel ?? ""),
+            modelName: (options.model ?? llm.configuration.defaultModel ?? ""),
             providerName: llm.providerName,
             outcome: resolvedOutcome
         )
@@ -489,10 +498,52 @@ public actor Orchestrator {
         try? await memory.append(event)
     }
 
-    /// Cancels every in-flight turn and clears any sticky failure, returning
-    /// the orchestrator to idle. Safe to call from UI (e.g. a Cancel button).
+    // MARK: - External work
+
+    /// Surfaces host-run work in `activityUpdates()` — work the orchestrator
+    /// itself does not execute, e.g. a scoped (select-then-work) workflow
+    /// session. Subscribers go busy and show `statusText`, or their generic
+    /// busy label while it is `nil`. External work never appears in task
+    /// snapshots or usage records; it only drives live activity.
+    ///
+    /// Returns the work id. Pair with `endExternalWork(_:)`, and update the
+    /// label via `updateExternalWork(_:statusText:)` — e.g. the moment a
+    /// workflow's scope step resolves its finishing-tool selection.
+    /// `onCancel` is invoked by `cancelActiveTurns()`, so UI cancel controls
+    /// reach this work too.
+    public func beginExternalWork(
+        statusText: String? = nil,
+        onCancel: (@Sendable () -> Void)? = nil
+    ) -> Int {
+        let id = nextTurnID()
+        if let onCancel { externalWorkCancelHandlers[id] = onCancel }
+        setPhase(.externalWork(statusText), turn: id)
+        return id
+    }
+
+    /// Updates external work's user-facing status text. No-op once the work
+    /// has ended or been cancelled.
+    public func updateExternalWork(_ id: Int, statusText: String?) {
+        guard turnPhases[id] != nil else { return }
+        setPhase(.externalWork(statusText), turn: id)
+    }
+
+    /// Ends external work, returning subscribers to idle when nothing else
+    /// is in flight. Idempotent.
+    public func endExternalWork(_ id: Int) {
+        externalWorkCancelHandlers[id] = nil
+        guard turnPhases.removeValue(forKey: id) != nil else { return }
+        broadcast()
+    }
+
+    /// Cancels every in-flight turn — and any registered external work, via
+    /// its cancel callback — and clears any sticky failure, returning the
+    /// orchestrator to idle. Safe to call from UI (e.g. a Cancel button).
     public func cancelActiveTurns() async {
         for task in turnTasks.values { task.cancel() }
+        let externalCancels = externalWorkCancelHandlers.values
+        externalWorkCancelHandlers.removeAll()
+        for cancel in externalCancels { cancel() }
         var summaries: [AIKitSessionUsageSummary] = []
         for turn in turnTasks.keys {
             if let summary = finishTask(turn, outcome: .cancelled) {
@@ -628,7 +679,7 @@ public actor Orchestrator {
     }
 
     public init(
-        llm: LLMClient,
+        llm: any LLMProvider,
         tools: [any Tool],
         memory: any MemoryStore,
         contextResolver: ContextResolver,
@@ -719,7 +770,7 @@ public actor Orchestrator {
         // Resolve the fenced-tool fallback once per turn: an explicit option
         // wins; otherwise enable it only for providers without native tools.
         let useFallback = options.toolCallFallback ?? !llm.supportsNativeTools
-        let configuredModel = (options.model ?? llm.defaultModel)?
+        let configuredModel = (options.model ?? llm.configuration.defaultModel)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .emptyAsNil
 
@@ -754,9 +805,6 @@ public actor Orchestrator {
                     pendingCorrection = nil
                 }
 
-                let recent = (try? await memory.recent(
-                    limit: options.memoryWindow, view: viewID
-                )) ?? []
                 guard let selectedModel = configuredModel else {
                     let error = LLMError.missingModel
                     await recordFailure(errorMessage(error), turn: turnID)
@@ -767,7 +815,6 @@ public actor Orchestrator {
                 let request = PromptBuilder.build(
                     instruction: instruction,
                     context: context,
-                    memory: recent,
                     transcript: transcript,
                     toolManifest: manifest,
                     model: selectedModel,
@@ -1201,7 +1248,6 @@ public actor Orchestrator {
         }
         var textChunks: [String] = []
         var reasoningChunks: [String] = []
-        var audioBlocks: [AudioContent] = []
         var toolBlocks: [StreamingToolBlock] = []
         var toolIndexesByID: [String: Int] = [:]
         var stopReason: StopReason = .endTurn
@@ -1219,11 +1265,6 @@ public actor Orchestrator {
             case .reasoningDelta(let delta):
                 reasoningChunks.append(delta)
                 emit(.reasoningDelta(delta))
-            case .audio(let audio):
-                audioBlocks.append(audio)
-                if let transcript = audio.transcript {
-                    emit(.llmDelta(transcript))
-                }
             case .toolUseStart(let id, let name):
                 toolIndexesByID[id] = toolBlocks.count
                 toolBlocks.append(StreamingToolBlock(id: id, name: name))
@@ -1253,13 +1294,13 @@ public actor Orchestrator {
         let text = textChunks.joined()
         if !reasoning.isEmpty { blocks.append(.reasoning(reasoning)) }
         if !text.isEmpty { blocks.append(.text(text)) }
-        blocks.append(contentsOf: audioBlocks.map(ContentBlock.audio))
         for tool in toolBlocks {
             let json = tool.jsonChunks.joined()
             let arguments: GeneratedContent
             if json.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 arguments = .object([:])
-            } else if let value = try? GeneratedContent(json: json) {
+            } else if AIKitMalformedToolInput.isCompleteJSON(json),
+                      let value = try? GeneratedContent(json: json) {
                 arguments = value
             } else {
                 arguments = Self.malformedToolInput(raw: json)

@@ -1,7 +1,11 @@
 import Foundation
+import Synchronization
 
 /// A `URLProtocol` that returns a canned response for every request, so
 /// provider tests never hit the network.
+///
+/// `@unchecked Sendable` is forced by subclassing `URLProtocol` (a
+/// non-Sendable ObjC class); the stub's own shared state is `Mutex`-guarded.
 public final class URLProtocolStub: URLProtocol, @unchecked Sendable {
     public struct Stub: Sendable {
         public var statusCode: Int
@@ -19,23 +23,22 @@ public final class URLProtocolStub: URLProtocol, @unchecked Sendable {
         }
     }
 
-    // swiftlint:disable:next - process-wide test fixture guarded by `lock`
-    nonisolated(unsafe) private static var stub: Stub?
-    // swiftlint:disable:next - process-wide test fixture guarded by `lock`
-    nonisolated(unsafe) private static var requests: [URLRequest] = []
-    private static let lock = NSLock()
+    private struct Shared {
+        var stub: Stub?
+        var requests: [URLRequest] = []
+    }
+
+    private static let shared = Mutex(Shared())
 
     public static func setStub(_ stub: Stub?) {
-        lock.lock()
-        defer { lock.unlock() }
-        Self.stub = stub
-        Self.requests.removeAll()
+        shared.withLock {
+            $0.stub = stub
+            $0.requests.removeAll()
+        }
     }
 
     public static var recordedRequests: [URLRequest] {
-        lock.lock()
-        defer { lock.unlock() }
-        return requests
+        shared.withLock { $0.requests }
     }
 
     /// Builds a `URLSession` whose only protocol is this stub.
@@ -52,10 +55,10 @@ public final class URLProtocolStub: URLProtocol, @unchecked Sendable {
     }
 
     public override func startLoading() {
-        Self.lock.lock()
-        let stub = Self.stub
-        Self.requests.append(request)
-        Self.lock.unlock()
+        let stub = Self.shared.withLock {
+            $0.requests.append(request)
+            return $0.stub
+        }
 
         guard let stub, let url = request.url else {
             client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse))

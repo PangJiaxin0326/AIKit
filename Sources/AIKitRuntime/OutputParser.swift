@@ -39,11 +39,6 @@ public enum OutputParser {
                 continue
             case .image:
                 continue
-            case .audio(let audio):
-                if let transcript = audio.transcript {
-                    if !textParts.isEmpty { textParts.append("\n") }
-                    textParts.append(transcript)
-                }
             case .toolUse(let id, let name, let arguments):
                 // A tool_use block whose input failed to decode upstream is
                 // surfaced so the ErrorHandler can re-prompt.

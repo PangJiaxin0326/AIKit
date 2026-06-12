@@ -9,18 +9,16 @@ import AIKitSafety
 import AIKitTestSupport
 
 @Suite struct PromptBuilderTests {
-    @Test func systemPromptIncludesPreambleFragmentAndMemory() {
+    @Test func systemPromptIncludesPreambleAndFragment() {
         let context = ResolvedContext(
             stack: [.init("home")],
             systemPromptFragment: "Home screen rules.",
             toolNames: ["navigate"],
             metadata: [:]
         )
-        let memory = [UsageEvent(viewID: .init("home"), kind: .userInstruction, text: "go home")]
         let request = PromptBuilder.build(
             instruction: "Take me home",
             context: context,
-            memory: memory,
             transcript: [],
             toolManifest: [
                 ToolDescriptor(name: "navigate", description: "nav", argumentsSchema: GeneratedContent.generationSchema),
@@ -30,7 +28,6 @@ import AIKitTestSupport
         )
         #expect(request.system?.contains(PromptBuilder.basePreamble) == true)
         #expect(request.system?.contains("Home screen rules.") == true)
-        #expect(request.system?.contains("<recent-actions>") == true)
         #expect(request.tools.map(\.name) == ["navigate"])
         #expect(request.messages.first?.role == .user)
     }
@@ -39,7 +36,6 @@ import AIKitTestSupport
         let request = PromptBuilder.build(
             instruction: "Take me home",
             context: .empty,
-            memory: [],
             transcript: [],
             toolManifest: [
                 ToolDescriptor(name: "navigate", description: "nav", argumentsSchema: GeneratedContent.generationSchema),
@@ -213,7 +209,7 @@ import AIKitTestSupport
             toolNames: ["navigate"]
         ))
         return Orchestrator(
-            llm: LLMClient(provider: provider),
+            llm: provider,
             tools: tools,
             memory: InMemoryMemoryStore(),
             contextResolver: resolver,
@@ -221,6 +217,91 @@ import AIKitTestSupport
             usageRecorder: usageRecorder,
             options: .init(model: "test", stream: false)
         )
+    }
+
+    /// A fresh subscription's first emission is the current aggregate state.
+    private func currentActivity(of orchestrator: Orchestrator) async -> OrchestratorActivity {
+        var iterator = orchestrator.activityUpdates().makeAsyncIterator()
+        return await iterator.next() ?? .idle
+    }
+
+    /// Turns are independent by construction: a later turn's request must
+    /// carry nothing from an earlier turn — not its instruction, not its
+    /// tool calling, not its reply. (Durable memory is reachable only through
+    /// the explicit `searchMemory` tool.)
+    @Test func turnsDoNotSeeEarlierTurnsHistory() async throws {
+        let provider = MockProvider(responses: [
+            LLMResponse(
+                content: [.toolUse(
+                    id: "1", name: "navigate",
+                    arguments: .object(["destination": .string("settings")])
+                )],
+                stopReason: .toolUse
+            ),
+            LLMResponse(content: [.text("Done, you're in settings.")], stopReason: .endTurn),
+            LLMResponse(content: [.text("Hello!")], stopReason: .endTurn),
+        ])
+        let orchestrator = await makeOrchestrator(provider: provider)
+
+        for try await event in await orchestrator.run("go to settings") {
+            if case .error(let error) = event { Issue.record("unexpected: \(error)") }
+        }
+        var secondFinal: String?
+        for try await event in await orchestrator.run("say hello") {
+            if case .finalAnswer(let text) = event { secondFinal = text }
+            if case .error(let error) = event { Issue.record("unexpected: \(error)") }
+        }
+        #expect(secondFinal == "Hello!")
+
+        let secondTurnRequest = try #require(provider.receivedRequests.last)
+        #expect(secondTurnRequest.messages.count == 1)
+        #expect(secondTurnRequest.messages.first?.plainText == "say hello")
+        let system = try #require(secondTurnRequest.system)
+        #expect(!system.contains("recent-actions"))
+        #expect(!system.contains("go to settings"))
+        #expect(!system.contains("settings"))
+    }
+
+    @Test func externalWorkSurfacesBusyStateAndStatusText() async throws {
+        let orchestrator = await makeOrchestrator(provider: MockProvider(responses: []))
+
+        let id = await orchestrator.beginExternalWork()
+        var activity = await currentActivity(of: orchestrator)
+        #expect(activity.isBusy)
+        #expect(activity.phase == .externalWork(nil))
+        #expect(activity.statusText == "Thinking…")
+        // External work drives live activity only — never task snapshots.
+        #expect(activity.activeTasks.isEmpty)
+
+        await orchestrator.updateExternalWork(id, statusText: "Creating Entry…")
+        activity = await currentActivity(of: orchestrator)
+        #expect(activity.phase == .externalWork("Creating Entry…"))
+        #expect(activity.statusText == "Creating Entry…")
+
+        await orchestrator.endExternalWork(id)
+        activity = await currentActivity(of: orchestrator)
+        #expect(!activity.isBusy)
+        #expect(activity.phase == .idle)
+
+        // Ended work stays ended: late updates and repeat ends are no-ops.
+        await orchestrator.updateExternalWork(id, statusText: "stale")
+        await orchestrator.endExternalWork(id)
+        activity = await currentActivity(of: orchestrator)
+        #expect(activity.phase == .idle)
+    }
+
+    @Test func cancelActiveTurnsCancelsExternalWork() async throws {
+        let orchestrator = await makeOrchestrator(provider: MockProvider(responses: []))
+
+        await confirmation("onCancel invoked") { cancelled in
+            _ = await orchestrator.beginExternalWork(statusText: "Creating Entry…") {
+                cancelled()
+            }
+            await orchestrator.cancelActiveTurns()
+        }
+        let activity = await currentActivity(of: orchestrator)
+        #expect(!activity.isBusy)
+        #expect(activity.phase == .idle)
     }
 
     @Test func endToEndToolThenFinal() async throws {
@@ -375,7 +456,7 @@ import AIKitTestSupport
             LLMResponse(content: [.text("Recovered.")], stopReason: .endTurn),
         ])
         let orchestrator = Orchestrator(
-            llm: LLMClient(provider: provider),
+            llm: provider,
             tools: tools,
             memory: InMemoryMemoryStore(),
             contextResolver: resolver,
@@ -432,7 +513,7 @@ import AIKitTestSupport
             LLMResponse(content: [.text("Recovered.")], stopReason: .endTurn),
         ])
         let orchestrator = Orchestrator(
-            llm: LLMClient(provider: provider),
+            llm: provider,
             tools: tools,
             memory: InMemoryMemoryStore(),
             contextResolver: resolver,
@@ -483,7 +564,7 @@ import AIKitTestSupport
             LLMResponse(content: [.text("Recovered.")], stopReason: .endTurn),
         ])
         let orchestrator = Orchestrator(
-            llm: LLMClient(provider: provider),
+            llm: provider,
             tools: tools,
             memory: InMemoryMemoryStore(),
             contextResolver: resolver,
@@ -550,7 +631,7 @@ import AIKitTestSupport
             LLMResponse(content: [.text("Recovered.")], stopReason: .endTurn),
         ])
         let orchestrator = Orchestrator(
-            llm: LLMClient(provider: provider),
+            llm: provider,
             tools: tools,
             memory: InMemoryMemoryStore(),
             contextResolver: resolver,
@@ -597,7 +678,7 @@ import AIKitTestSupport
             )], stopReason: .toolUse),
         ])
         let orchestrator = Orchestrator(
-            llm: LLMClient(provider: provider),
+            llm: provider,
             tools: tools,
             memory: InMemoryMemoryStore(),
             contextResolver: resolver,
@@ -631,7 +712,7 @@ import AIKitTestSupport
             )], stopReason: .toolUse),
         ])
         let orchestrator = Orchestrator(
-            llm: LLMClient(provider: provider),
+            llm: provider,
             tools: tools,
             memory: InMemoryMemoryStore(),
             contextResolver: resolver,
@@ -656,7 +737,7 @@ import AIKitTestSupport
         let resolver = ContextResolver()
         await resolver.push(ViewContext(id: .init("v"), displayName: "V"))
         let orchestrator = Orchestrator(
-            llm: LLMClient(provider: MockProvider(finalText: "hello stream")),
+            llm: MockProvider(finalText: "hello stream"),
             tools: [],
             memory: InMemoryMemoryStore(),
             contextResolver: resolver,
@@ -673,7 +754,8 @@ import AIKitTestSupport
         #expect(final == "hello stream")
     }
 
-    @Test func malformedStreamedToolJSONDoesNotInvokeTool() async throws {
+    @Test(arguments: ["]not json[", "{\"value\":"])
+    func malformedStreamedToolJSONDoesNotInvokeTool(badJSON: String) async throws {
         let flag = InvocationFlag()
         let tools: [any Tool] = [EmptyInputTool {
             await flag.mark()
@@ -683,7 +765,7 @@ import AIKitTestSupport
             id: .init("v"), displayName: "V", toolNames: [EmptyInputTool.toolName]
         ))
         let orchestrator = Orchestrator(
-            llm: LLMClient(provider: MalformedStreamingToolProvider()),
+            llm: MalformedStreamingToolProvider(json: badJSON),
             tools: tools,
             memory: InMemoryMemoryStore(),
             contextResolver: resolver,
@@ -732,7 +814,7 @@ import AIKitTestSupport
         let resolver = ContextResolver()
         await resolver.push(ViewContext(id: .init("v"), displayName: "V"))
         let orchestrator = Orchestrator(
-            llm: LLMClient(provider: provider),
+            llm: provider,
             tools: [],
             memory: InMemoryMemoryStore(),
             contextResolver: resolver,
@@ -761,7 +843,7 @@ import AIKitTestSupport
             LLMResponse(content: [.text("ok")], stopReason: .endTurn),
         ])
         let orchestrator = Orchestrator(
-            llm: LLMClient(provider: provider),
+            llm: provider,
             tools: tools,
             memory: InMemoryMemoryStore(),
             contextResolver: resolver,
@@ -1006,6 +1088,10 @@ private struct MalformedStreamingToolProvider: LLMProvider {
         baseURL: URL(string: "mock://malformed-stream")!,
         defaultModel: "malformed-stream"
     )
+    /// The broken tool-argument payload to stream — unparseable garbage or a
+    /// truncated object; both must route to the malformed-input sentinel,
+    /// never to a partially-decoded tool invocation.
+    let json: String
 
     func complete(_ request: LLMRequest) async throws -> LLMResponse {
         LLMResponse(content: [.text("unused")], stopReason: .endTurn)
@@ -1016,10 +1102,7 @@ private struct MalformedStreamingToolProvider: LLMProvider {
     ) -> AsyncThrowingStream<LLMResponseChunk, any Error> {
         AsyncThrowingStream { continuation in
             continuation.yield(.toolUseStart(id: "bad_1", name: EmptyInputTool.toolName))
-            // Truly unparseable bytes — the FM partial-JSON parser recovers a
-            // merely-truncated object, so use garbage to pin the malformed
-            // marker path.
-            continuation.yield(.toolUseInputDelta(id: "bad_1", json: "]not json["))
+            continuation.yield(.toolUseInputDelta(id: "bad_1", json: json))
             continuation.yield(.toolUseStop(id: "bad_1"))
             continuation.yield(.stop(.toolUse))
             continuation.finish()
@@ -1028,7 +1111,7 @@ private struct MalformedStreamingToolProvider: LLMProvider {
 }
 
 /// Always sleeps before answering, so a turn deadline must interrupt it.
-private final class SlowProvider: LLMProvider, @unchecked Sendable {
+private struct SlowProvider: LLMProvider {
     let configuration = LLMProviderConfiguration(
         apiKey: "",
         baseURL: URL(string: "mock://slow")!,
@@ -1080,7 +1163,7 @@ private final class SlowProvider: LLMProvider, @unchecked Sendable {
             LLMResponse(content: [.text("Done.")], stopReason: .endTurn),
         ])
         let orchestrator = Orchestrator(
-            llm: LLMClient(provider: provider),
+            llm: provider,
             tools: tools,
             memory: InMemoryMemoryStore(),
             contextResolver: resolver,
@@ -1137,7 +1220,7 @@ private final class SlowProvider: LLMProvider, @unchecked Sendable {
                 supportsNativeTools: nativeTools
             )
             let orchestrator = Orchestrator(
-                llm: LLMClient(provider: provider),
+                llm: provider,
                 tools: tools,
                 memory: InMemoryMemoryStore(),
                 contextResolver: resolver,
@@ -1188,7 +1271,7 @@ private struct SlowGuardrail: Guardrail {
             supportsNativeTools: nativeTools
         )
         let orchestrator = Orchestrator(
-            llm: LLMClient(provider: provider),
+            llm: provider,
             tools: tools,
             memory: InMemoryMemoryStore(),
             contextResolver: resolver,
@@ -1247,7 +1330,7 @@ private struct SlowGuardrail: Guardrail {
             )
         ])
         return Orchestrator(
-            llm: LLMClient(provider: provider),
+            llm: provider,
             tools: [],
             memory: InMemoryMemoryStore(),
             contextResolver: resolver,
@@ -1323,7 +1406,7 @@ private struct SlowGuardrail: Guardrail {
             LLMResponse(content: [.text(mistagged)], stopReason: .endTurn)
         ])
         let orchestrator = Orchestrator(
-            llm: LLMClient(provider: provider),
+            llm: provider,
             tools: tools,
             memory: InMemoryMemoryStore(),
             contextResolver: resolver,
@@ -1356,7 +1439,7 @@ private struct SlowGuardrail: Guardrail {
         let resolver = ContextResolver()
         await resolver.push(ViewContext(id: .init("v"), displayName: "V"))
         let orchestrator = Orchestrator(
-            llm: LLMClient(provider: MockProvider(finalText: "hi")),
+            llm: MockProvider(finalText: "hi"),
             tools: [],
             memory: InMemoryMemoryStore(),
             contextResolver: resolver,
@@ -1378,7 +1461,7 @@ private struct SlowGuardrail: Guardrail {
         let resolver = ContextResolver()
         await resolver.push(ViewContext(id: .init("v"), displayName: "V"))
         let orchestrator = Orchestrator(
-            llm: LLMClient(provider: SlowProvider(delay: .seconds(5))),
+            llm: SlowProvider(delay: .seconds(5)),
             tools: [],
             memory: InMemoryMemoryStore(),
             contextResolver: resolver,
@@ -1414,7 +1497,7 @@ private struct SlowGuardrail: Guardrail {
             LLMResponse(content: [.text("late")], stopReason: .endTurn),
         ])
         let orchestrator = Orchestrator(
-            llm: LLMClient(provider: provider),
+            llm: provider,
             tools: tools,
             memory: InMemoryMemoryStore(),
             contextResolver: resolver,
@@ -1438,7 +1521,7 @@ private struct SlowGuardrail: Guardrail {
         let resolver = ContextResolver()
         await resolver.push(ViewContext(id: .init("v"), displayName: "V"))
         let orchestrator = Orchestrator(
-            llm: LLMClient(provider: MockProvider(finalText: "hi")),
+            llm: MockProvider(finalText: "hi"),
             tools: [],
             memory: InMemoryMemoryStore(),
             contextResolver: resolver,

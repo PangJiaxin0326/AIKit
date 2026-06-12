@@ -4,8 +4,13 @@ import AIToolKit
 import AIKitCore
 import AIKitCapability
 
-/// Pure function turning resolved context + memory + transcript into an
+/// Pure function turning resolved context + transcript into an
 /// `LLMRequest`. No I/O, no state.
+///
+/// Each turn's request carries ONLY that turn's own iterations (the
+/// `transcript` parameter). Earlier turns' tool calls and replies are never
+/// injected — turns are independent by construction; durable memory is
+/// reachable only through the explicit `searchMemory` tool.
 public enum PromptBuilder {
     /// The AIKit base preamble, prepended to every system prompt.
     public static let basePreamble = """
@@ -27,7 +32,6 @@ public enum PromptBuilder {
     public static func build(
         instruction: String,
         context: ResolvedContext,
-        memory: [UsageEvent],
         transcript: [TranscriptEntry],
         toolManifest: [ToolDescriptor],
         model: String,
@@ -39,9 +43,6 @@ public enum PromptBuilder {
         if !context.systemPromptFragment.isEmpty {
             systemParts.append(context.systemPromptFragment)
         }
-        if let recent = recentActionsBlock(memory) {
-            systemParts.append(recent)
-        }
 
         var messages: [Message] = []
         messages.append(Message(role: .user, text: instruction))
@@ -51,7 +52,7 @@ public enum PromptBuilder {
         // filtered by the orchestrator, but be defensive about empty subsets).
         // The built-in `reportFailure` escape hatch passes regardless: the
         // orchestrator provides it by default, so contexts never list it.
-        var tools = toolManifest.filter {
+        let tools = toolManifest.filter {
             context.toolNames.contains($0.name)
                 || $0.name == ReportFailureTool.toolName
         }
@@ -68,14 +69,5 @@ public enum PromptBuilder {
             temperature: temperature,
             maxTokens: maxTokens
         )
-    }
-
-    private static func recentActionsBlock(_ memory: [UsageEvent]) -> String? {
-        guard !memory.isEmpty else { return nil }
-        let lines = memory
-            .sorted { $0.timestamp < $1.timestamp }
-            .map { "- [\($0.kind.rawValue)] \($0.payloadText)" }
-            .joined(separator: "\n")
-        return "<recent-actions>\n\(lines)\n</recent-actions>"
     }
 }

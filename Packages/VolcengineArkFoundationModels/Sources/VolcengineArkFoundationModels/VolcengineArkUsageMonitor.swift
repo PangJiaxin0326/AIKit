@@ -1,15 +1,19 @@
 import Foundation
+import FoundationModels
 
-/// Process-wide observation point for per-request Ark token usage.
+/// Process-wide observation point for per-request Ark token usage, in the
+/// official channel `Usage` currency.
 ///
-/// The FoundationModels session surface does not expose provider token
-/// accounting, and `VolcengineArkConfiguration` is `Hashable`/`Codable` so it
-/// cannot carry a closure. Hosts that need real usage numbers (metrics
-/// harnesses, billing meters) install a handler here; the executor reports
-/// every completed chat-completions call.
+/// The same numbers reach the session as the channel's final `updateUsage`
+/// event; this monitor adds what the channel cannot carry — wall-clock
+/// duration and cross-request aggregation — and exists because
+/// `VolcengineArkConfiguration` is `Hashable` so it cannot carry a closure.
+/// Hosts that need real usage numbers (metrics harnesses, billing meters)
+/// install a handler here; the executor reports every completed
+/// chat-completions call.
 public enum VolcengineArkUsageMonitor {
     public struct Event: Sendable {
-        public let usage: VolcengineArkTokenUsage
+        public let usage: LanguageModelExecutorGenerationChannel.Usage
         public let model: String
         public let durationSeconds: Double
     }
@@ -25,7 +29,11 @@ public enum VolcengineArkUsageMonitor {
         handler = newHandler
     }
 
-    static func report(usage: VolcengineArkTokenUsage, model: String, duration: Double) {
+    static func report(
+        usage: LanguageModelExecutorGenerationChannel.Usage,
+        model: String,
+        duration: Double
+    ) {
         lock.lock()
         let current = handler
         lock.unlock()

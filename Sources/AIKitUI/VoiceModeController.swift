@@ -92,7 +92,7 @@ final class VoiceModeController {
     }
 
     private func runConversation() async {
-        activateAudioSession()
+        await activateAudioSession()
         defer {
             deactivateAudioSession()
             activeSpeech = nil
@@ -232,24 +232,40 @@ final class VoiceModeController {
 
     // MARK: - Audio session
 
-    private func activateAudioSession() {
+    #if os(iOS) || os(visionOS)
+    /// `setCategory`/`setActive` block the calling thread, so session work runs
+    /// on this serial queue: it keeps the main thread responsive while keeping
+    /// activations ordered with respect to fire-and-forget deactivations.
+    private nonisolated static let audioSessionQueue = DispatchQueue(
+        label: "AIKitUI.VoiceModeController.AudioSession"
+    )
+    #endif
+
+    private func activateAudioSession() async {
         #if os(iOS) || os(visionOS)
-        let session = AVAudioSession.sharedInstance()
-        try? session.setCategory(
-            .playAndRecord,
-            mode: .spokenAudio,
-            options: [.defaultToSpeaker, .duckOthers]
-        )
-        try? session.setActive(true, options: .notifyOthersOnDeactivation)
+        await withCheckedContinuation { continuation in
+            Self.audioSessionQueue.async {
+                let session = AVAudioSession.sharedInstance()
+                try? session.setCategory(
+                    .playAndRecord,
+                    mode: .spokenAudio,
+                    options: [.defaultToSpeaker, .duckOthers]
+                )
+                try? session.setActive(true, options: .notifyOthersOnDeactivation)
+                continuation.resume()
+            }
+        }
         #endif
     }
 
     private func deactivateAudioSession() {
         #if os(iOS) || os(visionOS)
-        try? AVAudioSession.sharedInstance().setActive(
-            false,
-            options: .notifyOthersOnDeactivation
-        )
+        Self.audioSessionQueue.async {
+            try? AVAudioSession.sharedInstance().setActive(
+                false,
+                options: .notifyOthersOnDeactivation
+            )
+        }
         #endif
     }
 }

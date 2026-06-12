@@ -7,14 +7,6 @@ import Foundation
 public struct AIKitProviderCredentialStore: Equatable, Sendable {
     private static let storageKey = "AIKitProviderAPIKeys"
 
-    /// Per-provider `UserDefaults` string keys written by releases before
-    /// the unified dictionary. Read only while the dictionary has never been
-    /// saved, so keys from an older build keep working but a key cleared in
-    /// the new UI stays cleared.
-    private static let legacyStorageKeys: [AIKitProviderKind: [String]] = [
-        .ark: ["arkAPIKey", "otherProviderAPIKey"],
-    ]
-
     private var apiKeys: [AIKitProviderKind: String]
 
     public init(apiKeys: [AIKitProviderKind: String] = [:]) {
@@ -25,7 +17,7 @@ public struct AIKitProviderCredentialStore: Equatable, Sendable {
         guard let data = defaults.data(forKey: storageKey),
               let storedValues = try? JSONDecoder().decode([String: String].self, from: data)
         else {
-            return Self(apiKeys: legacyAPIKeys(defaults: defaults))
+            return Self()
         }
 
         let apiKeys = storedValues.reduce(into: [AIKitProviderKind: String]()) { result, pair in
@@ -36,20 +28,6 @@ public struct AIKitProviderCredentialStore: Equatable, Sendable {
             result[provider] = pair.value
         }
         return Self(apiKeys: apiKeys)
-    }
-
-    private static func legacyAPIKeys(
-        defaults: UserDefaults
-    ) -> [AIKitProviderKind: String] {
-        legacyStorageKeys.reduce(into: [AIKitProviderKind: String]()) { result, pair in
-            let value = pair.value.lazy
-                .compactMap { defaults.string(forKey: $0) }
-                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                .first { !$0.isEmpty }
-            if let value {
-                result[pair.key] = value
-            }
-        }
     }
 
     public func apiKey(for provider: AIKitProviderKind) -> String {

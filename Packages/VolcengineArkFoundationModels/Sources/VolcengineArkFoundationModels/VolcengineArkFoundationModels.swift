@@ -1,10 +1,7 @@
 import Foundation
-
-#if canImport(FoundationModels)
 import FoundationModels
-#endif
 
-public struct VolcengineArkConfiguration: Sendable, Hashable, Codable {
+public struct VolcengineArkConfiguration: Sendable, Hashable {
     public static let defaultBaseURL = URL(string: "https://ark.cn-beijing.volces.com/api/v3")!
     public static let defaultChatCompletionsPath = "chat/completions"
 
@@ -13,9 +10,12 @@ public struct VolcengineArkConfiguration: Sendable, Hashable, Codable {
     public var model: String
     public var chatCompletionsPath: String
     public var timeout: TimeInterval?
-    public var defaultExtraBody: [String: VolcengineArkJSONValue]
+    /// Vendor body extensions keyed by their top-level wire field.
+    /// `GeneratedContent` is the official JSON currency; values are merged
+    /// into the request body right at the wire via `jsonString`, never
+    /// interpreted above it.
+    public var defaultExtraBody: [String: GeneratedContent]
     public var extraHeaders: [String: String]
-    public var capabilities: Set<VolcengineArkModelCapability>
 
     /// The package-owned wire defaults: thinking OFF and reasoning effort
     /// pinned to minimal. Provider configuration lives here — hosts describe
@@ -23,9 +23,9 @@ public struct VolcengineArkConfiguration: Sendable, Hashable, Codable {
     /// provider package decides the vendor body extensions. The official
     /// `ContextOptions.reasoningLevel` overrides these per request on the
     /// FoundationModels executor path.
-    public static let defaultWireExtraBody: [String: VolcengineArkJSONValue] = [
-        "thinking": .object(["type": .string("disabled")]),
-        "reasoning_effort": .string("minimal"),
+    public static let defaultWireExtraBody: [String: GeneratedContent] = [
+        "thinking": GeneratedContent(properties: ["type": "disabled"]),
+        "reasoning_effort": GeneratedContent("minimal"),
     ]
 
     public init(
@@ -34,9 +34,8 @@ public struct VolcengineArkConfiguration: Sendable, Hashable, Codable {
         baseURL: URL = Self.defaultBaseURL,
         chatCompletionsPath: String = Self.defaultChatCompletionsPath,
         timeout: TimeInterval? = nil,
-        defaultExtraBody: [String: VolcengineArkJSONValue] = Self.defaultWireExtraBody,
-        extraHeaders: [String: String] = [:],
-        capabilities: Set<VolcengineArkModelCapability> = [.toolCalling, .reasoning]
+        defaultExtraBody: [String: GeneratedContent] = Self.defaultWireExtraBody,
+        extraHeaders: [String: String] = [:]
     ) {
         self.apiKey = apiKey
         self.baseURL = baseURL
@@ -45,22 +44,45 @@ public struct VolcengineArkConfiguration: Sendable, Hashable, Codable {
         self.timeout = timeout
         self.defaultExtraBody = defaultExtraBody
         self.extraHeaders = extraHeaders
-        self.capabilities = capabilities
+    }
+
+    // `GeneratedContent` is `Equatable` but not `Hashable`, so the
+    // `LanguageModelExecutor.Configuration` requirement is met by hashing
+    // the extras through their canonical JSON encoding.
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(apiKey)
+        hasher.combine(baseURL)
+        hasher.combine(model)
+        hasher.combine(chatCompletionsPath)
+        hasher.combine(timeout)
+        for key in defaultExtraBody.keys.sorted() {
+            hasher.combine(key)
+            hasher.combine(defaultExtraBody[key]?.jsonString)
+        }
+        hasher.combine(extraHeaders)
     }
 }
 
-public enum VolcengineArkModelCapability: String, Sendable, Hashable, Codable {
-    case vision
-    case guidedGeneration
-    case reasoning
-    case toolCalling
-}
+public struct VolcengineArkLanguageModel: LanguageModel, Sendable {
+    public typealias Executor = VolcengineArkLanguageModelExecutor
 
-public struct VolcengineArkLanguageModel: Sendable, Hashable {
+    public static let defaultCapabilities = LanguageModelCapabilities(
+        capabilities: [.toolCalling, .reasoning]
+    )
+
     public var configuration: VolcengineArkConfiguration
+    public var capabilities: LanguageModelCapabilities
 
-    public init(configuration: VolcengineArkConfiguration) {
+    public var executorConfiguration: VolcengineArkLanguageModelExecutor.Configuration {
+        configuration
+    }
+
+    public init(
+        configuration: VolcengineArkConfiguration,
+        capabilities: LanguageModelCapabilities = Self.defaultCapabilities
+    ) {
         self.configuration = configuration
+        self.capabilities = capabilities
     }
 
     public init(
@@ -68,19 +90,24 @@ public struct VolcengineArkLanguageModel: Sendable, Hashable {
         model: String,
         baseURL: URL = VolcengineArkConfiguration.defaultBaseURL,
         timeout: TimeInterval? = nil,
-        capabilities: Set<VolcengineArkModelCapability> = [.toolCalling, .reasoning]
+        capabilities: LanguageModelCapabilities = Self.defaultCapabilities
     ) {
-        self.init(configuration: .init(
-            apiKey: apiKey,
-            model: model,
-            baseURL: baseURL,
-            timeout: timeout,
+        self.init(
+            configuration: .init(
+                apiKey: apiKey,
+                model: model,
+                baseURL: baseURL,
+                timeout: timeout
+            ),
             capabilities: capabilities
-        ))
+        )
     }
 }
 
-public struct VolcengineArkLanguageModelExecutor: Sendable {
+public struct VolcengineArkLanguageModelExecutor: LanguageModelExecutor, Sendable {
+    public typealias Configuration = VolcengineArkConfiguration
+    public typealias Model = VolcengineArkLanguageModel
+
     public let configuration: VolcengineArkConfiguration
     private let session: URLSession
 
@@ -96,26 +123,83 @@ public struct VolcengineArkLanguageModelExecutor: Sendable {
         self.session = session
     }
 
-    public func complete(_ request: VolcengineArkRequest) async throws -> VolcengineArkResponse {
-        try await client.complete(request)
-    }
-
-    public func stream(
-        _ request: VolcengineArkRequest
-    ) -> AsyncThrowingStream<VolcengineArkStreamEvent, any Error> {
-        client.stream(request)
-    }
-
     private var client: VolcengineArkClient {
         VolcengineArkClient(configuration: configuration, session: session)
     }
+    
+    nonisolated(nonsending) public func respond(
+        to request: LanguageModelExecutorGenerationRequest,
+        model: VolcengineArkLanguageModel,
+        streamingInto channel: LanguageModelExecutorGenerationChannel
+    ) async throws {
+        var extraBody = Self.extraBody(for: request.contextOptions)
+        if extraBody.isEmpty {
+            extraBody = configuration.defaultExtraBody
+        }
+        // Foundation Models tool-calling mode maps onto Ark's OpenAI-style
+        // `tool_choice`. `required` makes the model emit ONLY tool calls (no
+        // prose preamble) — the lever for single-purpose routing stages.
+        // Guided generation (`request.schema`) becomes the wire's
+        // `response_format` constraint inside the wire encoder.
+        switch request.generationOptions.toolCallingMode?.kind {
+        case .required:
+            extraBody["tool_choice"] = GeneratedContent("required")
+        case .disallowed:
+            extraBody["tool_choice"] = GeneratedContent("none")
+        default:
+            break  // .allowed / nil → Ark's default "auto"
+        }
+
+        let started = ContinuousClock.now
+        let entryID = UUID().uuidString
+        await channel.send(.response(
+            entryID: entryID,
+            action: .updateMetadata([
+                "modelID": model.configuration.model,
+                "requestID": request.id.uuidString,
+            ])
+        ))
+
+        let usage = try await client.respond(
+            model: model.configuration.model,
+            transcript: request.transcript,
+            toolDefinitions: request.enabledToolDefinitions,
+            schema: request.schema,
+            options: request.generationOptions,
+            extraBody: extraBody,
+            entryID: entryID,
+            streamingInto: channel
+        )
+
+        let elapsed = ContinuousClock.now - started
+        VolcengineArkUsageMonitor.report(
+            usage: usage,
+            model: model.configuration.model,
+            duration: Double(elapsed.components.seconds)
+                + Double(elapsed.components.attoseconds) / 1e18
+        )
+        await channel.send(.response(
+            entryID: entryID,
+            action: .updateUsage(input: usage.input, output: usage.output)
+        ))
+    }
+
+    private static func extraBody(
+        for contextOptions: ContextOptions
+    ) -> [String: GeneratedContent] {
+        guard let reasoningLevel = contextOptions.reasoningLevel else { return [:] }
+        return [
+            "thinking": GeneratedContent(properties: ["type": "enabled"]),
+            "reasoning_effort": GeneratedContent(reasoningLevel.arkReasoningEffort),
+        ]
+    }
 }
 
-public struct VolcengineArkClient: Sendable {
-    public let configuration: VolcengineArkConfiguration
+struct VolcengineArkClient: Sendable {
+    let configuration: VolcengineArkConfiguration
     private let session: URLSession
 
-    public init(
+    init(
         configuration: VolcengineArkConfiguration,
         session: URLSession = .shared
     ) {
@@ -123,50 +207,133 @@ public struct VolcengineArkClient: Sendable {
         self.session = session
     }
 
-    public func complete(_ request: VolcengineArkRequest) async throws -> VolcengineArkResponse {
-        let urlRequest = try makeURLRequest(request, stream: false)
-        let data = try await validatedData(for: urlRequest)
+    /// Runs one streaming chat-completions call, translating SSE chunks into
+    /// official channel events as they arrive. Returns the usage totals for
+    /// the call; the caller sends the final `updateUsage`. Cancellation ends
+    /// the stream cleanly, so a cancelled request still reports the usage
+    /// seen so far.
+    func respond(
+        model: String,
+        transcript: Transcript,
+        toolDefinitions: [Transcript.ToolDefinition],
+        schema: GenerationSchema?,
+        options: GenerationOptions,
+        extraBody: [String: GeneratedContent],
+        entryID: String,
+        streamingInto channel: LanguageModelExecutorGenerationChannel
+    ) async throws -> LanguageModelExecutorGenerationChannel.Usage {
+        let urlRequest = try makeURLRequest(
+            model: model,
+            transcript: transcript,
+            toolDefinitions: toolDefinitions,
+            schema: schema,
+            options: options,
+            extraBody: extraBody
+        )
+        #if DEBUG
+        VolcengineArkWireTrace.report(.request(
+            model: model.trimmedNonEmpty ?? configuration.model,
+            body: urlRequest.httpBody ?? Data()
+        ))
+        #endif
+        var accumulator = StreamAccumulator()
         do {
-            return try JSONDecoder().decode(WireResponse.self, from: data).response
+            let bytes = try await validatedBytes(for: urlRequest)
+            for try await line in bytes.lines {
+                try Task.checkCancellation()
+                #if DEBUG
+                VolcengineArkWireTrace.report(.responseLine(line))
+                #endif
+                guard line.hasPrefix("data:") else { continue }
+                let json = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
+                guard !json.isEmpty else { continue }
+                if json == "[DONE]" { break }
+                guard let data = json.data(using: .utf8),
+                      let chunk = try? JSONDecoder().decode(StreamWireEvent.self, from: data)
+                else { continue }
+                await forward(chunk, into: channel, entryID: entryID, accumulator: &accumulator)
+            }
+        } catch is CancellationError {
+            // Clean early stop; partial usage still reaches the caller.
         } catch let error as VolcengineArkError {
             throw error
+        } catch let error as LanguageModelError {
+            throw error
         } catch {
-            throw VolcengineArkError.decodingFailed(String(describing: error))
+            throw Self.transportError(error)
         }
+        return accumulator.usage
     }
 
-    public func stream(
-        _ request: VolcengineArkRequest
-    ) -> AsyncThrowingStream<VolcengineArkStreamEvent, any Error> {
-        AsyncThrowingStream { continuation in
-            let task = Task {
-                do {
-                    let urlRequest = try makeURLRequest(request, stream: true)
-                    let bytes = try await validatedBytes(for: urlRequest)
-                    var activeToolIDs: [Int: String] = [:]
-                    for try await line in bytes.lines {
-                        try Task.checkCancellation()
-                        guard line.hasPrefix("data:") else { continue }
-                        let json = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
-                        guard !json.isEmpty else { continue }
-                        if json == "[DONE]" { break }
-                        guard let data = json.data(using: .utf8),
-                              let event = try? JSONDecoder().decode(StreamWireEvent.self, from: data)
-                        else { continue }
-                        for chunk in event.events(activeToolIDs: &activeToolIDs) {
-                            continuation.yield(chunk)
-                        }
-                    }
-                    continuation.finish()
-                } catch is CancellationError {
-                    continuation.finish()
-                } catch let error as VolcengineArkError {
-                    continuation.finish(throwing: error)
-                } catch {
-                    continuation.finish(throwing: VolcengineArkError.transport(error.localizedDescription))
+    /// One decoded SSE chunk becomes zero or more channel events. Usage
+    /// chunks fold into the accumulator instead of being sent: Ark may
+    /// report usage across several trailing chunks, and the channel should
+    /// see one final `updateUsage`.
+    private func forward(
+        _ chunk: StreamWireEvent,
+        into channel: LanguageModelExecutorGenerationChannel,
+        entryID: String,
+        accumulator: inout StreamAccumulator
+    ) async {
+        for choice in chunk.choices {
+            if let reasoning = choice.delta.reasoning_content, !reasoning.isEmpty {
+                let tokenCount = estimatedTokenCount(reasoning)
+                accumulator.estimatedReasoningTokens += tokenCount
+                await channel.send(.reasoning(
+                    entryID: entryID,
+                    action: .appendText(reasoning, tokenCount: tokenCount)
+                ))
+            }
+            if let text = choice.delta.content, !text.isEmpty {
+                await channel.send(.response(
+                    entryID: entryID,
+                    action: .appendText(text, tokenCount: estimatedTokenCount(text))
+                ))
+            }
+            for call in choice.delta.tool_calls ?? [] {
+                let index = call.index ?? 0
+                if let id = call.id, accumulator.activeTools[index] == nil {
+                    let name = call.function.name ?? ""
+                    accumulator.activeTools[index] = (id: id, name: name)
+                    // Announce the call: an empty fragment carries id + name
+                    // before any argument bytes arrive.
+                    await channel.send(.toolCalls(
+                        entryID: entryID,
+                        action: .toolCall(
+                            id: id,
+                            name: name,
+                            action: .appendArguments("", tokenCount: 0)
+                        )
+                    ))
+                }
+                if let arguments = call.function.arguments, !arguments.isEmpty {
+                    let tool = accumulator.activeTools[index]
+                    await channel.send(.toolCalls(
+                        entryID: entryID,
+                        action: .toolCall(
+                            id: tool?.id ?? String(index),
+                            name: tool?.name ?? "",
+                            action: .appendArguments(
+                                arguments,
+                                tokenCount: estimatedTokenCount(arguments)
+                            )
+                        )
+                    ))
                 }
             }
-            continuation.onTermination = { _ in task.cancel() }
+            if let finishReason = choice.finish_reason {
+                accumulator.activeTools.removeAll()
+                // The channel has no first-class stop event; consumers
+                // recover the OpenAI-compatible finish reason from entry
+                // metadata.
+                await channel.send(.response(
+                    entryID: entryID,
+                    action: .updateMetadata(["finishReason": finishReason])
+                ))
+            }
+        }
+        if let usage = chunk.usage {
+            accumulator.merge(usage)
         }
     }
 
@@ -176,8 +343,12 @@ public struct VolcengineArkClient: Sendable {
     ]
 
     private func makeURLRequest(
-        _ request: VolcengineArkRequest,
-        stream: Bool
+        model: String,
+        transcript: Transcript,
+        toolDefinitions: [Transcript.ToolDefinition],
+        schema: GenerationSchema?,
+        options: GenerationOptions,
+        extraBody: [String: GeneratedContent]
     ) throws -> URLRequest {
         let endpoint = try configuration.baseURL.resolvingEndpointPath(
             configuration.chatCompletionsPath
@@ -195,29 +366,33 @@ public struct VolcengineArkClient: Sendable {
             urlRequest.timeoutInterval = timeout
         }
 
-        let wire = WireRequest(request: request, fallbackModel: configuration.model, stream: stream)
-        let extraBody = configuration.defaultExtraBody.merging(request.extraBody) {
+        let wire = WireRequest(
+            model: model.trimmedNonEmpty ?? configuration.model,
+            transcript: transcript,
+            toolDefinitions: toolDefinitions,
+            schema: schema,
+            options: options
+        )
+        let mergedExtraBody = configuration.defaultExtraBody.merging(extraBody) {
             _, override in override
         }
-        let encoded = try JSONEncoder().encode(wire)
+        let encoded: Data
+        do {
+            encoded = try JSONEncoder().encode(wire)
+        } catch {
+            throw VolcengineArkError.encodingFailed(String(describing: error))
+        }
+        // Guided generation owns `response_format`; body extensions must not
+        // override the schema constraint.
+        let reservedKeys = schema == nil
+            ? Self.reservedBodyKeys
+            : Self.reservedBodyKeys.union(["response_format"])
         urlRequest.httpBody = try mergedRequestBody(
             encoded: encoded,
-            extraBody: extraBody,
-            reservedKeys: Self.reservedBodyKeys
+            extraBody: mergedExtraBody,
+            reservedKeys: reservedKeys
         )
         return urlRequest
-    }
-
-    private func validatedData(for request: URLRequest) async throws -> Data {
-        let data: Data
-        let response: URLResponse
-        do {
-            (data, response) = try await session.data(for: request)
-        } catch {
-            throw VolcengineArkError.from(transport: error)
-        }
-        try validate(response, data: data)
-        return data
     }
 
     private func validatedBytes(for request: URLRequest) async throws -> URLSession.AsyncBytes {
@@ -226,294 +401,116 @@ public struct VolcengineArkClient: Sendable {
         do {
             (bytes, response) = try await session.bytes(for: request)
         } catch {
-            throw VolcengineArkError.from(transport: error)
+            throw Self.transportError(error)
         }
-        try validate(response, data: Data())
+        try validate(response)
         return bytes
     }
 
-    private func validate(_ response: URLResponse, data: Data) throws {
+    /// The bytes API exposes no error body before streaming begins, so
+    /// non-2xx failures carry the status code alone.
+    private func validate(_ response: URLResponse) throws {
         guard let http = response as? HTTPURLResponse else { return }
         guard (200..<300).contains(http.statusCode) else {
-            let body = String(data: data, encoding: .utf8) ?? ""
-            throw VolcengineArkError.httpStatus(code: http.statusCode, body: body)
-        }
-    }
-}
-
-public struct VolcengineArkRequest: Sendable, Hashable {
-    public var model: String?
-    public var messages: [VolcengineArkChatMessage]
-    public var tools: [VolcengineArkToolDefinition]
-    public var temperature: Double?
-    public var maxTokens: Int?
-    public var extraBody: [String: VolcengineArkJSONValue]
-
-    public init(
-        model: String? = nil,
-        messages: [VolcengineArkChatMessage],
-        tools: [VolcengineArkToolDefinition] = [],
-        temperature: Double? = nil,
-        maxTokens: Int? = nil,
-        extraBody: [String: VolcengineArkJSONValue] = [:]
-    ) {
-        self.model = model
-        self.messages = messages
-        self.tools = tools
-        self.temperature = temperature
-        self.maxTokens = maxTokens
-        self.extraBody = extraBody
-    }
-}
-
-public struct VolcengineArkChatMessage: Sendable, Hashable {
-    public enum Role: String, Sendable, Hashable, Codable {
-        case system
-        case user
-        case assistant
-        case tool
-    }
-
-    public var role: Role
-    public var content: VolcengineArkMessageContent?
-    public var toolCalls: [VolcengineArkToolCall]
-    public var toolCallID: String?
-
-    public init(
-        role: Role,
-        content: VolcengineArkMessageContent? = nil,
-        toolCalls: [VolcengineArkToolCall] = [],
-        toolCallID: String? = nil
-    ) {
-        self.role = role
-        self.content = content
-        self.toolCalls = toolCalls
-        self.toolCallID = toolCallID
-    }
-
-    public init(role: Role, text: String) {
-        self.init(role: role, content: .text(text))
-    }
-}
-
-public enum VolcengineArkMessageContent: Sendable, Hashable {
-    case text(String)
-    case parts([VolcengineArkContentPart])
-}
-
-public enum VolcengineArkContentPart: Sendable, Hashable {
-    case text(String)
-    case imageURL(String, detail: String? = nil)
-}
-
-public struct VolcengineArkToolDefinition: Sendable, Hashable {
-    public var name: String
-    public var description: String
-    public var parameters: VolcengineArkJSONValue
-
-    public init(
-        name: String,
-        description: String,
-        parameters: VolcengineArkJSONValue
-    ) {
-        self.name = name
-        self.description = description
-        self.parameters = parameters
-    }
-}
-
-public struct VolcengineArkToolCall: Sendable, Hashable {
-    public var id: String
-    public var name: String
-    public var arguments: VolcengineArkJSONValue
-
-    public init(id: String, name: String, arguments: VolcengineArkJSONValue) {
-        self.id = id
-        self.name = name
-        self.arguments = arguments
-    }
-}
-
-public struct VolcengineArkResponse: Sendable, Hashable {
-    public var id: String?
-    public var model: String?
-    public var content: [VolcengineArkContentBlock]
-    public var stopReason: VolcengineArkStopReason
-    public var usage: VolcengineArkTokenUsage
-
-    public init(
-        id: String? = nil,
-        model: String? = nil,
-        content: [VolcengineArkContentBlock],
-        stopReason: VolcengineArkStopReason,
-        usage: VolcengineArkTokenUsage = .zero
-    ) {
-        self.id = id
-        self.model = model
-        self.content = content
-        self.stopReason = stopReason
-        self.usage = usage
-    }
-
-    public var text: String {
-        content.compactMap(\.text).joined()
-    }
-}
-
-public enum VolcengineArkContentBlock: Sendable, Hashable {
-    case text(String)
-    case reasoning(String)
-    case toolUse(id: String, name: String, arguments: VolcengineArkJSONValue)
-
-    public var text: String? {
-        if case .text(let value) = self { return value }
-        return nil
-    }
-}
-
-public enum VolcengineArkStreamEvent: Sendable, Hashable {
-    case textDelta(String)
-    case reasoningDelta(String)
-    case toolUseStart(id: String, name: String)
-    case toolUseInputDelta(id: String, json: String)
-    case toolUseStop(id: String)
-    case stop(VolcengineArkStopReason)
-    case usage(VolcengineArkTokenUsage)
-}
-
-public enum VolcengineArkStopReason: Sendable, Hashable {
-    case endTurn
-    case toolUse
-    case maxTokens
-    case other(String)
-}
-
-public struct VolcengineArkTokenUsage: Sendable, Hashable, Codable {
-    public static let zero = Self(inputTokens: 0, outputTokens: 0)
-
-    public var inputTokens: Int
-    public var outputTokens: Int
-
-    public init(inputTokens: Int, outputTokens: Int) {
-        self.inputTokens = inputTokens
-        self.outputTokens = outputTokens
-    }
-}
-
-public enum VolcengineArkJSONValue: Sendable, Hashable, Codable {
-    case null
-    case bool(Bool)
-    case int(Int)
-    case number(Double)
-    case string(String)
-    case array([VolcengineArkJSONValue])
-    case object([String: VolcengineArkJSONValue])
-
-    public init(data: Data) throws {
-        self = try JSONDecoder().decode(Self.self, from: data)
-    }
-
-    public func data() throws -> Data {
-        try JSONEncoder().encode(self)
-    }
-
-    public init(from decoder: any Decoder) throws {
-        let container = try decoder.singleValueContainer()
-        if container.decodeNil() {
-            self = .null
-        } else if let value = try? container.decode(Bool.self) {
-            self = .bool(value)
-        } else if let value = try? container.decode(Int.self) {
-            self = .int(value)
-        } else if let value = try? container.decode(Double.self) {
-            self = .number(value)
-        } else if let value = try? container.decode(String.self) {
-            self = .string(value)
-        } else if let value = try? container.decode([VolcengineArkJSONValue].self) {
-            self = .array(value)
-        } else {
-            self = .object(try container.decode([String: VolcengineArkJSONValue].self))
+            // Shapes the official taxonomy models surface as
+            // `LanguageModelError`, so session-side handling (rate-limit
+            // backoff) works without knowing the Ark error type.
+            if http.statusCode == 429 {
+                throw LanguageModelError.rateLimited(.init(
+                    resetDate: nil,
+                    debugDescription: "Volcengine Ark HTTP 429"
+                ))
+            }
+            throw VolcengineArkError.httpStatus(code: http.statusCode, body: "")
         }
     }
 
-    public func encode(to encoder: any Encoder) throws {
-        var container = encoder.singleValueContainer()
-        switch self {
-        case .null:
-            try container.encodeNil()
-        case .bool(let value):
-            try container.encode(value)
-        case .int(let value):
-            try container.encode(value)
-        case .number(let value):
-            try container.encode(value)
-        case .string(let value):
-            try container.encode(value)
-        case .array(let values):
-            try container.encode(values)
-        case .object(let values):
-            try container.encode(values)
+    /// Maps a transport failure onto the official taxonomy where a
+    /// counterpart exists (timeout, cancellation); everything else stays the
+    /// provider-specific `VolcengineArkError`.
+    static func transportError(_ error: any Error) -> any Error {
+        if error is CancellationError { return error }
+        guard let urlError = error as? URLError else {
+            return VolcengineArkError.transport(error.localizedDescription)
         }
-    }
-}
-
-#if canImport(FoundationModels)
-extension VolcengineArkJSONValue {
-    /// The Ark `response_format` body extension for a Foundation Models
-    /// guided-generation schema: a strict OpenAI-compatible `json_schema`
-    /// constraint built from the schema's official JSON encoding.
-    public static func responseFormat(
-        for schema: GenerationSchema,
-        name: String = "response"
-    ) throws -> VolcengineArkJSONValue {
-        let encoded: VolcengineArkJSONValue
-        do {
-            encoded = try VolcengineArkJSONValue(data: JSONEncoder().encode(schema))
-        } catch {
-            throw VolcengineArkError.encodingFailed(
-                "Couldn't encode GenerationSchema for response_format: \(error)"
+        switch urlError.code {
+        case .cancelled:
+            return CancellationError()
+        case .timedOut:
+            return LanguageModelError.timeout(.init(
+                debugDescription: urlError.localizedDescription
+            ))
+        case .badURL, .unsupportedURL:
+            return VolcengineArkError.unsupported(urlError.localizedDescription)
+        default:
+            return VolcengineArkError.transport(
+                "\(urlError.code.rawValue): \(urlError.localizedDescription)"
             )
         }
-        return .object([
-            "type": .string("json_schema"),
-            "json_schema": .object([
-                "name": .string(name),
-                "schema": encoded,
-                "strict": .bool(true),
-            ]),
-        ])
     }
 }
-#endif
 
+/// Per-request state the stream needs above individual chunks: tool-call
+/// identity by choice index, and the best usage numbers seen so far, kept
+/// directly in the official channel `Usage` currency.
+private struct StreamAccumulator {
+    /// Tool-call argument deltas arrive keyed by choice index without id or
+    /// name; channel fragments need both on every event.
+    var activeTools: [Int: (id: String, name: String)] = [:]
+
+    /// Reasoning tokens estimated from streamed text, used only when the
+    /// wire never reports `reasoning_tokens`.
+    var estimatedReasoningTokens = 0
+
+    private var reported = LanguageModelExecutorGenerationChannel.Usage(
+        input: .init(totalTokenCount: 0, cachedTokenCount: 0),
+        output: .init(totalTokenCount: 0, reasoningTokenCount: 0)
+    )
+
+    /// Ark may report usage across several trailing chunks; keep the largest
+    /// seen of each field.
+    mutating func merge(_ usage: StreamWireEvent.Usage) {
+        reported.input.totalTokenCount = max(
+            reported.input.totalTokenCount, usage.prompt_tokens ?? 0
+        )
+        reported.input.cachedTokenCount = max(
+            reported.input.cachedTokenCount,
+            usage.prompt_tokens_details?.cached_tokens ?? 0
+        )
+        reported.output.totalTokenCount = max(
+            reported.output.totalTokenCount, usage.completion_tokens ?? 0
+        )
+        reported.output.reasoningTokenCount = max(
+            reported.output.reasoningTokenCount,
+            usage.completion_tokens_details?.reasoning_tokens ?? 0
+        )
+    }
+
+    var usage: LanguageModelExecutorGenerationChannel.Usage {
+        var usage = reported
+        if usage.output.reasoningTokenCount == 0 {
+            usage.output.reasoningTokenCount = estimatedReasoningTokens
+        }
+        return usage
+    }
+}
+
+/// Cheap chars/4 token estimate for streaming fragments; the wire's usage
+/// totals supersede it once they arrive.
+private func estimatedTokenCount(_ text: String) -> Int {
+    max(1, (text.count + 3) / 4)
+}
+
+/// Provider-specific failures the official `LanguageModelError` taxonomy
+/// does not model. Shapes it does model (rate limiting, timeouts,
+/// cancellation) are thrown as `LanguageModelError` / `CancellationError`
+/// at the wire instead of being mirrored here.
 public enum VolcengineArkError: Error, Sendable, Hashable {
     case httpStatus(code: Int, body: String)
-    case decodingFailed(String)
     case encodingFailed(String)
     case missingAPIKey
-    case missingModel
     case transport(String)
-    case timeout(String)
-    case cancelled
     case unsupported(String)
-    case provider(message: String)
-
-    public static func from(transport error: any Error) -> VolcengineArkError {
-        if error is CancellationError { return .cancelled }
-        if let urlError = error as? URLError {
-            switch urlError.code {
-            case .cancelled:
-                return .cancelled
-            case .timedOut:
-                return .timeout(urlError.localizedDescription)
-            case .badURL, .unsupportedURL:
-                return .unsupported(urlError.localizedDescription)
-            default:
-                return .transport("\(urlError.code.rawValue): \(urlError.localizedDescription)")
-            }
-        }
-        return .transport(error.localizedDescription)
-    }
 }
 
 extension VolcengineArkError: LocalizedError {
@@ -521,53 +518,75 @@ extension VolcengineArkError: LocalizedError {
         switch self {
         case .httpStatus(let code, let body):
             "Volcengine Ark HTTP \(code): \(body)"
-        case .decodingFailed(let detail):
-            "Volcengine Ark response decoding failed: \(detail)"
         case .encodingFailed(let detail):
             "Volcengine Ark request encoding failed: \(detail)"
         case .missingAPIKey:
             "Volcengine Ark configuration is missing an API key"
-        case .missingModel:
-            "Volcengine Ark configuration is missing a model"
         case .transport(let detail):
             "Volcengine Ark transport error: \(detail)"
-        case .timeout(let detail):
-            "Volcengine Ark request timed out: \(detail)"
-        case .cancelled:
-            "Volcengine Ark request was cancelled"
         case .unsupported(let detail):
             "Unsupported Volcengine Ark operation: \(detail)"
-        case .provider(let message):
-            "Volcengine Ark provider error: \(message)"
         }
     }
 }
+
+// MARK: - Wire encoding
+//
+// The only place Foundation Models values become Ark JSON. Everything above
+// this layer speaks `Transcript`, `Transcript.ToolDefinition`,
+// `GenerationSchema`, `GenerationOptions`, and `GeneratedContent`; the
+// chat-completions shape exists from here down, built immediately before the
+// request is sent.
 
 private struct WireRequest: Encodable {
     let model: String
     let messages: [WireMessage]
     let tools: [WireTool]?
+    let response_format: WireResponseFormat?
     let temperature: Double?
     let max_tokens: Int?
-    let stream: Bool
-    let stream_options: StreamOptions?
+    let stream = true
+    let stream_options = StreamOptions(include_usage: true)
 
     struct StreamOptions: Encodable {
         let include_usage: Bool
     }
 
     init(
-        request: VolcengineArkRequest,
-        fallbackModel: String,
-        stream: Bool
+        model: String,
+        transcript: Transcript,
+        toolDefinitions: [Transcript.ToolDefinition],
+        schema: GenerationSchema?,
+        options: GenerationOptions
     ) {
-        self.model = request.model?.trimmedNonEmpty ?? fallbackModel
-        self.messages = request.messages.map(WireMessage.init)
-        self.tools = request.tools.isEmpty ? nil : request.tools.map(WireTool.init)
-        self.temperature = request.temperature
-        self.max_tokens = request.maxTokens
-        self.stream = stream
-        self.stream_options = stream ? StreamOptions(include_usage: true) : nil
+        self.model = model
+        let messages = WireMessage.messages(from: transcript)
+        // Ark rejects an empty messages array; an empty transcript still
+        // sends one (empty) user turn.
+        self.messages = messages.isEmpty
+            ? [WireMessage(role: "user", content: .text(""))]
+            : messages
+        self.tools = toolDefinitions.isEmpty ? nil : toolDefinitions.map(WireTool.init)
+        self.response_format = schema.map { WireResponseFormat($0) }
+        self.temperature = options.temperature
+        self.max_tokens = options.maximumResponseTokens
+    }
+}
+
+/// Ark's strict `json_schema` response constraint, embedding the
+/// `GenerationSchema`'s official JSON encoding inline.
+private struct WireResponseFormat: Encodable {
+    struct Schema: Encodable {
+        let name: String
+        let schema: GenerationSchema
+        let strict: Bool
+    }
+
+    let type = "json_schema"
+    let json_schema: Schema
+
+    init(_ schema: GenerationSchema, name: String = "response") {
+        self.json_schema = Schema(name: name, schema: schema, strict: true)
     }
 }
 
@@ -577,11 +596,59 @@ private struct WireMessage: Encodable {
     var tool_calls: [WireToolCall]?
     var tool_call_id: String?
 
-    init(_ message: VolcengineArkChatMessage) {
-        self.role = message.role.rawValue
-        self.content = message.content.map(WireMessageContent.init)
-        self.tool_calls = message.toolCalls.isEmpty ? nil : message.toolCalls.map(WireToolCall.init)
-        self.tool_call_id = message.toolCallID
+    init(
+        role: String,
+        content: WireMessageContent? = nil,
+        toolCalls: [WireToolCall]? = nil,
+        toolCallID: String? = nil
+    ) {
+        self.role = role
+        self.content = content
+        self.tool_calls = toolCalls
+        self.tool_call_id = toolCallID
+    }
+
+    /// Transcript entries map onto chat-completions messages.
+    static func messages(from transcript: Transcript) -> [WireMessage] {
+        var messages: [WireMessage] = []
+        for entry in transcript {
+            switch entry {
+            case .instructions(let instructions):
+                if let text = flattenedText(from: instructions.segments) {
+                    messages.append(WireMessage(role: "system", content: .text(text)))
+                }
+            case .prompt(let prompt):
+                if let content = WireMessageContent(segments: prompt.segments) {
+                    messages.append(WireMessage(role: "user", content: content))
+                }
+            case .response(let response):
+                if let text = flattenedText(from: response.segments) {
+                    messages.append(WireMessage(role: "assistant", content: .text(text)))
+                }
+            case .reasoning:
+                // Chat-completions backends expect prior reasoning NOT to be
+                // re-sent as assistant turns: replaying it inflates context
+                // and skews the continuation. The entry stays in the FM
+                // transcript for the host; the wire never sees it.
+                continue
+            case .toolCalls(let toolCalls):
+                messages.append(WireMessage(
+                    role: "assistant",
+                    toolCalls: toolCalls.map(WireToolCall.init)
+                ))
+            case .toolOutput(let output):
+                if let text = flattenedText(from: output.segments) {
+                    messages.append(WireMessage(
+                        role: "tool",
+                        content: .text(text),
+                        toolCallID: output.id
+                    ))
+                }
+            @unknown default:
+                continue
+            }
+        }
+        return messages
     }
 }
 
@@ -589,13 +656,56 @@ private enum WireMessageContent: Encodable {
     case text(String)
     case parts([WireContentPart])
 
-    init(_ content: VolcengineArkMessageContent) {
-        switch content {
-        case .text(let text):
-            self = .text(text)
-        case .parts(let parts):
-            self = .parts(parts.map(WireContentPart.init))
+    /// Ark accepts these `detail` values on `image_url` parts; any other
+    /// attachment label is a caption, not a detail hint.
+    private static let imageDetailValues: Set<String> = ["low", "high", "auto"]
+
+    /// User-prompt content. Text-only prompts stay a plain string; image
+    /// attachments become OpenAI-style `image_url` parts carrying the
+    /// attachment's URL (remote or `data:`) verbatim.
+    init?(segments: [Transcript.Segment]) {
+        var parts: [WireContentPart] = []
+        var hasMedia = false
+        for segment in segments {
+            switch segment {
+            case .text(let text):
+                parts.append(.text(text.content))
+            case .structure(let structured):
+                parts.append(.text(structured.description))
+            case .attachment(let attachment):
+                switch attachment.content {
+                case .image(let image):
+                    guard let url = image.url else {
+                        // CGImage-backed attachments have no transportable
+                        // URL; describe them rather than dropping the segment.
+                        parts.append(.text(attachment.description))
+                        continue
+                    }
+                    let detail = attachment.label.flatMap {
+                        Self.imageDetailValues.contains($0) ? $0 : nil
+                    }
+                    parts.append(.imageURL(url.absoluteString, detail: detail))
+                    hasMedia = true
+                @unknown default:
+                    parts.append(.text(attachment.description))
+                }
+            case .custom(let custom):
+                parts.append(.text(custom.description))
+            @unknown default:
+                continue
+            }
         }
+        if hasMedia {
+            self = .parts(parts)
+            return
+        }
+        let text = parts.compactMap { part -> String? in
+            if case .text(let value) = part { return value }
+            return nil
+        }
+        .joined(separator: "\n")
+        guard let trimmed = text.trimmedNonEmpty else { return nil }
+        self = .text(trimmed)
     }
 
     func encode(to encoder: any Encoder) throws {
@@ -623,15 +733,6 @@ private enum WireContentPart: Encodable {
         case url, detail
     }
 
-    init(_ part: VolcengineArkContentPart) {
-        switch part {
-        case .text(let text):
-            self = .text(text)
-        case .imageURL(let url, let detail):
-            self = .imageURL(url, detail: detail)
-        }
-    }
-
     func encode(to encoder: any Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         switch self {
@@ -651,17 +752,17 @@ private struct WireTool: Encodable {
     struct Function: Encodable {
         let name: String
         let description: String
-        let parameters: VolcengineArkJSONValue
+        let parameters: GenerationSchema
     }
 
     let type = "function"
     let function: Function
 
-    init(_ tool: VolcengineArkToolDefinition) {
+    init(_ definition: Transcript.ToolDefinition) {
         self.function = Function(
-            name: tool.name,
-            description: tool.description,
-            parameters: tool.parameters
+            name: definition.name,
+            description: definition.description,
+            parameters: definition.parameters
         )
     }
 }
@@ -677,78 +778,33 @@ private struct WireToolCall: Codable {
     let function: Function
     var index: Int?
 
-    init(_ call: VolcengineArkToolCall) {
+    init(_ call: Transcript.ToolCall) {
         self.id = call.id
         self.type = "function"
-        self.function = Function(
-            name: call.name,
-            arguments: (try? call.arguments.data()).flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
-        )
+        // `jsonString` is the official GeneratedContent → JSON conversion.
+        self.function = Function(name: call.toolName, arguments: call.arguments.jsonString)
         self.index = nil
     }
 }
 
-private struct WireResponse: Decodable {
-    struct Choice: Decodable {
-        struct Message: Decodable {
-            let content: String?
-            let reasoning_content: String?
-            let tool_calls: [WireToolCall]?
+/// Flattens transcript segments to wire text, or `nil` when nothing remains.
+private func flattenedText(from segments: [Transcript.Segment]) -> String? {
+    segments.map { segment in
+        switch segment {
+        case .text(let text):
+            text.content
+        case .structure(let structured):
+            structured.description
+        case .attachment(let attachment):
+            attachment.description
+        case .custom(let custom):
+            custom.description
+        @unknown default:
+            ""
         }
-
-        let message: Message
-        let finish_reason: String?
     }
-
-    struct Usage: Decodable {
-        let prompt_tokens: Int?
-        let completion_tokens: Int?
-    }
-
-    let id: String?
-    let model: String?
-    let choices: [Choice]
-    let usage: Usage?
-
-    var response: VolcengineArkResponse {
-        var blocks: [VolcengineArkContentBlock] = []
-        guard let choice = choices.first else {
-            return VolcengineArkResponse(
-                id: id,
-                model: model,
-                content: [],
-                stopReason: .endTurn,
-                usage: usageValue
-            )
-        }
-        if let reasoning = choice.message.reasoning_content, !reasoning.isEmpty {
-            blocks.append(.reasoning(reasoning))
-        }
-        if let text = choice.message.content, !text.isEmpty {
-            blocks.append(.text(text))
-        }
-        for call in choice.message.tool_calls ?? [] {
-            blocks.append(.toolUse(
-                id: call.id ?? "",
-                name: call.function.name ?? "",
-                arguments: decodedArguments(call.function.arguments)
-            ))
-        }
-        return VolcengineArkResponse(
-            id: id,
-            model: model,
-            content: blocks,
-            stopReason: stopReason(choice.finish_reason),
-            usage: usageValue
-        )
-    }
-
-    private var usageValue: VolcengineArkTokenUsage {
-        VolcengineArkTokenUsage(
-            inputTokens: usage?.prompt_tokens ?? 0,
-            outputTokens: usage?.completion_tokens ?? 0
-        )
-    }
+    .joined(separator: "\n")
+    .trimmedNonEmpty
 }
 
 private struct StreamWireEvent: Decodable {
@@ -764,8 +820,18 @@ private struct StreamWireEvent: Decodable {
     }
 
     struct Usage: Decodable {
+        struct PromptTokensDetails: Decodable {
+            let cached_tokens: Int?
+        }
+
+        struct CompletionTokensDetails: Decodable {
+            let reasoning_tokens: Int?
+        }
+
         let prompt_tokens: Int?
         let completion_tokens: Int?
+        let prompt_tokens_details: PromptTokensDetails?
+        let completion_tokens_details: CompletionTokensDetails?
     }
 
     let choices: [Choice]
@@ -780,97 +846,24 @@ private struct StreamWireEvent: Decodable {
         self.choices = try container.decodeIfPresent([Choice].self, forKey: .choices) ?? []
         self.usage = try container.decodeIfPresent(Usage.self, forKey: .usage)
     }
-
-    func events(activeToolIDs: inout [Int: String]) -> [VolcengineArkStreamEvent] {
-        var result: [VolcengineArkStreamEvent] = []
-        for choice in choices {
-            if let reasoning = choice.delta.reasoning_content, !reasoning.isEmpty {
-                result.append(.reasoningDelta(reasoning))
-            }
-            if let text = choice.delta.content, !text.isEmpty {
-                result.append(.textDelta(text))
-            }
-            for call in choice.delta.tool_calls ?? [] {
-                let index = call.index ?? 0
-                if let id = call.id, activeToolIDs[index] == nil {
-                    activeToolIDs[index] = id
-                    result.append(.toolUseStart(id: id, name: call.function.name ?? ""))
-                }
-                if let arguments = call.function.arguments, !arguments.isEmpty {
-                    result.append(.toolUseInputDelta(
-                        id: activeToolIDs[index] ?? String(index),
-                        json: arguments
-                    ))
-                }
-            }
-            switch choice.finish_reason {
-            case "stop":
-                result.append(.stop(.endTurn))
-            case "tool_calls":
-                for index in activeToolIDs.keys.sorted() {
-                    if let id = activeToolIDs.removeValue(forKey: index) {
-                        result.append(.toolUseStop(id: id))
-                    }
-                }
-                result.append(.stop(.toolUse))
-            case "length":
-                result.append(.stop(.maxTokens))
-            case let other?:
-                result.append(.stop(.other(other)))
-            case nil:
-                break
-            }
-        }
-        if let usage {
-            result.append(.usage(VolcengineArkTokenUsage(
-                inputTokens: usage.prompt_tokens ?? 0,
-                outputTokens: usage.completion_tokens ?? 0
-            )))
-        }
-        return result
-    }
-}
-
-private func stopReason(_ reason: String?) -> VolcengineArkStopReason {
-    switch reason {
-    case "stop":
-        .endTurn
-    case "tool_calls":
-        .toolUse
-    case "length":
-        .maxTokens
-    case let other?:
-        .other(other)
-    case nil:
-        .endTurn
-    }
-}
-
-private func decodedArguments(_ arguments: String?) -> VolcengineArkJSONValue {
-    guard let arguments = arguments?.trimmingCharacters(in: .whitespacesAndNewlines),
-          !arguments.isEmpty
-    else { return .object([:]) }
-    guard let data = arguments.data(using: .utf8),
-          let value = try? VolcengineArkJSONValue(data: data)
-    else {
-        return .object(["__volcengine_ark_malformed_tool_input_raw": .string(arguments)])
-    }
-    return value
 }
 
 private func mergedRequestBody(
     encoded: Data,
-    extraBody: [String: VolcengineArkJSONValue],
+    extraBody: [String: GeneratedContent],
     reservedKeys: Set<String>
 ) throws -> Data {
     guard !extraBody.isEmpty else { return encoded }
     guard var object = try JSONSerialization.jsonObject(with: encoded) as? [String: Any] else {
         return encoded
     }
-    let extraData = try JSONEncoder().encode(extraBody)
-    let extra = try JSONSerialization.jsonObject(with: extraData) as? [String: Any] ?? [:]
-    for (key, value) in extra where !reservedKeys.contains(key) {
-        object[key] = value
+    // `jsonString` is the official GeneratedContent → JSON conversion;
+    // scalar extensions ("minimal", true) arrive as JSON fragments.
+    for (key, value) in extraBody where !reservedKeys.contains(key) {
+        object[key] = try JSONSerialization.jsonObject(
+            with: Data(value.jsonString.utf8),
+            options: [.fragmentsAllowed]
+        )
     }
     return try JSONSerialization.data(withJSONObject: object)
 }
@@ -931,248 +924,6 @@ private extension String {
     }
 }
 
-#if canImport(FoundationModels)
-@available(iOS 27.0, macOS 27.0, visionOS 27.0, watchOS 27.0, *)
-extension VolcengineArkLanguageModel: FoundationModels.LanguageModel {
-    public typealias Executor = VolcengineArkLanguageModelExecutor
-
-    public var capabilities: LanguageModelCapabilities {
-        LanguageModelCapabilities(capabilities: configuration.capabilities.foundationModelCapabilities)
-    }
-
-    public var executorConfiguration: VolcengineArkLanguageModelExecutor.Configuration {
-        configuration
-    }
-}
-
-@available(iOS 27.0, macOS 27.0, visionOS 27.0, watchOS 27.0, *)
-extension VolcengineArkLanguageModelExecutor: FoundationModels.LanguageModelExecutor {
-    public typealias Configuration = VolcengineArkConfiguration
-    public typealias Model = VolcengineArkLanguageModel
-
-    nonisolated(nonsending) public func respond(
-        to request: LanguageModelExecutorGenerationRequest,
-        model: VolcengineArkLanguageModel,
-        streamingInto channel: LanguageModelExecutorGenerationChannel
-    ) async throws {
-        let messages = Self.messages(from: request.transcript)
-        var extraBody = Self.extraBody(for: request.contextOptions)
-        if extraBody.isEmpty {
-            extraBody = configuration.defaultExtraBody
-        }
-        if let schema = request.schema {
-            // Foundation Models guided generation maps onto Ark's
-            // `response_format` JSON-schema constraint.
-            extraBody["response_format"] = try VolcengineArkJSONValue.responseFormat(for: schema)
-        }
-        // Foundation Models tool-calling mode maps onto Ark's OpenAI-style
-        // `tool_choice`. `required` makes the model emit ONLY tool calls (no
-        // prose preamble) — the lever for single-purpose routing stages.
-        switch request.generationOptions.toolCallingMode?.kind {
-        case .required:
-            extraBody["tool_choice"] = .string("required")
-        case .disallowed:
-            extraBody["tool_choice"] = .string("none")
-        default:
-            break  // .allowed / nil → Ark's default "auto"
-        }
-        let arkRequest = VolcengineArkRequest(
-            model: model.configuration.model,
-            messages: messages.isEmpty ? [.init(role: .user, text: "")] : messages,
-            tools: Self.tools(from: request.enabledToolDefinitions),
-            temperature: request.generationOptions.temperature,
-            maxTokens: request.generationOptions.maximumResponseTokens,
-            extraBody: extraBody
-        )
-
-        let started = ContinuousClock.now
-        let response = try await complete(arkRequest)
-        let elapsed = ContinuousClock.now - started
-        VolcengineArkUsageMonitor.report(
-            usage: response.usage,
-            model: response.model ?? model.configuration.model,
-            duration: Double(elapsed.components.seconds)
-                + Double(elapsed.components.attoseconds) / 1e18
-        )
-        let entryID = response.id ?? UUID().uuidString
-        await channel.send(.response(
-            entryID: entryID,
-            action: .updateMetadata([
-                "modelID": response.model ?? model.configuration.model,
-                "requestID": request.id.uuidString,
-            ])
-        ))
-        for block in response.content {
-            switch block {
-            case .text(let text):
-                await channel.send(.response(
-                    entryID: entryID,
-                    action: .appendText(text, tokenCount: Self.estimatedTokenCount(text))
-                ))
-            case .reasoning(let text):
-                await channel.send(.reasoning(
-                    entryID: entryID,
-                    action: .appendText(text, tokenCount: Self.estimatedTokenCount(text))
-                ))
-            case .toolUse(let id, let name, let arguments):
-                let json = (try? arguments.data()).flatMap {
-                    String(data: $0, encoding: .utf8)
-                } ?? "{}"
-                await channel.send(.toolCalls(
-                    entryID: entryID,
-                    action: .toolCall(
-                        id: id.isEmpty ? UUID().uuidString : id,
-                        name: name,
-                        action: .appendArguments(json, tokenCount: Self.estimatedTokenCount(json))
-                    )
-                ))
-            }
-        }
-        await channel.send(.response(
-            entryID: entryID,
-            action: .updateUsage(
-                input: .init(totalTokenCount: response.usage.inputTokens, cachedTokenCount: 0),
-                output: .init(
-                    totalTokenCount: response.usage.outputTokens,
-                    reasoningTokenCount: response.content.reasoningTokenEstimate
-                )
-            )
-        ))
-    }
-
-    private static func messages(from transcript: Transcript) -> [VolcengineArkChatMessage] {
-        var messages: [VolcengineArkChatMessage] = []
-        for entry in transcript {
-            switch entry {
-            case .instructions(let instructions):
-                if let text = text(from: instructions.segments).trimmedNonEmpty {
-                    messages.append(.init(role: .system, text: text))
-                }
-            case .prompt(let prompt):
-                if let text = text(from: prompt.segments).trimmedNonEmpty {
-                    messages.append(.init(role: .user, text: text))
-                }
-            case .response(let response):
-                if let text = text(from: response.segments).trimmedNonEmpty {
-                    messages.append(.init(role: .assistant, text: text))
-                }
-            case .reasoning(let reasoning):
-                if let text = text(from: reasoning.segments).trimmedNonEmpty {
-                    messages.append(.init(role: .assistant, text: text))
-                }
-            case .toolCalls(let toolCalls):
-                let calls = toolCalls.map { call in
-                    VolcengineArkToolCall(
-                        id: call.id,
-                        name: call.toolName,
-                        arguments: jsonValue(from: call.arguments)
-                    )
-                }
-                messages.append(.init(role: .assistant, toolCalls: calls))
-            case .toolOutput(let output):
-                if let text = text(from: output.segments).trimmedNonEmpty {
-                    messages.append(.init(
-                        role: .tool,
-                        content: .text(text),
-                        toolCallID: output.id
-                    ))
-                }
-            @unknown default:
-                continue
-            }
-        }
-        return messages
-    }
-
-    private static func text(from segments: [Transcript.Segment]) -> String {
-        segments.map { segment in
-            switch segment {
-            case .text(let text):
-                text.content
-            case .structure(let structured):
-                structured.description
-            case .attachment(let attachment):
-                attachment.description
-            case .custom(let custom):
-                custom.description
-            @unknown default:
-                ""
-            }
-        }.joined(separator: "\n")
-    }
-
-    private static func tools(
-        from definitions: [Transcript.ToolDefinition]
-    ) -> [VolcengineArkToolDefinition] {
-        definitions.map { definition in
-            VolcengineArkToolDefinition(
-                name: definition.name,
-                description: definition.description,
-                parameters: jsonValue(from: definition.parameters)
-            )
-        }
-    }
-
-    private static func jsonValue(from value: some Encodable) -> VolcengineArkJSONValue {
-        guard let data = try? JSONEncoder().encode(value),
-              let decoded = try? VolcengineArkJSONValue(data: data)
-        else { return .object([:]) }
-        return decoded
-    }
-
-    private static func jsonValue(from content: GeneratedContent) -> VolcengineArkJSONValue {
-        switch content.kind {
-        case .null:
-            .null
-        case .bool(let value):
-            .bool(value)
-        case .number(let value):
-            .number(value)
-        case .string(let value):
-            .string(value)
-        case .array(let values):
-            .array(values.map(jsonValue(from:)))
-        case .structure(let properties, _):
-            .object(properties.mapValues(jsonValue(from:)))
-        @unknown default:
-            .string(content.jsonString)
-        }
-    }
-
-    private static func extraBody(
-        for contextOptions: ContextOptions
-    ) -> [String: VolcengineArkJSONValue] {
-        guard let reasoningLevel = contextOptions.reasoningLevel else { return [:] }
-        return [
-            "thinking": .object(["type": .string("enabled")]),
-            "reasoning_effort": .string(reasoningLevel.arkReasoningEffort),
-        ]
-    }
-
-    private static func estimatedTokenCount(_ text: String) -> Int {
-        Swift.max(1, (text.count + 3) / 4)
-    }
-}
-
-@available(iOS 27.0, macOS 27.0, visionOS 27.0, watchOS 27.0, *)
-private extension Set where Element == VolcengineArkModelCapability {
-    var foundationModelCapabilities: [LanguageModelCapabilities.Capability] {
-        compactMap { capability in
-            switch capability {
-            case .vision:
-                .vision
-            case .guidedGeneration:
-                .guidedGeneration
-            case .reasoning:
-                .reasoning
-            case .toolCalling:
-                .toolCalling
-            }
-        }
-    }
-}
-
-@available(iOS 27.0, macOS 27.0, visionOS 27.0, watchOS 27.0, *)
 private extension ContextOptions.ReasoningLevel {
     var arkReasoningEffort: String {
         switch self {
@@ -1189,15 +940,3 @@ private extension ContextOptions.ReasoningLevel {
         }
     }
 }
-
-@available(iOS 27.0, macOS 27.0, visionOS 27.0, watchOS 27.0, *)
-private extension [VolcengineArkContentBlock] {
-    var reasoningTokenEstimate: Int {
-        reduce(into: 0) { result, block in
-            if case .reasoning(let text) = block {
-                result += Swift.max(1, (text.count + 3) / 4)
-            }
-        }
-    }
-}
-#endif

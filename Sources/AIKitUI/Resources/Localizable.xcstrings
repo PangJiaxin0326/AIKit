@@ -501,16 +501,6 @@
         }
       }
     },
-    "Memory window": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "记忆窗口"
-          }
-        }
-      }
-    },
     "Menu": {
       "localizations": {
         "zh-Hans": {

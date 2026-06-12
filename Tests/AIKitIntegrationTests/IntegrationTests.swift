@@ -42,7 +42,7 @@ private actor InvocationFlag {
         ])
 
         let orchestrator = Orchestrator(
-            llm: LLMClient(provider: provider),
+            llm: provider,
             tools: tools,
             memory: InMemoryMemoryStore(),
             contextResolver: await resolver(toolNames: ["navigate"]),
@@ -77,7 +77,7 @@ private actor InvocationFlag {
         ])
 
         let orchestrator = Orchestrator(
-            llm: LLMClient(provider: provider),
+            llm: provider,
             tools: tools,
             memory: InMemoryMemoryStore(),
             contextResolver: await resolver(toolNames: ["navigate"]),
@@ -114,7 +114,7 @@ private actor InvocationFlag {
         ])
 
         let orchestrator = Orchestrator(
-            llm: LLMClient(provider: provider),
+            llm: provider,
             tools: tools,
             memory: InMemoryMemoryStore(),
             contextResolver: await resolver(toolNames: ["navigate"]),
@@ -147,7 +147,7 @@ private actor InvocationFlag {
                     let resolver = ContextResolver()
                     await resolver.push(ViewContext(id: .init("v\(i)"), displayName: "V"))
                     let orchestrator = Orchestrator(
-                        llm: LLMClient(provider: MockProvider(finalText: "answer-\(i)")),
+                        llm: MockProvider(finalText: "answer-\(i)"),
                         tools: [],
                         memory: InMemoryMemoryStore(),
                         contextResolver: resolver,
