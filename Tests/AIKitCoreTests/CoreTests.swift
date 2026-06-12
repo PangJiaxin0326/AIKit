@@ -290,6 +290,27 @@ private struct EchoTool: Tool {
         #expect(response.usage.output.totalTokenCount == 4)
     }
 
+    /// Documents the official usage semantics consumers must respect:
+    /// `Response.usage` carries ONLY the final model call of a turn, while
+    /// `session.usage` accumulates every call over the session's lifetime.
+    /// Anything accounting a whole turn (tool rounds included) must read
+    /// the session surface — AIKit's orchestrator depends on this split.
+    @Test func responseUsageIsLastCallSessionUsageAccumulates() async throws {
+        let model = MockLanguageModel(turns: [
+            .init(toolCalls: [.init(
+                id: "t1", name: "echo", argumentsJSON: #"{"text":"ping"}"#
+            )], inputTokens: 100, outputTokens: 10),
+            .init(text: "done", inputTokens: 200, outputTokens: 20),
+        ])
+        let session = LanguageModelSession(model: model, tools: [EchoTool()])
+        let response = try await session.respond(to: "go")
+        #expect(response.content == "done")
+        #expect(response.usage.input.totalTokenCount == 200)
+        #expect(response.usage.output.totalTokenCount == 20)
+        #expect(session.usage.input.totalTokenCount == 300)
+        #expect(session.usage.output.totalTokenCount == 30)
+    }
+
     @Test func exhaustionSurfaces() async throws {
         let model = MockLanguageModel(finalText: "once")
         let session = LanguageModelSession(model: model)

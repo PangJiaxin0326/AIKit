@@ -271,11 +271,14 @@ private func mockModel(_ model: MockLanguageModel) -> OrchestratorModel {
     }
 
     @Test func snapshotGroupsActivityByTaskWithUsageAndDuration() async throws {
+        // Both rounds report usage: the task must carry the SUM, not the
+        // final round's numbers (`Response.usage` covers only the last
+        // model call; the turn reads the session's accumulated usage).
         let model = MockLanguageModel(turns: [
             .init(toolCalls: [.init(
                 id: "t1", name: "navigate",
                 argumentsJSON: #"{"destination":"settings"}"#
-            )]),
+            )], inputTokens: 100, outputTokens: 10),
             .init(text: "You're on settings now.", inputTokens: 15, outputTokens: 9),
         ])
         let orchestrator = await makeOrchestrator(model: model)
@@ -291,8 +294,8 @@ private func mockModel(_ model: MockLanguageModel) -> OrchestratorModel {
         #expect(task.instruction == "Go to settings")
         #expect(task.isRunning == false)
         #expect(task.duration() >= 0)
-        #expect(task.usage.inputTokens == 15)
-        #expect(task.usage.outputTokens == 9)
+        #expect(task.usage.inputTokens == 115)
+        #expect(task.usage.outputTokens == 19)
         #expect(task.activities.contains { $0.kind == .userInstruction })
         #expect(task.activities.contains { $0.kind == .toolInvoked })
         #expect(task.activities.contains { $0.kind == .toolResult })
@@ -304,7 +307,7 @@ private func mockModel(_ model: MockLanguageModel) -> OrchestratorModel {
             .init(toolCalls: [.init(
                 id: "t1", name: "navigate",
                 argumentsJSON: #"{"destination":"settings"}"#
-            )]),
+            )], inputTokens: 100, outputTokens: 10),
             .init(text: "You're on settings now.", inputTokens: 15, outputTokens: 9),
         ])
         let usageStore = InMemorySessionUsageStore()
@@ -329,8 +332,42 @@ private func mockModel(_ model: MockLanguageModel) -> OrchestratorModel {
         // inside it), so the turn counts one round trip.
         #expect(summary.roundTripCount == 1)
         #expect(summary.messageCount == 2)
-        #expect(summary.usage == TokenUsage(inputTokens: 15, outputTokens: 9))
+        // Both rounds' usage, not just the final model call's.
+        #expect(summary.usage == TokenUsage(inputTokens: 115, outputTokens: 19))
         #expect(summary.outcome == .completed)
+    }
+
+    private struct ScriptedProviderFailure: Error {}
+
+    @Test func failedTurnStillRecordsConsumedUsage() async throws {
+        // Round 1 (the tool call) consumes tokens; round 2 fails the turn.
+        // The tokens the attempt burned must reach the task record and the
+        // usage summary — they were spent regardless of the outcome.
+        let model = MockLanguageModel(results: [
+            .success(.init(toolCalls: [.init(
+                id: "t1", name: "navigate",
+                argumentsJSON: #"{"destination":"settings"}"#
+            )], inputTokens: 100, outputTokens: 10)),
+            .failure(ScriptedProviderFailure()),
+        ])
+        let usageStore = InMemorySessionUsageStore()
+        let orchestrator = await makeOrchestrator(
+            model: model,
+            usageRecorder: usageStore,
+            options: .init(stream: false, retry: RetryPolicy(maxAttempts: 1, backoff: .none))
+        )
+
+        var usageEvents: [TokenUsage] = []
+        for try await event in await orchestrator.run("Go to settings") {
+            if case .usage(let usage) = event {
+                usageEvents.append(usage)
+            }
+        }
+
+        #expect(usageEvents == [TokenUsage(inputTokens: 100, outputTokens: 10)])
+        let summary = try #require(await usageStore.all().first)
+        #expect(summary.usage == TokenUsage(inputTokens: 100, outputTokens: 10))
+        #expect(summary.outcome == .failed)
     }
 
     @Test func cancelledTurnRecordsSessionUsageOnce() async throws {

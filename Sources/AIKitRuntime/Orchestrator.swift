@@ -23,9 +23,13 @@ public enum OrchestratorEvent: Sendable {
     /// output with `Transcript.ToolOutput.contentText`.
     case toolResult(Transcript.ToolCall, Transcript.ToolOutput)
     case verification(stage: GuardrailStage, outcome: GuardrailOutcome)
-    /// Token usage for one model call (the session accumulates its tool
-    /// rounds into it). Emitted once per attempt so hosts can do
-    /// cost/telemetry accounting even on the streaming path.
+    /// Token usage for one attempt, summed over every model call the
+    /// session made — tool rounds included. Read from the per-attempt
+    /// session's lifetime usage, because `Response.usage` carries only the
+    /// final model call of a turn. Emitted once per attempt (failed and
+    /// cancelled attempts included, when they consumed tokens) so hosts can
+    /// do cost/telemetry accounting even on the streaming path; sum the
+    /// events, never overwrite.
     case usage(TokenUsage)
     case finalAnswer(String)
     /// The turn ended without completing the request — either the model
@@ -819,6 +823,18 @@ public actor Orchestrator {
                 emit(.error(error))
                 return
             }
+            // A fresh official session per attempt: the session owns the
+            // in-turn transcript and executes the tools natively, with
+            // AIKit's guardrails riding its profile hooks. Created outside
+            // the `do` so the catch paths can still account the tokens a
+            // failed or cancelled attempt consumed.
+            let session = turnSession(
+                tools: activeTools,
+                instructions: rendered.instructions,
+                viewID: viewID,
+                turnID: turnID,
+                emit: emit
+            )
             do {
                 setPhase(.preparing, turn: turnID)
                 let warnings = try await withTurnDeadline(deadline) {
@@ -828,23 +844,16 @@ public actor Orchestrator {
                     emit(.verification(stage: .prePrompt, outcome: .warn(reason: warning)))
                 }
 
-                // A fresh official session per attempt: the session owns the
-                // in-turn transcript and executes the tools natively, with
-                // AIKit's guardrails riding its profile hooks.
-                let session = turnSession(
-                    tools: activeTools,
-                    instructions: rendered.instructions,
-                    viewID: viewID,
-                    turnID: turnID,
-                    emit: emit
-                )
-
                 setPhase(.thinking, turn: turnID)
                 let result = try await withTurnDeadline(deadline) {
                     try await self.converse(session, instruction: instruction, emit: emit)
                 }
-                addUsage(result.usage, turn: turnID)
-                emit(.usage(result.usage))
+                // The attempt's usage is the session's lifetime usage: the
+                // session is fresh per attempt and accumulates every model
+                // call, where `Response.usage` carries only the final one.
+                let usage = TokenUsage(session.usage)
+                addUsage(usage, turn: turnID)
+                emit(.usage(usage))
                 if !result.reasoning.isEmpty {
                     emit(.reasoningDelta(result.reasoning))
                 }
@@ -862,9 +871,11 @@ public actor Orchestrator {
                 emit(.finalAnswer(result.text))
                 return
             } catch is CancellationError {
+                recordAttemptUsage(of: session, turn: turnID, emit: emit)
                 await finishTurn(turnID, outcome: .cancelled)
                 return
             } catch {
+                recordAttemptUsage(of: session, turn: turnID, emit: emit)
                 // An error thrown inside a tool's `call` reaches the host
                 // wrapped in the official `ToolCallError`.
                 var error = error
@@ -906,7 +917,22 @@ public actor Orchestrator {
     private struct TurnResult: Sendable {
         var text: String
         var reasoning: String
-        var usage: TokenUsage
+    }
+
+    /// Accounts the tokens an attempt consumed before it failed or was
+    /// cancelled — the rounds already run (and reported by the executor)
+    /// would otherwise vanish from the task record and the usage events.
+    /// Skips all-zero usage so an attempt that never reached the model
+    /// (e.g. a pre-prompt guardrail block) doesn't count a round trip.
+    private func recordAttemptUsage(
+        of session: LanguageModelSession,
+        turn: Int,
+        emit: @Sendable (OrchestratorEvent) -> Void
+    ) {
+        let usage = TokenUsage(session.usage)
+        guard usage != .zero else { return }
+        addUsage(usage, turn: turn)
+        emit(.usage(usage))
     }
 
     /// One official session call carrying the whole turn: the session runs
@@ -927,14 +953,13 @@ public actor Orchestrator {
             )
             return TurnResult(
                 text: response.content,
-                reasoning: Self.reasoningText(in: response.transcriptEntries),
-                usage: TokenUsage(response.usage)
+                reasoning: Self.reasoningText(in: response.transcriptEntries)
             )
         }
 
         // Snapshots carry the cumulative text; deltas are the new suffix.
         var seen = ""
-        var result = TurnResult(text: "", reasoning: "", usage: .zero)
+        var result = TurnResult(text: "", reasoning: "")
         for try await snapshot in session.streamResponse(
             to: instruction, options: generationOptions
         ) {
@@ -953,8 +978,7 @@ public actor Orchestrator {
             seen = content
             result = TurnResult(
                 text: content,
-                reasoning: Self.reasoningText(in: snapshot.transcriptEntries),
-                usage: TokenUsage(snapshot.usage)
+                reasoning: Self.reasoningText(in: snapshot.transcriptEntries)
             )
         }
         return result
