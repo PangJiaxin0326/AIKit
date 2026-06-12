@@ -1,11 +1,10 @@
 import Foundation
-import AIKitCore
 
 /// Flags user instructions containing common jailbreak phrases. Emits `.warn`
 /// (not `.block`) by default so the host can decide how to react.
 public struct InjectionSniffer: Guardrail {
     public let id = "builtin.injectionSniffer"
-    public let stages: Set<Verifier.Stage> = [.prePrompt]
+    public let stages: Set<GuardrailStage> = [.prePrompt]
     private let blocking: Bool
 
     private static let phrases = [
@@ -24,7 +23,7 @@ public struct InjectionSniffer: Guardrail {
         self.blocking = blocking
     }
 
-    public func evaluate(_ payload: GuardrailPayload) async -> Verifier.Outcome {
+    public func evaluate(_ payload: GuardrailPayload) async -> GuardrailOutcome {
         guard case .prePrompt(let prompt) = payload else { return .pass }
         let haystack = prompt.userPrompt.lowercased()
         guard let hit = Self.phrases.first(where: haystack.contains) else {

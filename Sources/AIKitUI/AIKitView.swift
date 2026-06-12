@@ -1,4 +1,5 @@
 import Foundation
+import FoundationModels
 import SwiftUI
 import Observation
 import AIToolKit
@@ -73,10 +74,9 @@ public final class AIKitSession {
     /// Maps a turn error to a user-facing string. `nonisolated` so the
     /// voice mode can reuse it off the main actor.
     nonisolated static func describe(_ error: any Error) -> String {
-        if let violation = error as? GuardrailViolation {
-            return AIKitUILocalization.string(
-                "Blocked by \(violation.railID) at \(violation.stage.rawValue): \(violation.reason)"
-            )
+        if let modelError = error as? LanguageModelError,
+           case .guardrailViolation(let violation) = modelError {
+            return AIKitUILocalization.string("\(violation.debugDescription)")
         }
         if let deadline = error as? TurnDeadlineExceeded {
             return AIKitUILocalization.string(
@@ -126,12 +126,12 @@ public final class AIKitSession {
                     if let text = reasoningBuffer.append(delta) {
                         reasoningText = text
                     }
-                case .toolCall(let name, _):
-                    lines.append(Line(role: "tool", text: "Calling \(name)"))
-                case .toolResult(let name, let output):
+                case .toolCall(let call):
+                    lines.append(Line(role: "tool", text: "Calling \(call.toolName)"))
+                case .toolResult(let call, let output):
                     lines.append(Line(
                         role: "tool",
-                        text: "\(name): \(String(decoding: output, as: UTF8.self))"
+                        text: "\(call.toolName): \(output.contentText)"
                     ))
                 case .verification(let stage, let outcome):
                     switch outcome {
@@ -336,6 +336,12 @@ public struct AIKitChatbotTabBar<Item: AIKitChatbotTab, TabContent: View, TabFab
     @State private var activityDisplay: OverlayActivityDisplay = .tasks
     @State private var snapshot: OrchestratorSnapshot?
     @State private var activity: OrchestratorActivity = .idle
+    /// Owned here, not by the accessory: tapping the search/FAB tab selects it
+    /// for one frame, which tears down and rebuilds the bottom accessory. Any
+    /// state living inside the accessory resets across that rebuild — the
+    /// activity flashes back to idle and the draft text vanishes — so the
+    /// accessory's state has to outlive it.
+    @State private var input: AssistantInputCoordinator
     @State private var lastActiveTab: Item = Item.default
     /// Backs the TabView's selection and is never `.none`, so the TabView never
     /// selects/restores the empty search tab — that empty-tab churn is what
@@ -361,6 +367,7 @@ public struct AIKitChatbotTabBar<Item: AIKitChatbotTab, TabContent: View, TabFab
         self.viewContext = viewContext
         self.tabContent = tabContent
         self.tabFabContent = tabFabContent
+        self._input = State(initialValue: AssistantInputCoordinator(orchestrator: orchestrator))
     }
 
     public var body: some View {
@@ -406,7 +413,7 @@ public struct AIKitChatbotTabBar<Item: AIKitChatbotTab, TabContent: View, TabFab
             .frame(width: 0, height: 0)
         }
         .tabViewBottomAccessory {
-            AssistantTabBottomAccessory(orchestrator: orchestrator)
+            AssistantTabBottomAccessory(input: input, activity: activity)
         }
         .tabBarMinimizeBehavior(.onScrollDown)
         // External (e.g. AI-driven) navigation sets `activeTab`; mirror it into
@@ -441,6 +448,7 @@ public struct AIKitChatbotTabBar<Item: AIKitChatbotTab, TabContent: View, TabFab
         }
         .onChange(of: activity.isBusy) { _, busy in
             if !busy {
+                if !activity.hasFailed { input.text = "" }
                 Task { await refreshSnapshot() }
             }
         }
@@ -1106,8 +1114,8 @@ public struct AIKitView: View {
 
     private var safetySection: some View {
         AIKitConfigurationSection(title: "Safety", systemImage: "shield.lefthalf.filled", tint: .green) {
-            Toggle(isOn: binding(\.safety.piiRedactionEnabled)) {
-                aiKitText("PII redaction")
+            Toggle(isOn: binding(\.safety.piiGuardEnabled)) {
+                aiKitText("PII guard")
             }
             Toggle(isOn: binding(\.safety.injectionSniffingEnabled)) {
                 aiKitText("Injection sniffing")
@@ -2511,17 +2519,14 @@ private struct AIKitTabFabPanel<CustomContent: View>: View {
 }
 
 private struct AssistantTabBottomAccessory: View {
-    @State private var input: AssistantInputCoordinator
-    @State private var activity: OrchestratorActivity = .idle
+    // No state of its own: selecting the search/FAB tab — even for the one
+    // frame a tap produces — rebuilds the accessory, so anything stored here
+    // resets (the activity would flash back to idle until a fresh
+    // subscription delivered the real state). `AIKitChatbotTabBar` owns the
+    // coordinator and the activity subscription and passes them in.
+    let input: AssistantInputCoordinator
+    let activity: OrchestratorActivity
     @FocusState private var fieldFocused: Bool
-
-    private let orchestrator: Orchestrator
-
-    @MainActor
-    init(orchestrator: Orchestrator) {
-        self.orchestrator = orchestrator
-        _input = State(initialValue: AssistantInputCoordinator(orchestrator: orchestrator))
-    }
 
     var body: some View {
         AssistantInputBar(
@@ -2554,14 +2559,6 @@ private struct AssistantTabBottomAccessory: View {
         // AttributeGraph reports a cycle storm while the accessory
         // re-anchors (e.g. switching tabs with the keyboard up).
         .frame(maxWidth: .infinity, minHeight: 44)
-        .task {
-            for await update in orchestrator.activityUpdates() {
-                activity = update
-            }
-        }
-        .onChange(of: activity.isBusy) { _, busy in
-            if !busy && !activity.hasFailed { input.text = "" }
-        }
         .onDisappear { cancelVoiceInput() }
     }
 

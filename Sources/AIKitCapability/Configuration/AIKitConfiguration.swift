@@ -221,20 +221,20 @@ public struct AIKitConfiguration: Codable, Sendable, Hashable {
     public struct Safety: Codable, Sendable, Hashable {
         public var enabledGuardrailIDs: Set<String>
         public var allowlistedToolNames: Set<String>
-        public var piiRedactionEnabled: Bool
+        public var piiGuardEnabled: Bool
         public var injectionSniffingEnabled: Bool
         public var outputLengthLimit: Int?
 
         public init(
             enabledGuardrailIDs: Set<String> = [],
             allowlistedToolNames: Set<String> = [],
-            piiRedactionEnabled: Bool = true,
+            piiGuardEnabled: Bool = true,
             injectionSniffingEnabled: Bool = true,
             outputLengthLimit: Int? = nil
         ) {
             self.enabledGuardrailIDs = enabledGuardrailIDs
             self.allowlistedToolNames = allowlistedToolNames
-            self.piiRedactionEnabled = piiRedactionEnabled
+            self.piiGuardEnabled = piiGuardEnabled
             self.injectionSniffingEnabled = injectionSniffingEnabled
             self.outputLengthLimit = outputLengthLimit
         }
@@ -468,8 +468,8 @@ extension AIKitConfiguration {
             safety.enabledGuardrailIDs = try value.stringSet(section: .safety, key: originalKey)
         case "allowlist", "allowlistedtools", "allowlistedtoolnames":
             safety.allowlistedToolNames = try value.stringSet(section: .safety, key: originalKey)
-        case "pii", "piiredaction", "piiredactionenabled":
-            safety.piiRedactionEnabled = try value.bool(section: .safety, key: originalKey)
+        case "pii", "piiguard", "piiguardenabled":
+            safety.piiGuardEnabled = try value.bool(section: .safety, key: originalKey)
         case "injection", "injectionsniffing", "injectionsniffingenabled":
             safety.injectionSniffingEnabled = try value.bool(section: .safety, key: originalKey)
         case "outputlength", "outputlimit", "outputlengthlimit":
@@ -511,11 +511,15 @@ private extension GeneratedContent {
         }
     }
 
+    // The conversions below delegate to the official typed accessor
+    // `GeneratedContent.value(_:)`; this extension only maps its failures to
+    // `AIKitConfigurationError` with the section/key context the tool reports.
+
     func string(
         section: AIKitConfiguration.Section,
         key: String
     ) throws -> String {
-        guard case .string(let value) = kind else {
+        guard let value = try? value(String.self) else {
             throw AIKitConfigurationError.invalidValue(
                 section: section, key: key, expected: "a string"
             )
@@ -535,7 +539,7 @@ private extension GeneratedContent {
         section: AIKitConfiguration.Section,
         key: String
     ) throws -> Bool {
-        guard case .bool(let value) = kind else {
+        guard let value = try? value(Bool.self) else {
             throw AIKitConfigurationError.invalidValue(
                 section: section, key: key, expected: "a boolean"
             )
@@ -547,10 +551,12 @@ private extension GeneratedContent {
         section: AIKitConfiguration.Section,
         key: String
     ) throws -> Int {
-        if let value = intValue { return value }
-        throw AIKitConfigurationError.invalidValue(
-            section: section, key: key, expected: "an integer"
-        )
+        guard let value = try? value(Int.self) else {
+            throw AIKitConfigurationError.invalidValue(
+                section: section, key: key, expected: "an integer"
+            )
+        }
+        return value
     }
 
     func optionalInt(
@@ -565,14 +571,12 @@ private extension GeneratedContent {
         section: AIKitConfiguration.Section,
         key: String
     ) throws -> Double {
-        switch kind {
-        case .number(let value):
-            return value
-        default:
+        guard let value = try? value(Double.self) else {
             throw AIKitConfigurationError.invalidValue(
                 section: section, key: key, expected: "a number"
             )
         }
+        return value
     }
 
     func optionalDouble(
@@ -587,37 +591,26 @@ private extension GeneratedContent {
         section: AIKitConfiguration.Section,
         key: String
     ) throws -> Set<String> {
-        switch kind {
-        case .array(let values):
-            return Set(try values.map { try $0.string(section: section, key: key) })
-        case .string(let value):
-            return Set(value
-                .split(separator: ",")
-                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                .filter { !$0.isEmpty })
-        default:
-            throw AIKitConfigurationError.invalidValue(
-                section: section, key: key, expected: "an array of strings"
-            )
-        }
+        Set(try stringArray(section: section, key: key))
     }
 
     func stringArray(
         section: AIKitConfiguration.Section,
         key: String
     ) throws -> [String] {
-        switch kind {
-        case .array(let values):
-            return try values.map { try $0.string(section: section, key: key) }
-        case .string(let value):
+        // A bare string is accepted as a comma-separated list — LLM tool
+        // calls frequently flatten small lists that way.
+        if case .string(let value) = kind {
             return value
                 .split(separator: ",")
                 .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
                 .filter { !$0.isEmpty }
-        default:
+        }
+        guard let values = try? value([String].self) else {
             throw AIKitConfigurationError.invalidValue(
                 section: section, key: key, expected: "an array of strings"
             )
         }
+        return values
     }
 }

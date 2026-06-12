@@ -5,11 +5,15 @@ import AIKitSafety
 /// Pure function turning the resolved view context into the session's
 /// instructions. No I/O, no state.
 ///
+/// Named `PromptRenderer` (not `PromptBuilder`) so it never shadows the
+/// official `FoundationModels.PromptBuilder` result builder for consumers
+/// importing both.
+///
 /// Each turn runs in a fresh `LanguageModelSession`, so a turn carries only
 /// its own tool rounds (the session's transcript). Earlier turns' tool calls
 /// and replies are never injected — turns are independent by construction;
 /// durable memory is reachable only through the explicit `searchMemory` tool.
-public enum PromptBuilder {
+public enum PromptRenderer {
     /// The AIKit base preamble, prepended to every system prompt.
     public static let basePreamble = """
     You are an AI agent embedded in an application. Use the provided tools to \

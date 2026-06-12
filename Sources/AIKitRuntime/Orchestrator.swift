@@ -15,9 +15,14 @@ public enum OrchestratorEvent: Sendable {
     /// emitted once per model call, after the call completes. Never emitted
     /// when the model produced no reasoning.
     case reasoningDelta(String)
-    case toolCall(name: String, input: Data)
-    case toolResult(name: String, output: Data)
-    case verification(stage: Verifier.Stage, outcome: Verifier.Outcome)
+    /// A tool call about to execute, as the official transcript entry —
+    /// real call id included. Arguments are `call.arguments` (JSON via
+    /// `jsonString`).
+    case toolCall(Transcript.ToolCall)
+    /// An executed tool call and its official output entry. Render the
+    /// output with `Transcript.ToolOutput.contentText`.
+    case toolResult(Transcript.ToolCall, Transcript.ToolOutput)
+    case verification(stage: GuardrailStage, outcome: GuardrailOutcome)
     /// Token usage for one model call (the session accumulates its tool
     /// rounds into it). Emitted once per attempt so hosts can do
     /// cost/telemetry accounting even on the streaming path.
@@ -282,13 +287,13 @@ private struct OrchestratorTaskRecord: Sendable {
     }
 }
 
-/// The model a turn runs on: how to make its official session, plus the
-/// labels usage records carry. Built from an `AIKitLanguageModel` (the
-/// shipped models) or from any official `LanguageModel` conformance.
+/// The model a turn runs on — any official `LanguageModel` conformance —
+/// plus the labels usage records carry. Built from an `AIKitLanguageModel`
+/// (the shipped models) or from any other conformance.
 public struct OrchestratorModel: Sendable {
     public let modelID: String
     public let providerName: String?
-    private let makeSession: @Sendable ([any Tool], Instructions?) -> LanguageModelSession
+    let model: any LanguageModel
 
     /// Any official `LanguageModel`.
     public init(
@@ -298,34 +303,30 @@ public struct OrchestratorModel: Sendable {
     ) {
         self.modelID = modelID
         self.providerName = providerName
-        self.makeSession = { tools, instructions in
-            LanguageModelSession(model: model, tools: tools, instructions: instructions)
-        }
+        self.model = model
     }
 
     /// One of AIKit's shipped models.
     public init(_ model: AIKitLanguageModel) {
-        self.modelID = model.modelID
-        self.providerName = model.providerKind.definition.displayName
-        self.makeSession = { tools, instructions in
-            model.makeSession(tools: tools, instructions: instructions)
-        }
-    }
-
-    func session(tools: [any Tool], instructions: Instructions?) -> LanguageModelSession {
-        makeSession(tools, instructions)
+        self.init(
+            model: model.base,
+            modelID: model.modelID,
+            providerName: model.providerKind.definition.displayName
+        )
     }
 }
 
 /// The single entry point a host app calls once per user instruction. An actor
 /// so concurrent `run` calls on one instance serialize cleanly.
 ///
-/// Each turn runs in one official `LanguageModelSession` over the configured
-/// model: the session executes tools natively and owns the in-turn
-/// transcript, while the orchestrator contributes what the session API does
-/// not — view-context resolution, guardrails around the prompt and every
-/// tool call, durable memory and usage records, retry/deadline policy, and
-/// the host-facing event and activity streams.
+/// Each turn runs in one official `LanguageModelSession`, built as a
+/// `DynamicProfile` over the configured model: the session executes tools
+/// natively and owns the in-turn transcript, and AIKit's tool guardrails run
+/// inside it through the official `onToolCall`/`onToolOutput` hooks. The
+/// orchestrator contributes what the session API does not — view-context
+/// resolution, the prompt/final-result guardrail stages, durable memory and
+/// usage records, retry/deadline policy, and the host-facing event and
+/// activity streams.
 public actor Orchestrator {
     public struct Options: Sendable {
         public var stream: Bool
@@ -672,8 +673,9 @@ public actor Orchestrator {
 
     /// A concise, user-facing message for a terminal error.
     private func errorMessage(_ error: any Error) -> String {
-        if let violation = error as? GuardrailViolation {
-            return "Blocked by \(violation.railID): \(violation.reason)"
+        if let modelError = error as? LanguageModelError,
+           case .guardrailViolation(let violation) = modelError {
+            return violation.debugDescription
         }
         if let deadline = error as? TurnDeadlineExceeded {
             return "Stopped after exceeding the \(Int(deadline.budget))s budget."
@@ -802,7 +804,7 @@ public actor Orchestrator {
         // The view's tool subset is fixed for the turn. A tool-less context
         // stays pure chat.
         let activeTools = tools.subset(for: Self.withBuiltinTools(context.toolNames))
-        let rendered = PromptBuilder.render(instruction: instruction, context: context)
+        let rendered = PromptRenderer.render(instruction: instruction, context: context)
         emit(.promptBuilt(rendered))
 
         var attempt = 0
@@ -827,19 +829,14 @@ public actor Orchestrator {
                 }
 
                 // A fresh official session per attempt: the session owns the
-                // in-turn transcript and executes the guarded tools natively.
-                let guarded = activeTools.map { tool in
-                    GuardedTool(
-                        base: tool,
-                        orchestrator: self,
-                        viewID: viewID,
-                        turnID: turnID,
-                        emit: emit
-                    )
-                }
-                let session = model.session(
-                    tools: guarded,
-                    instructions: Instructions(rendered.instructions)
+                // in-turn transcript and executes the tools natively, with
+                // AIKit's guardrails riding its profile hooks.
+                let session = turnSession(
+                    tools: activeTools,
+                    instructions: rendered.instructions,
+                    viewID: viewID,
+                    turnID: turnID,
+                    emit: emit
                 )
 
                 setPhase(.thinking, turn: turnID)
@@ -978,114 +975,114 @@ public actor Orchestrator {
         }.joined()
     }
 
-    // MARK: - Guarded tool execution
+    // MARK: - Turn session (tools run natively, guardrails ride the hooks)
 
-    private static func toolErrorContent(_ error: any Error) -> GeneratedContent {
-        .object(["error": .string(String(describing: error))])
+    /// The official session for one attempt, built as a `DynamicProfile`:
+    /// tools go to the session unwrapped, and AIKit's tool-stage guardrails
+    /// run inside the session machinery through the official
+    /// `onToolCall`/`onToolOutput` hooks (installed by `TurnHooksModifier`) —
+    /// the way `SystemLanguageModel.Guardrails` screens the system model. A
+    /// block throws the official `LanguageModelError.guardrailViolation`
+    /// before the tool executes, aborting the session call.
+    private nonisolated func turnSession(
+        tools: [any Tool],
+        instructions: String,
+        viewID: ViewContext.ID,
+        turnID: Int,
+        emit: @escaping @Sendable (OrchestratorEvent) -> Void
+    ) -> LanguageModelSession {
+        turnSession(
+            model: model.model,
+            tools: tools,
+            instructions: instructions,
+            viewID: viewID,
+            turnID: turnID,
+            emit: emit
+        )
     }
 
-    /// Runs one session-dispatched tool call inside AIKit's rails: preToolUse
-    /// rewrite/verify, the strict typed invocation, then postToolUse — with
-    /// events and durable activity around it.
-    ///
-    /// Recoverable failures (malformed arguments, a retriable tool error)
-    /// come back as the tool's *output*, so the model corrects itself within
-    /// the session. Non-recoverable ones (guardrail blocks, non-retriable
-    /// tool errors, the `reportFailure` refusal) throw, which aborts the
-    /// session call and surfaces at the turn loop's catch site.
-    fileprivate func runGuardedTool(
-        _ base: any Tool,
-        arguments: GeneratedContent,
+    /// Generic over the model so the stored `any LanguageModel` is opened at
+    /// this boundary: the profile chain below stays a concrete opaque type
+    /// (an `any` opened mid-chain erases it to `any DynamicProfile`, which
+    /// region analysis cannot prove disconnected for the `sending` profile
+    /// parameter).
+    private nonisolated func turnSession(
+        model: some LanguageModel,
+        tools: [any Tool],
+        instructions: String,
+        viewID: ViewContext.ID,
+        turnID: Int,
+        emit: @escaping @Sendable (OrchestratorEvent) -> Void
+    ) -> LanguageModelSession {
+        LanguageModelSession(profile:
+            LanguageModelSession.Profile {
+                Instructions(instructions)
+                tools
+            }
+            .model(model)
+            .modifier(TurnHooksModifier(
+                orchestrator: self,
+                viewID: viewID,
+                turnID: turnID,
+                emit: emit
+            ))
+        )
+    }
+
+    /// The `preToolUse` stage, run by the session before the tool executes.
+    /// The `reportFailure` refusal is intercepted ahead of the rails so an
+    /// allowlist that (correctly) omits it cannot block the bail-out.
+    fileprivate func willExecuteTool(
+        _ call: Transcript.ToolCall,
         viewID: ViewContext.ID,
         turnID: Int,
         emit: @Sendable (OrchestratorEvent) -> Void
-    ) async throws -> GeneratedContent {
-        // The built-in escape hatch: a `reportFailure` call is a refusal that
-        // ends the turn, never a tool that runs. Intercepted before the rails
-        // so an allowlist that (correctly) omits it cannot block the bail-out.
-        if base.name == ReportFailureTool.toolName {
-            throw TurnRefusal(reason: ReportFailureTool.reason(from: arguments))
+    ) async throws {
+        if call.toolName == ReportFailureTool.toolName {
+            throw TurnRefusal(reason: ReportFailureTool.reason(from: call.arguments))
         }
 
-        // `resolve` runs payload-rewriting rails (e.g. PIIRedactor in redact
-        // mode) before the block checks, so the tool sees the sanitized input.
-        let (resolvedPayload, warnings) = try await guardrails.resolve(
-            .preToolUse,
-            .preToolUse(.init(name: base.name, arguments: arguments))
-        )
+        let warnings = try await guardrails.verify(.preToolUse, .preToolUse(call))
         for warning in warnings {
             emit(.verification(stage: .preToolUse, outcome: .warn(reason: warning)))
         }
-        var effectiveArguments = arguments
-        if case .preToolUse(let rewritten) = resolvedPayload {
-            effectiveArguments = rewritten.arguments
-        }
         emit(.verification(stage: .preToolUse, outcome: .pass))
 
-        let inputData = effectiveArguments.data()
-        setPhase(.callingTool(base.name), turn: turnID)
-        emit(.toolCall(name: base.name, input: inputData))
+        setPhase(.callingTool(call.toolName), turn: turnID)
+        emit(.toolCall(call))
         await recordActivity(
             viewID: viewID,
             kind: .toolInvoked,
-            text: "\(base.name) \(String(decoding: inputData, as: UTF8.self))",
+            text: "\(call.toolName) \(call.arguments.jsonString)",
             turn: turnID
         )
-        defer { setPhase(.thinking, turn: turnID) }
-
-        let output: GeneratedContent
-        do {
-            output = try await ToolSet.invoke(base, with: effectiveArguments)
-        } catch {
-            let errorContent = Self.toolErrorContent(error)
-            let errorData = errorContent.data()
-            try await verifyPostToolUse(
-                name: base.name, output: errorData, isError: true, emit: emit
-            )
-            emit(.toolResult(name: base.name, output: errorData))
-            await recordActivity(
-                viewID: viewID,
-                kind: .toolResult,
-                text: "\(base.name) -> \(String(decoding: errorData, as: UTF8.self))",
-                turn: turnID
-            )
-            if let toolError = error as? any ToolError, !toolError.isRetriable {
-                // Fatal by the tool's own contract — abort the turn.
-                throw error
-            }
-            // Malformed arguments and retriable tool failures go back to the
-            // model as the call's output, so the session can correct course.
-            return errorContent
-        }
-
-        let outputData = output.data()
-        try await verifyPostToolUse(
-            name: base.name, output: outputData, isError: false, emit: emit
-        )
-        emit(.toolResult(name: base.name, output: outputData))
-        await recordActivity(
-            viewID: viewID,
-            kind: .toolResult,
-            text: "\(base.name) -> \(String(decoding: outputData, as: UTF8.self))",
-            turn: turnID
-        )
-        return output
     }
 
-    private func verifyPostToolUse(
-        name: String,
-        output: Data,
-        isError: Bool,
+    /// The `postToolUse` stage, run by the session on the executed call's
+    /// official output entry. A thrown tool error never reaches here — it
+    /// aborts the session call as the official `ToolCallError` and surfaces
+    /// at the turn loop's catch site.
+    fileprivate func didExecuteTool(
+        _ call: Transcript.ToolCall,
+        output: Transcript.ToolOutput,
+        viewID: ViewContext.ID,
+        turnID: Int,
         emit: @Sendable (OrchestratorEvent) -> Void
     ) async throws {
-        let warnings = try await guardrails.verify(
-            .postToolUse,
-            .postToolUse(name: name, output: output, isError: isError)
-        )
+        defer { setPhase(.thinking, turn: turnID) }
+        let warnings = try await guardrails.verify(.postToolUse, .postToolUse(call, output))
         for warning in warnings {
             emit(.verification(stage: .postToolUse, outcome: .warn(reason: warning)))
         }
         emit(.verification(stage: .postToolUse, outcome: .pass))
+
+        emit(.toolResult(call, output))
+        await recordActivity(
+            viewID: viewID,
+            kind: .toolResult,
+            text: "\(call.toolName) -> \(output.contentText)",
+            turn: turnID
+        )
     }
 
     // MARK: - Deadline
@@ -1118,32 +1115,48 @@ public actor Orchestrator {
     }
 }
 
-/// The official `Tool` the session sees for each of the host's tools: same
-/// name, description, and schema, but the call routes through the
-/// orchestrator's rails (guardrails, events, durable activity, refusal
-/// interception) before and after the host tool runs.
-private struct GuardedTool: Tool {
-    typealias Arguments = GeneratedContent
-    typealias Output = GeneratedContent
 
-    let base: any Tool
+/// Installs the orchestrator's tool-stage hooks on a turn's profile:
+/// `preToolUse`/`postToolUse` guardrails, the `reportFailure` refusal
+/// interception, host events, phases, and the durable activity log. A
+/// `DynamicProfileModifier` (like `GuardrailsModifier`) so the profile that
+/// crosses into the session holds only this Sendable value — the hook
+/// closures are formed by the session machinery itself when it resolves the
+/// profile.
+private struct TurnHooksModifier: LanguageModelSession.DynamicProfileModifier {
     let orchestrator: Orchestrator
     let viewID: ViewContext.ID
     let turnID: Int
     let emit: @Sendable (OrchestratorEvent) -> Void
 
-    var name: String { base.name }
-    var description: String { base.description }
-    var parameters: GenerationSchema { base.parameters }
-    var includesSchemaInInstructions: Bool { base.includesSchemaInInstructions }
+    func body(content: Content) -> some LanguageModelSession.DynamicProfile {
+        content
+            .onToolCall { [orchestrator, viewID, turnID, emit] call in
+                try await orchestrator.willExecuteTool(
+                    call, viewID: viewID, turnID: turnID, emit: emit
+                )
+            }
+            .onToolOutput { [orchestrator, viewID, turnID, emit] call, output in
+                try await orchestrator.didExecuteTool(
+                    call, output: output, viewID: viewID, turnID: turnID, emit: emit
+                )
+            }
+    }
+}
 
-    func call(arguments: GeneratedContent) async throws -> GeneratedContent {
-        try await orchestrator.runGuardedTool(
-            base,
-            arguments: arguments,
-            viewID: viewID,
-            turnID: turnID,
-            emit: emit
-        )
+extension Transcript.ToolOutput {
+    /// The official output entry's content as display text: text segments
+    /// verbatim, structured segments as their JSON.
+    public var contentText: String {
+        segments.map { segment in
+            switch segment {
+            case .text(let text):
+                text.content
+            case .structure(let structured):
+                structured.content.jsonString
+            default:
+                String(describing: segment)
+            }
+        }.joined(separator: "\n")
     }
 }

@@ -89,7 +89,13 @@ private func mockModel(_ model: MockLanguageModel) -> OrchestratorModel {
         for try await event in await orchestrator.run("sneak into admin") {
             if case .error(let error) = event { caught = error }
         }
-        #expect(caught is GuardrailViolation)
+        // The block surfaces as the official guardrail violation — the same
+        // error shape SystemLanguageModel.Guardrails uses.
+        guard let modelError = caught as? LanguageModelError,
+              case .guardrailViolation = modelError else {
+            Issue.record("expected LanguageModelError.guardrailViolation, got \(String(describing: caught))")
+            return
+        }
         let invoked = await flag.didInvoke
         #expect(invoked == false)
     }

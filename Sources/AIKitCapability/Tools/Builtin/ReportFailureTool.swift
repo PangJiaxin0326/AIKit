@@ -1,16 +1,13 @@
 import Foundation
 import FoundationModels
-import AIToolKit
-import AIKitCore
 
 /// Built-in tool the model calls to bail out of a request it cannot
 /// confidently complete (too vague, ambiguous, or out of scope). The
 /// `Orchestrator` provides it by default: it is auto-registered on first
 /// use and advertised alongside any view that exposes at least one tool,
 /// so hosts neither register it nor list it in `ViewContext.toolNames`.
-/// The runtime intercepts it by name — as a direct call,
-/// or a two-round plan node — and ends the turn in a failure state
-/// carrying `reason`, so it never actually runs `call`.
+/// The runtime intercepts the call by name and ends the turn in a failure
+/// state carrying `reason`, so it never actually runs `call`.
 public struct ReportFailureTool: Tool {
     @Generable
     public struct Input: Codable, Sendable {
@@ -46,9 +43,8 @@ public struct ReportFailureTool: Tool {
     /// (a direct tool call's arguments), or
     /// `fallbackReason` when the model omitted it.
     public static func reason(from arguments: GeneratedContent) -> String {
-        guard let fields = arguments.objectValue,
-              let reason = fields["reason"]?.stringValue?
-                  .trimmingCharacters(in: .whitespacesAndNewlines),
+        let raw = (try? arguments.value(String?.self, forProperty: "reason")) ?? nil
+        guard let reason = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
               !reason.isEmpty else {
             return fallbackReason
         }

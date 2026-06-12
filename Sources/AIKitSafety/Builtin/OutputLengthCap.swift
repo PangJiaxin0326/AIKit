@@ -5,14 +5,14 @@ import Foundation
 /// budget).
 public struct OutputLengthCap: Guardrail {
     public let id = "builtin.outputLengthCap"
-    public let stages: Set<Verifier.Stage> = [.finalResult]
+    public let stages: Set<GuardrailStage> = [.finalResult]
     private let maxCharacters: Int
 
     public init(maxCharacters: Int = 8_000) {
         self.maxCharacters = maxCharacters
     }
 
-    public func evaluate(_ payload: GuardrailPayload) async -> Verifier.Outcome {
+    public func evaluate(_ payload: GuardrailPayload) async -> GuardrailOutcome {
         guard case .finalResult(let text) = payload else { return .pass }
         if text.count > maxCharacters {
             return .block(

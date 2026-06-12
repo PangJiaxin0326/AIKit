@@ -50,7 +50,10 @@ let package = Package(
         ),
         .target(
             name: "AIKitSafety",
-            dependencies: ["AIKitCore", "AIKitCapability"],
+            dependencies: [
+                .product(name: "AIToolKit", package: "AIToolKit"),
+                "AIKitCore",
+            ],
             swiftSettings: swiftSettings
         ),
         .target(

@@ -132,14 +132,7 @@ public extension AIKitLanguageModel {
         tools: [any Tool] = [],
         instructions: Instructions? = nil
     ) -> LanguageModelSession {
-        switch self {
-        case .appleIntelligence(let model):
-            LanguageModelSession(model: model, tools: tools, instructions: instructions)
-        case .privateCloudCompute(let model):
-            LanguageModelSession(model: model, tools: tools, instructions: instructions)
-        case .volcengineArk(let model):
-            LanguageModelSession(model: model, tools: tools, instructions: instructions)
-        }
+        LanguageModelSession(model: base, tools: tools, instructions: instructions)
     }
 
     /// An official session resuming a prior transcript.
@@ -147,14 +140,7 @@ public extension AIKitLanguageModel {
         tools: [any Tool] = [],
         transcript: Transcript
     ) -> LanguageModelSession {
-        switch self {
-        case .appleIntelligence(let model):
-            LanguageModelSession(model: model, tools: tools, transcript: transcript)
-        case .privateCloudCompute(let model):
-            LanguageModelSession(model: model, tools: tools, transcript: transcript)
-        case .volcengineArk(let model):
-            LanguageModelSession(model: model, tools: tools, transcript: transcript)
-        }
+        LanguageModelSession(model: base, tools: tools, transcript: transcript)
     }
 }
 

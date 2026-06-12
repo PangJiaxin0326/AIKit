@@ -1,7 +1,6 @@
 import Foundation
 import FoundationModels
 import AIToolKit
-import AIKitSafety
 import VolcengineArkFoundationModels
 
 /// How an error is classified for retry decisions.
@@ -61,14 +60,26 @@ public struct RetryPolicy: Sendable, Hashable {
 public enum ErrorClassifier {
     public static func category(of error: any Error) -> ErrorCategory {
         switch error {
-        case is GuardrailViolation:
-            return .guardrailViolation
+        // An error thrown inside a tool's `call` (or a profile hook) reaches
+        // the host wrapped in the official `ToolCallError` — classify what it
+        // wraps.
+        case let toolCallError as LanguageModelSession.ToolCallError:
+            return category(of: toolCallError.underlyingError)
+        // Model-authored content that failed a strict typed decode (tool
+        // arguments, guided generation). A fresh attempt re-prompts the
+        // model, which can emit it correctly — worth a retry.
+        case is GeneratedContent.ParsingError:
+            return .transient
         case let toolError as any ToolError:
             return toolError.isRetriable ? .toolRetriable : .fatal
         case let modelError as LanguageModelError:
             switch modelError {
             case .rateLimited, .timeout:
                 return .transient
+            case .guardrailViolation:
+                // Both AIKit's PolicyEngine and provider/system guardrails
+                // surface this case. Never retriable.
+                return .guardrailViolation
             default:
                 return .fatal
             }

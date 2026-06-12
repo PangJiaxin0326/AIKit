@@ -621,12 +621,12 @@
         }
       }
     },
-    "PII redaction": {
+    "PII guard": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "PII 脱敏"
+            "value": "PII 防护"
           }
         }
       }
