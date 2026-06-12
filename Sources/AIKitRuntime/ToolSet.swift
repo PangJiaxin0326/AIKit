@@ -1,22 +1,18 @@
 import Foundation
 import FoundationModels
 import AIToolKit
-import AIKitCore
 
-/// Errors from the runtime's name-based dispatch of parsed provider calls
-/// onto the host's official tools.
+/// Thrown when a tool call's arguments fail the tool's strict typed decode.
+/// The runtime hands the failure back to the model as the tool's output, so
+/// the session can re-issue a corrected call.
 public enum ToolDispatchError: Error, Sendable {
-    /// The model called a tool that is not among the host's tools.
-    case unknownTool(String)
-    /// The call's arguments failed the tool's strict typed decode.
     case decodingFailed(name: String, detail: String)
 }
 
-/// The runtime's name-indexed view over the host's official tools — the same
-/// `[any Tool]` currency a `LanguageModelSession` takes. AIKit drives
-/// non-Apple providers through its own loop, so the model's calls come back
-/// as names + JSON and need a dispatch table; with duplicate names, the
-/// first tool wins.
+/// A name-indexed view over the host's official tools — the same `[any Tool]`
+/// currency a `LanguageModelSession` takes. The session dispatches calls
+/// itself; this exists to resolve a view context's tool-name subset and to
+/// run one strict typed invocation for the guarded wrapper.
 struct ToolSet: Sendable {
     private let toolsByName: [String: any Tool]
 
@@ -43,17 +39,18 @@ struct ToolSet: Sendable {
         subset(for: names).map(\.descriptor)
     }
 
-    /// Dispatches one parsed provider call: strict typed-argument decode (a
-    /// mismatched input fails here, before the tool runs), then the official
-    /// `call`, re-encoded so the output can ride the wire back to the model.
-    func call(_ call: ToolCall) async throws -> GeneratedContent {
-        guard let tool = toolsByName[call.name] else {
-            throw ToolDispatchError.unknownTool(call.name)
-        }
-        return try await Self.invoke(tool, with: call.arguments)
+    /// One strict typed invocation: decode the session's JSON arguments into
+    /// the tool's official `Arguments` (a mismatched input fails here, before
+    /// the tool runs), run the official `call`, and re-encode the output for
+    /// the wire.
+    static func invoke(
+        _ tool: any Tool,
+        with input: GeneratedContent
+    ) async throws -> GeneratedContent {
+        try await invokeTyped(tool, with: input)
     }
 
-    private static func invoke<T: Tool>(
+    private static func invokeTyped<T: Tool>(
         _ tool: T,
         with input: GeneratedContent
     ) async throws -> GeneratedContent {

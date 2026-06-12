@@ -11,12 +11,20 @@ MultiModalKit voice input.
 
 | Module            | Role                                                  |
 |-------------------|-------------------------------------------------------|
-| `AIKitCore`       | Stateless LLM transport                               |
+| `AIKitCore`       | Model access via the Foundation Models protocol API   |
 | `AIKitCapability` | Tools, view context, memory store                     |
-| `AIKitRuntime`    | Orchestration loop, prompt builder, parser, retries   |
+| `AIKitRuntime`    | Session-driven orchestration, guardrail hooks, retries |
 | `AIKitSafety`     | Verifier, guardrails, policy engine                   |
 | `AIKitUI`         | SwiftUI helpers (`AIKitView`, `.aiContext`)           |
 | `AIKit`           | Umbrella — re-exports everything                      |
+
+Models ship as official `LanguageModel` conformances: Apple's
+`SystemLanguageModel` and `PrivateCloudComputeLanguageModel` come from the
+Foundation Models framework, and `VolcengineArkLanguageModel` from the
+nested `VolcengineArkFoundationModels` package — providers are packages, as
+Apple recommends. `AIKitCore` only selects and constructs a model value
+(`AIKitLanguageModel`); every generation goes through an official
+`LanguageModelSession` over it.
 
 ## Install
 
@@ -31,15 +39,15 @@ Add the `AIKit` product to your target.
 ```swift
 import AIKit
 
-// 1. Provider — remote providers use host-owned API keys.
-let provider = VolcengineArkProvider(
+// 1. Model — remote models use host-owned API keys.
+let model = AIKitLanguageModel.volcengineArk(
     apiKey: arkKey,
     model: "doubao-seed-2-0-lite-260215"
 )
 // Or use Apple's on-device model, when Apple Intelligence is available:
-// let provider = AppleIntelligenceProvider()
+// let model = AIKitLanguageModel.appleIntelligence
 // Or explicitly route through Private Cloud Compute on supported OS releases:
-// let provider = AppleIntelligenceProvider(endpoint: .privateCloudCompute)
+// let model = AIKitLanguageModel.privateCloudCompute
 
 // 2. Tools available to the agent — the official [any Tool] currency.
 let memory = try SwiftDataMemoryStore(path: dbPath)
@@ -77,12 +85,11 @@ let policy = PolicyEngine(rails: [
 
 // 5. Orchestrate one turn.
 let orchestrator = Orchestrator(
-    llm: provider,
+    model: model,
     tools: tools,
     memory: memory,
     contextResolver: resolver,
-    guardrails: policy,
-    options: .init(model: "doubao-seed-2-0-lite-260215")
+    guardrails: policy
 )
 
 for try await event in await orchestrator.run("Take me to settings") {
@@ -98,40 +105,27 @@ for try await event in await orchestrator.run("Take me to settings") {
 
 ## Providers
 
-AIKit ships providers for Volcengine Ark and Apple Intelligence. The Ark
-provider is also available as the standalone `VolcengineArkFoundationModels`
-package, which exposes
-`VolcengineArkLanguageModel` and `VolcengineArkLanguageModelExecutor` for
-Foundation Models-style integration.
+AIKit ships exactly three models, all behind the official Foundation Models
+`LanguageModel` protocol:
 
-The Core dashboard uses shared `AIKitProviderDefinition` metadata for
-Volcengine Ark and Apple Intelligence, including Ark's model-list and chat
-completion endpoints plus static Apple Intelligence model IDs for
-`apple-intelligence` and `private-cloud-compute`.
-`AppleIntelligenceProvider` uses Apple's Foundation Models framework, requires
-Apple Intelligence to be available on the device, and does not need an API key.
-Requests ride the official `LanguageModel` executor path (the same machinery a
-`LanguageModelSession` uses), so tool calls are native and guided generation
-uses the system implementation. `AppleIntelligenceProvider(endpoint:
-.privateCloudCompute)` routes through `PrivateCloudComputeLanguageModel`,
-falling back to the on-device model only for PCC network failures.
+- `.appleIntelligence` — `SystemLanguageModel.default`. On-device, no API
+  key; requires Apple Intelligence to be available.
+- `.privateCloudCompute` — `PrivateCloudComputeLanguageModel`. Apple's
+  cloud endpoint with its own availability and quota surface.
+- `.volcengineArk(apiKey:model:)` — `VolcengineArkLanguageModel` from the
+  nested `VolcengineArkFoundationModels` package, which also exposes
+  `VolcengineArkLanguageModelExecutor` for direct Foundation Models
+  integration.
 
-Messages can include multimodal blocks:
-
-```swift
-let request = LLMRequest(
-    model: "doubao-seed-2-0-lite-260215",
-    messages: [
-        Message(role: .user, content: [
-            .text("Describe this image."),
-            .image(ImageContent(data: imageData, mimeType: "image/jpeg")),
-        ]),
-    ]
-)
-```
-
-Volcengine Ark supports text and image input through chat-completions content
-blocks.
+`AIKitLanguageModel.resolve(provider:modelID:credentials:)` builds the model
+for a dashboard selection. The Core dashboard uses `AIKitProviderDefinition`
+metadata (display names, key strategy, the static Apple Intelligence model
+ids `apple-intelligence` / `private-cloud-compute`) and `AIKitModelCatalog`
+for Ark's live model list. Because every model is an official
+`LanguageModel`, tool calls, guided generation, streaming, and multimodal
+prompts (image attachments) all use the system `LanguageModelSession`
+implementations — AIKit adds no parallel transport. Hosts that want a raw
+session can call `model.makeSession(tools:instructions:)` directly.
 
 ## SwiftUI
 
@@ -169,8 +163,10 @@ through MultiModalKit's SpeechAnalyzer-backed transcription service.
 
 The **Orchestrator** is the only stateful runtime component. Everything else is
 a pure function or an actor owning a small slice of state. One `run(_:)` call is
-one turn: it may loop through several LLM↔tool iterations, with guardrails run
-at four stages (`prePrompt`, `preToolUse`, `postToolUse`, `finalResult`).
+one turn: the turn runs in one official `LanguageModelSession`, which executes
+tools natively; the orchestrator wraps each tool so guardrails run at four
+stages (`prePrompt`, `preToolUse`, `postToolUse`, `finalResult`) and events,
+memory, usage records, retries, and the turn deadline stay host-visible.
 
 For multi-step agents, the recommended paradigm is AIToolKit's
 **profile-based workflow**: one native `LanguageModelSession` over
@@ -191,5 +187,7 @@ prompt rails, model settings, and the honest cost model.
 swift test
 ```
 
-Tests use Swift Testing and never touch the network — providers take an injected
-`URLSession` (stubbed via `URLProtocolStub`) and the runtime uses `MockProvider`.
+Tests use Swift Testing and never touch the network — the Ark executor takes an
+injected `URLSession` (stubbed via `URLProtocolStub`) and the runtime uses
+`MockLanguageModel`, a scripted official `LanguageModel` driven through a real
+`LanguageModelSession`.

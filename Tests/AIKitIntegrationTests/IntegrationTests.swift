@@ -15,6 +15,10 @@ private actor InvocationFlag {
     func mark() { didInvoke = true }
 }
 
+private func mockModel(_ model: MockLanguageModel) -> OrchestratorModel {
+    OrchestratorModel(model: model, modelID: "mock-model", providerName: "Mock")
+}
+
 @Suite struct IntegrationTests {
     private func resolver(toolNames: Set<String>) async -> ContextResolver {
         let resolver = ContextResolver()
@@ -30,24 +34,22 @@ private actor InvocationFlag {
     @Test func fullLoopToolThenFinalAnswer() async throws {
         let tools: [any Tool] = [NavigateTool { _ in .init(navigated: true) }]
 
-        let provider = MockProvider(responses: [
-            LLMResponse(
-                content: [.toolUse(
-                    id: "t1", name: "navigate",
-                    arguments: .object(["destination": .string("profile")])
-                )],
-                stopReason: .toolUse
-            ),
-            LLMResponse(content: [.text("Done — you're on profile.")], stopReason: .endTurn),
+        let model = MockLanguageModel(turns: [
+            .init(toolCalls: [.init(
+                id: "t1",
+                name: "navigate",
+                argumentsJSON: #"{"destination":"profile"}"#
+            )]),
+            .init(text: "Done — you're on profile."),
         ])
 
         let orchestrator = Orchestrator(
-            llm: provider,
+            model: mockModel(model),
             tools: tools,
             memory: InMemoryMemoryStore(),
             contextResolver: await resolver(toolNames: ["navigate"]),
             guardrails: PolicyEngine(rails: [AllowlistedTools(allowed: ["navigate"])]),
-            options: .init(model: "test", stream: false)
+            options: .init(stream: false)
         )
 
         var final: String?
@@ -66,26 +68,21 @@ private actor InvocationFlag {
         }]
 
         // The model asks for `navigate`, but the policy only allows `searchMemory`.
-        let provider = MockProvider(responses: [
-            LLMResponse(
-                content: [.toolUse(
-                    id: "t1", name: "navigate",
-                    arguments: .object(["destination": .string("admin")])
-                )],
-                stopReason: .toolUse
-            )
+        let model = MockLanguageModel(turns: [
+            .init(toolCalls: [.init(
+                id: "t1",
+                name: "navigate",
+                argumentsJSON: #"{"destination":"admin"}"#
+            )]),
         ])
 
         let orchestrator = Orchestrator(
-            llm: provider,
+            model: mockModel(model),
             tools: tools,
             memory: InMemoryMemoryStore(),
             contextResolver: await resolver(toolNames: ["navigate"]),
             guardrails: PolicyEngine(rails: [AllowlistedTools(allowed: ["searchMemory"])]),
-            options: .init(
-                model: "test", stream: false,
-                retry: .init(maxAttempts: 1)
-            )
+            options: .init(stream: false, retry: .init(maxAttempts: 1))
         )
 
         var caught: (any Error)?
@@ -103,23 +100,21 @@ private actor InvocationFlag {
         // context's toolNames, nor in the allowlist.
         let tools: [any Tool] = [NavigateTool { _ in .init(navigated: true) }]
 
-        let provider = MockProvider(responses: [
-            LLMResponse(
-                content: [.toolUse(
-                    id: "f1", name: ReportFailureTool.toolName,
-                    arguments: .object(["reason": .string("Your request is too vague.")])
-                )],
-                stopReason: .toolUse
-            )
+        let model = MockLanguageModel(turns: [
+            .init(toolCalls: [.init(
+                id: "f1",
+                name: ReportFailureTool.toolName,
+                argumentsJSON: #"{"reason":"Your request is too vague."}"#
+            )]),
         ])
 
         let orchestrator = Orchestrator(
-            llm: provider,
+            model: mockModel(model),
             tools: tools,
             memory: InMemoryMemoryStore(),
             contextResolver: await resolver(toolNames: ["navigate"]),
             guardrails: PolicyEngine(rails: [AllowlistedTools(allowed: ["navigate"])]),
-            options: .init(model: "test", stream: false)
+            options: .init(stream: false)
         )
 
         var failure: String?
@@ -132,8 +127,10 @@ private actor InvocationFlag {
 
         // The default-provided tool was advertised to the model alongside the
         // view's own subset.
-        let request = try #require(provider.receivedRequests.first)
-        #expect(request.tools.contains { $0.name == ReportFailureTool.toolName })
+        let request = try #require(model.receivedRequests.first)
+        #expect(request.enabledToolDefinitions.contains {
+            $0.name == ReportFailureTool.toolName
+        })
 
         // The turn landed in the failed state, sticky on the task record.
         let task = try #require(await orchestrator.snapshot().recentTasks.first)
@@ -147,12 +144,12 @@ private actor InvocationFlag {
                     let resolver = ContextResolver()
                     await resolver.push(ViewContext(id: .init("v\(i)"), displayName: "V"))
                     let orchestrator = Orchestrator(
-                        llm: MockProvider(finalText: "answer-\(i)"),
+                        model: mockModel(MockLanguageModel(finalText: "answer-\(i)")),
                         tools: [],
                         memory: InMemoryMemoryStore(),
                         contextResolver: resolver,
                         guardrails: PolicyEngine(),
-                        options: .init(model: "test", stream: false)
+                        options: .init(stream: false)
                     )
                     var final: String?
                     for try await event in await orchestrator.run("q\(i)") {

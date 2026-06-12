@@ -17,12 +17,6 @@ public struct AIKitConfiguration: Codable, Sendable, Hashable {
         case safety
     }
 
-    public enum ToolCallFallbackMode: String, CaseIterable, Codable, Sendable, Hashable {
-        case automatic
-        case enabled
-        case disabled
-    }
-
     public struct Core: Codable, Sendable, Hashable {
         public struct ProviderConfiguration: Codable, Sendable, Hashable {
             public var defaultModel: String?
@@ -69,13 +63,14 @@ public struct AIKitConfiguration: Codable, Sendable, Hashable {
                 try container.encodeIfPresent(endpointURL, forKey: .endpointURL)
             }
 
+            /// Replaces the model list, clearing `defaultModel` when the new
+            /// list no longer contains it.
             public mutating func replaceAvailableModels(_ models: [String]) {
-                let replacement = AIKitModelListNormalizer.replacingAvailableModels(
-                    models,
-                    currentDefaultModel: defaultModel
-                )
-                availableModels = replacement.models
-                defaultModel = replacement.defaultModel
+                let normalized = AIKitModelListNormalizer.uniquePreservingOrder(models)
+                availableModels = normalized
+                if let defaultModel, !normalized.contains(defaultModel) {
+                    self.defaultModel = nil
+                }
             }
         }
 
@@ -189,27 +184,19 @@ public struct AIKitConfiguration: Codable, Sendable, Hashable {
 
     public struct Runtime: Codable, Sendable, Hashable {
         public var streamsResponses: Bool
-        public var maxIterations: Int
         public var maxTurnDuration: TimeInterval?
-        public var toolCallFallback: ToolCallFallbackMode
 
         private enum CodingKeys: String, CodingKey {
             case streamsResponses
-            case maxIterations
             case maxTurnDuration
-            case toolCallFallback
         }
 
         public init(
             streamsResponses: Bool = true,
-            maxIterations: Int = 8,
-            maxTurnDuration: TimeInterval? = nil,
-            toolCallFallback: ToolCallFallbackMode = .automatic
+            maxTurnDuration: TimeInterval? = nil
         ) {
             self.streamsResponses = streamsResponses
-            self.maxIterations = maxIterations
             self.maxTurnDuration = maxTurnDuration
-            self.toolCallFallback = toolCallFallback
         }
 
         public init(from decoder: any Decoder) throws {
@@ -218,26 +205,16 @@ public struct AIKitConfiguration: Codable, Sendable, Hashable {
                 Bool.self,
                 forKey: .streamsResponses
             ) ?? true
-            self.maxIterations = try container.decodeIfPresent(
-                Int.self,
-                forKey: .maxIterations
-            ) ?? 8
             self.maxTurnDuration = try container.decodeIfPresent(
                 TimeInterval.self,
                 forKey: .maxTurnDuration
             )
-            self.toolCallFallback = try container.decodeIfPresent(
-                ToolCallFallbackMode.self,
-                forKey: .toolCallFallback
-            ) ?? .automatic
         }
 
         public func encode(to encoder: any Encoder) throws {
             var container = encoder.container(keyedBy: CodingKeys.self)
             try container.encode(streamsResponses, forKey: .streamsResponses)
-            try container.encode(maxIterations, forKey: .maxIterations)
             try container.encodeIfPresent(maxTurnDuration, forKey: .maxTurnDuration)
-            try container.encode(toolCallFallback, forKey: .toolCallFallback)
         }
     }
 
@@ -474,12 +451,8 @@ extension AIKitConfiguration {
         switch key {
         case "stream", "streaming", "streamsresponses":
             runtime.streamsResponses = try value.bool(section: .runtime, key: originalKey)
-        case "maxiterations":
-            runtime.maxIterations = try value.int(section: .runtime, key: originalKey)
         case "maxduration", "maxturnduration":
             runtime.maxTurnDuration = try value.optionalDouble(section: .runtime, key: originalKey)
-        case "toolfallback", "toolcallfallback":
-            runtime.toolCallFallback = try value.toolCallFallbackMode(section: .runtime, key: originalKey)
         default:
             throw AIKitConfigurationError.unknownKey(section: .runtime, key: originalKey)
         }
@@ -644,32 +617,6 @@ private extension GeneratedContent {
         default:
             throw AIKitConfigurationError.invalidValue(
                 section: section, key: key, expected: "an array of strings"
-            )
-        }
-    }
-
-    func toolCallFallbackMode(
-        section: AIKitConfiguration.Section,
-        key: String
-    ) throws -> AIKitConfiguration.ToolCallFallbackMode {
-        if case .bool(let value) = kind {
-            return value ? .enabled : .disabled
-        }
-        let raw = try string(section: section, key: key)
-            .lowercased()
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        switch raw {
-        case "auto", "automatic":
-            return .automatic
-        case "enabled", "enable", "on", "true":
-            return .enabled
-        case "disabled", "disable", "off", "false":
-            return .disabled
-        default:
-            throw AIKitConfigurationError.invalidValue(
-                section: section,
-                key: key,
-                expected: "automatic, enabled, or disabled"
             )
         }
     }

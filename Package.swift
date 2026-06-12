@@ -33,7 +33,6 @@ let package = Package(
         .target(
             name: "AIKitCore",
             dependencies: [
-                .product(name: "AIToolKit", package: "AIToolKit"),
                 .product(
                     name: "VolcengineArkFoundationModels",
                     package: "VolcengineArkFoundationModels"
@@ -56,7 +55,15 @@ let package = Package(
         ),
         .target(
             name: "AIKitRuntime",
-            dependencies: ["AIKitCore", "AIKitCapability", "AIKitSafety"],
+            dependencies: [
+                "AIKitCore",
+                "AIKitCapability",
+                "AIKitSafety",
+                .product(
+                    name: "VolcengineArkFoundationModels",
+                    package: "VolcengineArkFoundationModels"
+                ),
+            ],
             swiftSettings: swiftSettings
         ),
         .target(

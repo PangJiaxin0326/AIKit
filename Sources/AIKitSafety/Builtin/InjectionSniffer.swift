@@ -26,7 +26,7 @@ public struct InjectionSniffer: Guardrail {
 
     public func evaluate(_ payload: GuardrailPayload) async -> Verifier.Outcome {
         guard case .prePrompt(let prompt) = payload else { return .pass }
-        let haystack = (prompt.latestUserText ?? "").lowercased()
+        let haystack = prompt.userPrompt.lowercased()
         guard let hit = Self.phrases.first(where: haystack.contains) else {
             return .pass
         }

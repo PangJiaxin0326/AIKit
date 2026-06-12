@@ -1,16 +1,14 @@
 import Foundation
-import FoundationModels
-import AIToolKit
-import AIKitCore
 import AIKitCapability
+import AIKitSafety
 
-/// Pure function turning resolved context + transcript into an
-/// `LLMRequest`. No I/O, no state.
+/// Pure function turning the resolved view context into the session's
+/// instructions. No I/O, no state.
 ///
-/// Each turn's request carries ONLY that turn's own iterations (the
-/// `transcript` parameter). Earlier turns' tool calls and replies are never
-/// injected — turns are independent by construction; durable memory is
-/// reachable only through the explicit `searchMemory` tool.
+/// Each turn runs in a fresh `LanguageModelSession`, so a turn carries only
+/// its own tool rounds (the session's transcript). Earlier turns' tool calls
+/// and replies are never injected — turns are independent by construction;
+/// durable memory is reachable only through the explicit `searchMemory` tool.
 public enum PromptBuilder {
     /// The AIKit base preamble, prepended to every system prompt.
     public static let basePreamble = """
@@ -19,55 +17,25 @@ public enum PromptBuilder {
     the task is complete, reply with a concise final answer and no tool calls.
     """
 
-    /// Appended when `toolCallFallbackHint` is set and tools are available.
-    /// Text-only provider paths can still drive tools by emitting this fenced
-    /// block, which `OutputParser` recovers. Models with native tool support
-    /// ignore it.
-    public static let toolFallbackInstruction = """
-    If you cannot emit a native tool call, request a tool by writing a fenced \
-    code block tagged `tool` containing a single JSON object: \
-    {"name": "<toolName>", "arguments": { ... }}. Emit nothing after that block.
-    """
-
-    public static func build(
-        instruction: String,
-        context: ResolvedContext,
-        transcript: [TranscriptEntry],
-        toolManifest: [ToolDescriptor],
-        model: String,
-        temperature: Double? = nil,
-        maxTokens: Int? = nil,
-        toolCallFallbackHint: Bool = false
-    ) -> LLMRequest {
-        var systemParts = [basePreamble]
+    /// The full instructions string for one turn: the base preamble plus the
+    /// resolved context's system-prompt fragment.
+    public static func instructions(for context: ResolvedContext) -> String {
+        var parts = [basePreamble]
         if !context.systemPromptFragment.isEmpty {
-            systemParts.append(context.systemPromptFragment)
+            parts.append(context.systemPromptFragment)
         }
+        return parts.joined(separator: "\n\n")
+    }
 
-        var messages: [Message] = []
-        messages.append(Message(role: .user, text: instruction))
-        messages.append(contentsOf: transcript.map(\.message))
-
-        // Tools restricted to the view's subset (the manifest is already
-        // filtered by the orchestrator, but be defensive about empty subsets).
-        // The built-in `reportFailure` escape hatch passes regardless: the
-        // orchestrator provides it by default, so contexts never list it.
-        let tools = toolManifest.filter {
-            context.toolNames.contains($0.name)
-                || $0.name == ReportFailureTool.toolName
-        }
-
-        if toolCallFallbackHint, !tools.isEmpty {
-            systemParts.append(toolFallbackInstruction)
-        }
-
-        return LLMRequest(
-            model: model,
-            system: systemParts.joined(separator: "\n\n"),
-            messages: messages,
-            tools: tools,
-            temperature: temperature,
-            maxTokens: maxTokens
+    /// The prompt snapshot guardrails inspect and `promptBuilt` reports.
+    public static func render(
+        instruction: String,
+        context: ResolvedContext
+    ) -> RenderedPrompt {
+        RenderedPrompt(
+            instructions: instructions(for: context),
+            userPrompt: instruction,
+            toolNames: context.toolNames
         )
     }
 }

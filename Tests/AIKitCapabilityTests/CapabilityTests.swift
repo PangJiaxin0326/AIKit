@@ -417,18 +417,18 @@ private func generatedValue<Value: ConvertibleFromGeneratedContent>(
         )
         let setInput = SetAIKitConfigurationTool.Input(
             section: .runtime,
-            key: "maxIterations",
-            value: .int(4)
+            key: "maxTurnDuration",
+            value: .number(45)
         )
         let output = try SetAIKitConfigurationTool.Output(
             await callTool(setTool, with: setInput.generatedContent)
         )
 
         #expect(output.applied)
-        #expect(output.configuration.objectValue?["runtime"]?.objectValue?["maxIterations"]?.intValue == 4)
+        #expect(output.configuration.objectValue?["runtime"]?.objectValue?["maxTurnDuration"]?.intValue == 45)
 
         let snapshot = await store.snapshot()
-        #expect(snapshot.runtime.maxIterations == 4)
+        #expect(snapshot.runtime.maxTurnDuration == 45)
 
         let getTool = try #require(
             tools.first { $0.name == GetAIKitConfigurationTool.toolName }
@@ -438,7 +438,7 @@ private func generatedValue<Value: ConvertibleFromGeneratedContent>(
                 getTool, with: GetAIKitConfigurationTool.Input().generatedContent
             )
         )
-        #expect(read.configuration.objectValue?["runtime"]?.objectValue?["maxIterations"]?.intValue == 4)
+        #expect(read.configuration.objectValue?["runtime"]?.objectValue?["maxTurnDuration"]?.intValue == 45)
         #expect(read.recentChanges.arrayValue?.count == 1)
     }
 
@@ -463,16 +463,14 @@ private func generatedValue<Value: ConvertibleFromGeneratedContent>(
     @Test func runtimeDecodesMissingFieldsWithDefaults() throws {
         let data = Data("""
         {
-          "streamsResponses": false,
-          "maxIterations": 3,
-          "toolCallFallback": "automatic"
+          "streamsResponses": false
         }
         """.utf8)
 
         let runtime = try JSONDecoder().decode(AIKitConfiguration.Runtime.self, from: data)
 
         #expect(runtime.streamsResponses == false)
-        #expect(runtime.maxIterations == 3)
+        #expect(runtime.maxTurnDuration == nil)
     }
 
     @Test func coreStoresProviderConfigurationsIndependently() {

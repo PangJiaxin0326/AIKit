@@ -34,13 +34,13 @@ and its bridge were removed. Errors surface as the official
 `LanguageModelError` where the taxonomy has a counterpart (HTTP 429 →
 `.rateLimited`, transport timeout → `.timeout`, cancellation →
 `CancellationError`); only provider-specific shapes (other HTTP statuses,
-encoding, auth, transport) remain `VolcengineArkError`. AIKit's
-orchestrator reaches executors
-through the generic `LanguageModelProvider<M: LanguageModel>` (AIKitCore)
-— `VolcengineArkProvider` and `AppleIntelligenceProvider` are thin shims
-over it — so the session paradigm and the orchestrator loop share one
-wire mapping per model family, and both built-in providers report native
-tool calling.
+encoding, auth, transport) remain `VolcengineArkError`. AIKitCore exposes the shipped models as
+`AIKitLanguageModel` — `SystemLanguageModel`,
+`PrivateCloudComputeLanguageModel`, and `VolcengineArkLanguageModel`, each
+the official `LanguageModel` conformance — and AIKit's orchestrator drives
+one official `LanguageModelSession` per turn over them, so this workflow
+paradigm and the orchestrator run on the same official session machinery
+and the one wire mapping per model family that lives in its executor.
 
 > Earlier paradigms were removed from code and docs as they were
 > superseded: the lean-plan DAG (library code survives at AIKit `81d3323`

@@ -1,5 +1,5 @@
 import Foundation
-import AIToolKit
+import FoundationModels
 import AIKitCore
 import AIKitCapability
 
@@ -19,8 +19,35 @@ public enum Verifier {
     }
 }
 
+/// The prompt for one turn as the session will see it: the rendered
+/// instructions, the user prompt, and the tool names live for the turn.
+public struct RenderedPrompt: Sendable, Hashable {
+    public var instructions: String
+    public var userPrompt: String
+    public var toolNames: Set<String>
+
+    public init(instructions: String, userPrompt: String, toolNames: Set<String>) {
+        self.instructions = instructions
+        self.userPrompt = userPrompt
+        self.toolNames = toolNames
+    }
+}
+
 /// Stage-specific data handed to a guardrail.
 public enum GuardrailPayload: Sendable {
+    /// A tool call about to execute, as the session's tool layer sees it.
+    /// The official `Tool.call` boundary has no call id, so this carries
+    /// only the name and typed-JSON arguments.
+    public struct ToolCall: Sendable {
+        public var name: String
+        public var arguments: GeneratedContent
+
+        public init(name: String, arguments: GeneratedContent) {
+            self.name = name
+            self.arguments = arguments
+        }
+    }
+
     case prePrompt(RenderedPrompt)
     case preToolUse(ToolCall)
     case postToolUse(name: String, output: Data, isError: Bool)

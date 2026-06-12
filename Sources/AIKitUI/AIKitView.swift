@@ -78,21 +78,17 @@ public final class AIKitSession {
                 "Blocked by \(violation.railID) at \(violation.stage.rawValue): \(violation.reason)"
             )
         }
-        if let iteration = error as? IterationLimitExceeded {
-            return AIKitUILocalization.string(
-                "Stopped after reaching the \(iteration.limit)-iteration limit."
-            )
-        }
         if let deadline = error as? TurnDeadlineExceeded {
             return AIKitUILocalization.string(
                 "Stopped after exceeding the \(Int(deadline.budget))s turn budget."
             )
         }
-        if let llmError = error as? LLMError {
-            return llmError.errorDescription ?? "\(llmError)"
-        }
         if let configuration = error as? AIKitConfigurationError {
             return configuration.message
+        }
+        if let localized = error as? any LocalizedError,
+           let description = localized.errorDescription {
+            return description
         }
         return "\(error)"
     }
@@ -1094,15 +1090,6 @@ public struct AIKitView: View {
                 aiKitText("Stream responses")
             }
             LabeledContent {
-                Stepper(
-                    "\(model.configuration.runtime.maxIterations)",
-                    value: binding(\.runtime.maxIterations),
-                    in: 1...50
-                )
-            } label: {
-                aiKitText("Max iterations")
-            }
-            LabeledContent {
                 TextField(
                     AIKitUILocalization.string("Seconds"),
                     text: optionalNumberBinding(\.runtime.maxTurnDuration),
@@ -1114,14 +1101,6 @@ public struct AIKitView: View {
                 aiKitText("Turn budget")
             }
             .aiKitTextFieldRowStyle()
-            Picker(selection: binding(\.runtime.toolCallFallback)) {
-                ForEach(AIKitConfiguration.ToolCallFallbackMode.allCases, id: \.self) { mode in
-                    Text(mode.localizedLabel, bundle: .module).tag(mode)
-                }
-            } label: {
-                aiKitText("Tool fallback")
-            }
-            .pickerStyle(.segmented)
         }
     }
 
@@ -3434,16 +3413,6 @@ private extension UsageEvent.Kind {
     }
 }
 
-private extension AIKitConfiguration.ToolCallFallbackMode {
-    var localizedLabel: LocalizedStringKey {
-        switch self {
-        case .automatic: "Auto"
-        case .enabled: "On"
-        case .disabled: "Off"
-        }
-    }
-}
-
 private extension AIKitConfigurationChange {
     var title: String {
         let target: String
@@ -3526,5 +3495,5 @@ private extension String {
 }
 
 #Preview {
-    AIKitChatbotOverlay(orchestrator: .init(llm: VolcengineArkProvider(apiKey: "preview", model: "doubao-seed-2-0-lite-260215"), tools: .init(), memory: InMemoryMemoryStore(), contextResolver: .init(), guardrails: .init()))
+    AIKitChatbotOverlay(orchestrator: .init(model: .volcengineArk(apiKey: "preview", model: "doubao-seed-2-0-lite-260215"), tools: .init(), memory: InMemoryMemoryStore(), contextResolver: .init(), guardrails: .init()))
 }

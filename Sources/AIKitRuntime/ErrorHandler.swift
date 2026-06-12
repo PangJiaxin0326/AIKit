@@ -1,13 +1,15 @@
 import Foundation
 import AIToolKit
-import AIKitCore
-import AIKitCapability
+import AIKitSafety
 
 /// Decides what to do with an error mid-turn, applying backoff for retries.
+///
+/// The session owns in-turn recovery (malformed tool arguments go back to the
+/// model as error outputs), so the only decisions left are retrying the whole
+/// turn or aborting it.
 public actor ErrorHandler {
     public enum Decision: Sendable {
         case retry
-        case fallback(prompt: String)
         case abort(any Error)
     }
 
@@ -24,16 +26,6 @@ public actor ErrorHandler {
         case .guardrailViolation, .fatal:
             return .abort(error)
 
-        case .malformedOutput:
-            let detail: String
-            if case OutputParser.ParserError.malformedToolInput(let name, let raw) = error {
-                detail = "Your previous tool call to '\(name)' had malformed JSON input: \(raw)."
-            } else {
-                detail = "Your previous response could not be parsed."
-            }
-            return .fallback(prompt:
-                "\(detail) Re-issue valid JSON matching the schema, or give a final answer.")
-
         case .transient, .toolRetriable:
             guard policy.retriableCategories.contains(category),
                   attempt < policy.maxAttempts else {
@@ -43,20 +35,17 @@ public actor ErrorHandler {
             if delay > 0 {
                 try? await Task.sleep(for: .seconds(delay))
             }
-            if category == .toolRetriable {
-                let message = (error as? any ToolError).map { "\($0)" } ?? "\(error)"
-                return .fallback(prompt:
-                    "The tool failed but may succeed on retry: \(message). Try again.")
-            }
             return .retry
         }
     }
 }
 
-/// Raised when the orchestration loop exceeds its iteration budget.
-public struct IterationLimitExceeded: Error, Sendable {
-    public let limit: Int
-    public init(limit: Int) { self.limit = limit }
+/// Thrown by the runtime's guarded tool layer when the model calls the
+/// built-in `reportFailure` escape hatch: the turn ends in a failure state
+/// carrying the model's reason instead of a final answer.
+public struct TurnRefusal: Error, Sendable {
+    public let reason: String
+    public init(reason: String) { self.reason = reason }
 }
 
 /// Raised when a turn exceeds `Orchestrator.Options.maxTurnDuration`. Aborts

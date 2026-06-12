@@ -10,15 +10,17 @@ import AIKitSafety
 public enum OrchestratorEvent: Sendable {
     case promptBuilt(RenderedPrompt)
     case llmDelta(String)
-    /// A chunk of model reasoning / chain-of-thought. Streaming emits these
-    /// incrementally; non-streaming emits one with the whole reasoning text.
-    /// Empty when the model or provider produced no reasoning.
+    /// The model's reasoning / chain-of-thought for the turn. The session
+    /// surface exposes reasoning through transcript entries, so this is
+    /// emitted once per model call, after the call completes. Never emitted
+    /// when the model produced no reasoning.
     case reasoningDelta(String)
     case toolCall(name: String, input: Data)
     case toolResult(name: String, output: Data)
     case verification(stage: Verifier.Stage, outcome: Verifier.Outcome)
-    /// Token usage for one LLM call. Emitted once per iteration so hosts can
-    /// do cost/telemetry accounting even on the streaming path.
+    /// Token usage for one model call (the session accumulates its tool
+    /// rounds into it). Emitted once per attempt so hosts can do
+    /// cost/telemetry accounting even on the streaming path.
     case usage(TokenUsage)
     case finalAnswer(String)
     /// The turn ended without completing the request — either the model
@@ -26,12 +28,6 @@ public enum OrchestratorEvent: Sendable {
     /// error was mapped to a user-facing reason.
     case failure(reason: String)
     case error(any Error)
-}
-
-private extension String {
-    var emptyAsNil: String? {
-        isEmpty ? nil : self
-    }
 }
 
 /// A UI-friendly snapshot of the runtime state the orchestrator already owns.
@@ -286,65 +282,84 @@ private struct OrchestratorTaskRecord: Sendable {
     }
 }
 
+/// The model a turn runs on: how to make its official session, plus the
+/// labels usage records carry. Built from an `AIKitLanguageModel` (the
+/// shipped models) or from any official `LanguageModel` conformance.
+public struct OrchestratorModel: Sendable {
+    public let modelID: String
+    public let providerName: String?
+    private let makeSession: @Sendable ([any Tool], Instructions?) -> LanguageModelSession
+
+    /// Any official `LanguageModel`.
+    public init(
+        model: some LanguageModel,
+        modelID: String,
+        providerName: String? = nil
+    ) {
+        self.modelID = modelID
+        self.providerName = providerName
+        self.makeSession = { tools, instructions in
+            LanguageModelSession(model: model, tools: tools, instructions: instructions)
+        }
+    }
+
+    /// One of AIKit's shipped models.
+    public init(_ model: AIKitLanguageModel) {
+        self.modelID = model.modelID
+        self.providerName = model.providerKind.definition.displayName
+        self.makeSession = { tools, instructions in
+            model.makeSession(tools: tools, instructions: instructions)
+        }
+    }
+
+    func session(tools: [any Tool], instructions: Instructions?) -> LanguageModelSession {
+        makeSession(tools, instructions)
+    }
+}
+
 /// The single entry point a host app calls once per user instruction. An actor
 /// so concurrent `run` calls on one instance serialize cleanly.
+///
+/// Each turn runs in one official `LanguageModelSession` over the configured
+/// model: the session executes tools natively and owns the in-turn
+/// transcript, while the orchestrator contributes what the session API does
+/// not — view-context resolution, guardrails around the prompt and every
+/// tool call, durable memory and usage records, retry/deadline policy, and
+/// the host-facing event and activity streams.
 public actor Orchestrator {
     public struct Options: Sendable {
-        /// The model to request. `nil` defers to the provider configuration's
-        /// selected model. If neither has a model, the turn fails before
-        /// building a request.
-        public var model: String?
-        public var maxIterations: Int
         public var stream: Bool
         public var retry: RetryPolicy
-        /// An overall wall-clock budget for the whole turn (all iterations and
-        /// retries combined). `nil` (default) is unbounded. Bounds the case
-        /// where a too-low `configuration.timeout` against a slow provider call
-        /// is classified transient and retried `maxAttempts` times, costing
-        /// ≈ N × timeout before aborting; with a budget set the turn aborts
-        /// with `TurnDeadlineExceeded` instead of stacking slow failures.
-        ///
-        /// The budget races every blocking await in the turn — LLM calls,
-        /// guardrail passes, and tool invocations — so a hung tool or a slow
-        /// rail can't overrun it; it is a hard wall-clock cap, not just a
-        /// per-iteration-boundary check.
+        /// An overall wall-clock budget for the whole turn (all session
+        /// rounds and retries combined). `nil` (default) is unbounded. The
+        /// budget races every blocking await in the turn — the session call
+        /// (which contains the tool rounds) and the guardrail passes — so a
+        /// hung tool or a slow rail can't overrun it; it is a hard wall-clock
+        /// cap, not just a between-attempts check.
         public var maxTurnDuration: TimeInterval?
         public var temperature: Double?
         public var maxTokens: Int?
-        /// Controls the fenced-```tool``` fallback (prompt instruction +
-        /// recovery parsing). `nil` (the default) auto-resolves per turn:
-        /// enabled only when the provider does not support native function
-        /// calling, so native-capable backends don't waste context or get
-        /// prompted to emit a redundant fenced block. Set `true`/`false` to
-        /// force it (e.g. a tool-less model behind a native-looking provider).
-        public var toolCallFallback: Bool?
 
         public init(
-            model: String? = nil,
-            maxIterations: Int = 8,
             stream: Bool = true,
             retry: RetryPolicy = .default,
             maxTurnDuration: TimeInterval? = nil,
             temperature: Double? = 0.2,
-            maxTokens: Int? = nil,
-            toolCallFallback: Bool? = nil
+            maxTokens: Int? = nil
         ) {
-            self.model = model
-            self.maxIterations = maxIterations
             self.stream = stream
             self.retry = retry
             self.maxTurnDuration = maxTurnDuration
             self.temperature = temperature
             self.maxTokens = maxTokens
-            self.toolCallFallback = toolCallFallback
         }
     }
 
-    private let llm: any LLMProvider
+    private let model: OrchestratorModel
     /// The host's official tools plus AIKit's built-ins, in registration
     /// order — the `[any Tool]` currency of the runtime.
     private let allTools: [any Tool]
-    /// Name-indexed dispatch table over `allTools`.
+    /// Name-indexed view over `allTools` for context-subset resolution.
     private let tools: ToolSet
     private let memory: any MemoryStore
     private let contextResolver: ContextResolver
@@ -421,8 +436,8 @@ public actor Orchestrator {
         let resolvedOutcome = outcome
             ?? (record.failureReason == nil ? .completed : .failed)
         let summary = record.usageSummary(
-            modelName: (options.model ?? llm.configuration.defaultModel ?? ""),
-            providerName: llm.providerName,
+            modelName: model.modelID,
+            providerName: model.providerName,
             outcome: resolvedOutcome
         )
         taskRecords[turn] = record
@@ -655,31 +670,23 @@ public actor Orchestrator {
         names.isEmpty ? names : names.union([ReportFailureTool.toolName])
     }
 
-    /// The `reportFailure` reason among `calls`, if the model invoked it.
-    private func failureReason(in calls: [ToolCall]) -> String? {
-        calls.first { $0.name == ReportFailureTool.toolName }
-            .map { ReportFailureTool.reason(from: $0.arguments) }
-    }
-
     /// A concise, user-facing message for a terminal error.
     private func errorMessage(_ error: any Error) -> String {
         if let violation = error as? GuardrailViolation {
             return "Blocked by \(violation.railID): \(violation.reason)"
         }
-        if let iteration = error as? IterationLimitExceeded {
-            return "Stopped after reaching the \(iteration.limit)-step limit."
-        }
         if let deadline = error as? TurnDeadlineExceeded {
             return "Stopped after exceeding the \(Int(deadline.budget))s budget."
         }
-        if let llmError = error as? LLMError {
-            return llmError.errorDescription ?? "\(llmError)"
+        if let localized = error as? any LocalizedError,
+           let description = localized.errorDescription {
+            return description
         }
         return "\(error)"
     }
 
     public init(
-        llm: any LLMProvider,
+        model: OrchestratorModel,
         tools: [any Tool],
         memory: any MemoryStore,
         contextResolver: ContextResolver,
@@ -687,7 +694,7 @@ public actor Orchestrator {
         usageRecorder: (any AIKitSessionUsageRecording)? = nil,
         options: Options = .init()
     ) {
-        self.llm = llm
+        self.model = model
         // AIKit's built-in tools (currently just `reportFailure`) ride along
         // by default, so hosts hand over nothing; a host tool under the same
         // name wins.
@@ -702,6 +709,27 @@ public actor Orchestrator {
         self.guardrails = guardrails
         self.usageRecorder = usageRecorder
         self.options = options
+    }
+
+    /// Convenience over one of AIKit's shipped models.
+    public init(
+        model: AIKitLanguageModel,
+        tools: [any Tool],
+        memory: any MemoryStore,
+        contextResolver: ContextResolver,
+        guardrails: PolicyEngine,
+        usageRecorder: (any AIKitSessionUsageRecording)? = nil,
+        options: Options = .init()
+    ) {
+        self.init(
+            model: OrchestratorModel(model),
+            tools: tools,
+            memory: memory,
+            contextResolver: contextResolver,
+            guardrails: guardrails,
+            usageRecorder: usageRecorder,
+            options: options
+        )
     }
 
     public func run(_ instruction: String) -> AsyncThrowingStream<OrchestratorEvent, any Error> {
@@ -767,13 +795,6 @@ public actor Orchestrator {
             viewID: viewID, kind: .userInstruction, text: instruction, turn: turnID
         )
 
-        // Resolve the fenced-tool fallback once per turn: an explicit option
-        // wins; otherwise enable it only for providers without native tools.
-        let useFallback = options.toolCallFallback ?? !llm.supportsNativeTools
-        let configuredModel = (options.model ?? llm.configuration.defaultModel)?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .emptyAsNil
-
         let deadline = options.maxTurnDuration.map {
             ContinuousClock.now.advanced(by: .seconds($0))
         }
@@ -781,13 +802,11 @@ public actor Orchestrator {
         // The view's tool subset is fixed for the turn. A tool-less context
         // stays pure chat.
         let activeTools = tools.subset(for: Self.withBuiltinTools(context.toolNames))
-        let manifest = activeTools.map(\.descriptor)
+        let rendered = PromptBuilder.render(instruction: instruction, context: context)
+        emit(.promptBuilt(rendered))
 
-        var transcript: [TranscriptEntry] = []
-        var pendingCorrection: String?
         var attempt = 0
-
-        for _ in 0..<options.maxIterations {
+        while true {
             if Task.isCancelled {
                 await finishTurn(turnID, outcome: .cancelled)
                 return
@@ -800,31 +819,6 @@ public actor Orchestrator {
             }
             do {
                 setPhase(.preparing, turn: turnID)
-                if let correction = pendingCorrection {
-                    transcript.append(.correctiveGuidance(correction))
-                    pendingCorrection = nil
-                }
-
-                guard let selectedModel = configuredModel else {
-                    let error = LLMError.missingModel
-                    await recordFailure(errorMessage(error), turn: turnID)
-                    emit(.error(error))
-                    return
-                }
-
-                let request = PromptBuilder.build(
-                    instruction: instruction,
-                    context: context,
-                    transcript: transcript,
-                    toolManifest: manifest,
-                    model: selectedModel,
-                    temperature: options.temperature,
-                    maxTokens: options.maxTokens,
-                    toolCallFallbackHint: useFallback
-                )
-                let rendered = RenderedPrompt(request: request, toolNames: context.toolNames)
-                emit(.promptBuilt(rendered))
-
                 let warnings = try await withTurnDeadline(deadline) {
                     try await self.guardrails.verify(.prePrompt, .prePrompt(rendered))
                 }
@@ -832,80 +826,71 @@ public actor Orchestrator {
                     emit(.verification(stage: .prePrompt, outcome: .warn(reason: warning)))
                 }
 
-                setPhase(.thinking, turn: turnID)
-                let response = try await withTurnDeadline(deadline) {
-                    try await self.callLLM(request, emit: emit)
+                // A fresh official session per attempt: the session owns the
+                // in-turn transcript and executes the guarded tools natively.
+                let guarded = activeTools.map { tool in
+                    GuardedTool(
+                        base: tool,
+                        orchestrator: self,
+                        viewID: viewID,
+                        turnID: turnID,
+                        emit: emit
+                    )
                 }
-                addUsage(response.usage, turn: turnID)
-                emit(.usage(response.usage))
-                // Streaming already emitted reasoning incrementally inside
-                // `callLLM`; for one-shot calls surface it once here.
-                if !options.stream {
-                    let reasoning = response.reasoning
-                    if !reasoning.isEmpty { emit(.reasoningDelta(reasoning)) }
-                }
-                let parsed = try OutputParser.parse(
-                    response, allowToolCallFallback: useFallback
+                let session = model.session(
+                    tools: guarded,
+                    instructions: Instructions(rendered.instructions)
                 )
 
-                switch parsed {
-                case .final(let text):
-                    // A model coached only by the generic fallback instruction
-                    // sometimes fences a tool call as ```json instead of
-                    // ```tool. It can't be recovered (that would derail real
-                    // answers), but flag it so it isn't delivered silently.
-                    if useFallback, OutputParser.nearMissFencedToolBlock(in: text) {
-                        emit(.verification(stage: .finalResult, outcome: .warn(
-                            reason: "Response contains a fenced JSON block that "
-                                + "looks like a tool call but is not tagged "
-                                + "`tool`; delivered as the final answer instead "
-                                + "of being executed."
-                        )))
-                    }
-                    setPhase(.verifying, turn: turnID)
-                    _ = try await withTurnDeadline(deadline) {
-                        try await self.guardrails.verify(
-                            .finalResult, .finalResult(text)
-                        )
-                    }
-                    emit(.verification(stage: .finalResult, outcome: .pass))
-                    await recordActivity(
-                        viewID: viewID, kind: .llmResponse, text: text, turn: turnID
-                    )
-                    emit(.finalAnswer(text))
-                    return
-
-                case .toolCalls(let calls):
-                    let ended = try await handleToolCalls(
-                        calls, narration: nil,
-                        viewID: viewID, turnID: turnID, deadline: deadline,
-                        transcript: &transcript, emit: emit
-                    )
-                    if ended { return }
-
-                case .mixed(let text, let calls):
-                    let ended = try await handleToolCalls(
-                        calls, narration: text,
-                        viewID: viewID, turnID: turnID, deadline: deadline,
-                        transcript: &transcript, emit: emit
-                    )
-                    if ended { return }
+                setPhase(.thinking, turn: turnID)
+                let result = try await withTurnDeadline(deadline) {
+                    try await self.converse(session, instruction: instruction, emit: emit)
                 }
-                attempt = 0
+                addUsage(result.usage, turn: turnID)
+                emit(.usage(result.usage))
+                if !result.reasoning.isEmpty {
+                    emit(.reasoningDelta(result.reasoning))
+                }
+
+                setPhase(.verifying, turn: turnID)
+                _ = try await withTurnDeadline(deadline) {
+                    try await self.guardrails.verify(
+                        .finalResult, .finalResult(result.text)
+                    )
+                }
+                emit(.verification(stage: .finalResult, outcome: .pass))
+                await recordActivity(
+                    viewID: viewID, kind: .llmResponse, text: result.text, turn: turnID
+                )
+                emit(.finalAnswer(result.text))
+                return
             } catch is CancellationError {
                 await finishTurn(turnID, outcome: .cancelled)
                 return
             } catch {
-                if Task.isCancelled {
+                // An error thrown inside a tool's `call` reaches the host
+                // wrapped in the official `ToolCallError`.
+                var error = error
+                if let toolCallError = error as? LanguageModelSession.ToolCallError {
+                    error = toolCallError.underlyingError
+                }
+                if Task.isCancelled || error is CancellationError {
                     await finishTurn(turnID, outcome: .cancelled)
                     return
                 }
+                // The model bailed out via `reportFailure`: a refusal, not an
+                // error — surface the reason and end the turn.
+                if let refusal = error as? TurnRefusal {
+                    await recordFailure(refusal.reason, turn: turnID, outcome: .refused)
+                    emit(.failure(reason: refusal.reason))
+                    return
+                }
                 attempt += 1
-                let decision = await errorHandler.handle(
-                    error, attempt: attempt, policy: options.retry
-                )
                 await recordActivity(
                     viewID: viewID, kind: .error, text: "\(error)", turn: turnID
+                )
+                let decision = await errorHandler.handle(
+                    error, attempt: attempt, policy: options.retry
                 )
                 switch decision {
                 case .abort(let cause):
@@ -914,302 +899,201 @@ public actor Orchestrator {
                     return
                 case .retry:
                     continue
-                case .fallback(let prompt):
-                    pendingCorrection = prompt
-                    continue
                 }
             }
         }
-        let limitError = IterationLimitExceeded(limit: options.maxIterations)
-        await recordFailure(errorMessage(limitError), turn: turnID)
-        emit(.error(limitError))
     }
 
-    /// Rebuilds the assistant transcript entry from the parsed output rather
-    /// than the raw `LLMResponse.content`. This is what makes the fenced-tool
-    /// fallback correct: the model's content there is plain text holding the
-    /// JSON, with no `tool_use` block, so trusting it would emit a `tool`
-    /// message with no preceding `tool_calls` (rejected by chat-completions
-    /// backends). Reconstructing also normalizes the native path: any call
-    /// missing a usable id gets a stable synthetic one so the following
-    /// `tool_result` references a real `tool_use` id.
-    private static func assistantTurn(
-        text: String?,
-        calls: [ToolCall]
-    ) -> (entry: TranscriptEntry, calls: [ToolCall]) {
-        var blocks: [ContentBlock] = []
-        if let text, !text.isEmpty { blocks.append(.text(text)) }
-        var resolved: [ToolCall] = []
-        resolved.reserveCapacity(calls.count)
-        for call in calls {
-            let id = call.id.flatMap { $0.isEmpty ? nil : $0 }
-                ?? "fallback-\(UUID().uuidString)"
-            var c = call
-            c.id = id
-            resolved.append(c)
-            blocks.append(.toolUse(id: id, name: c.name, arguments: c.arguments))
+    // MARK: - Session conversation
+
+    private struct TurnResult: Sendable {
+        var text: String
+        var reasoning: String
+        var usage: TokenUsage
+    }
+
+    /// One official session call carrying the whole turn: the session runs
+    /// the tool rounds internally and returns the final text. Streaming
+    /// emits `llmDelta`s from the cumulative snapshots.
+    private func converse(
+        _ session: LanguageModelSession,
+        instruction: String,
+        emit: @Sendable (OrchestratorEvent) -> Void
+    ) async throws -> TurnResult {
+        let generationOptions = GenerationOptions(
+            temperature: options.temperature,
+            maximumResponseTokens: options.maxTokens
+        )
+        guard options.stream else {
+            let response = try await session.respond(
+                to: instruction, options: generationOptions
+            )
+            return TurnResult(
+                text: response.content,
+                reasoning: Self.reasoningText(in: response.transcriptEntries),
+                usage: TokenUsage(response.usage)
+            )
         }
-        return (.assistant(blocks), resolved)
+
+        // Snapshots carry the cumulative text; deltas are the new suffix.
+        var seen = ""
+        var result = TurnResult(text: "", reasoning: "", usage: .zero)
+        for try await snapshot in session.streamResponse(
+            to: instruction, options: generationOptions
+        ) {
+            // Make deadline/host cancellation prompt: without this the loop
+            // would keep draining the response stream after the turn budget
+            // fired or the caller cancelled.
+            try Task.checkCancellation()
+            let content = snapshot.content
+            if content.hasPrefix(seen) {
+                let delta = String(content.dropFirst(seen.count))
+                if !delta.isEmpty { emit(.llmDelta(delta)) }
+            } else if !content.isEmpty {
+                // A segment was replaced rather than appended; re-emit it.
+                emit(.llmDelta(content))
+            }
+            seen = content
+            result = TurnResult(
+                text: content,
+                reasoning: Self.reasoningText(in: snapshot.transcriptEntries),
+                usage: TokenUsage(snapshot.usage)
+            )
+        }
+        return result
     }
 
-    private static func toolErrorOutput(_ error: any Error) -> Data {
-        let payload = ["error": String(describing: error)]
-        return (try? JSONEncoder().encode(payload))
-            ?? Data(String(describing: error).utf8)
+    /// The turn's reasoning text, recovered from the official transcript
+    /// entries (the session surface exposes reasoning only there).
+    private static func reasoningText(
+        in entries: ArraySlice<Transcript.Entry>
+    ) -> String {
+        entries.compactMap { entry -> String? in
+            guard case .reasoning(let reasoning) = entry else { return nil }
+            let text = reasoning.segments.compactMap { segment -> String? in
+                guard case .text(let textSegment) = segment else { return nil }
+                return textSegment.content
+            }.joined()
+            return text.isEmpty ? nil : text
+        }.joined()
     }
 
-    private static let skippedToolOutput = Data(
-        #"{"error":"Skipped because an earlier tool call in this assistant batch failed."}"#.utf8
-    )
+    // MARK: - Guarded tool execution
 
-    // MARK: - Tool execution
-
-    private struct PreparedToolCall: Sendable {
-        let call: ToolCall
-        let inputData: Data
+    private static func toolErrorContent(_ error: any Error) -> GeneratedContent {
+        .object(["error": .string(String(describing: error))])
     }
 
-    private func prepareToolCall(
-        _ call: ToolCall,
+    /// Runs one session-dispatched tool call inside AIKit's rails: preToolUse
+    /// rewrite/verify, the strict typed invocation, then postToolUse — with
+    /// events and durable activity around it.
+    ///
+    /// Recoverable failures (malformed arguments, a retriable tool error)
+    /// come back as the tool's *output*, so the model corrects itself within
+    /// the session. Non-recoverable ones (guardrail blocks, non-retriable
+    /// tool errors, the `reportFailure` refusal) throw, which aborts the
+    /// session call and surfaces at the turn loop's catch site.
+    fileprivate func runGuardedTool(
+        _ base: any Tool,
+        arguments: GeneratedContent,
         viewID: ViewContext.ID,
         turnID: Int,
-        deadline: ContinuousClock.Instant?,
-        updatePhase: Bool = true,
         emit: @Sendable (OrchestratorEvent) -> Void
-    ) async throws -> PreparedToolCall {
+    ) async throws -> GeneratedContent {
+        // The built-in escape hatch: a `reportFailure` call is a refusal that
+        // ends the turn, never a tool that runs. Intercepted before the rails
+        // so an allowlist that (correctly) omits it cannot block the bail-out.
+        if base.name == ReportFailureTool.toolName {
+            throw TurnRefusal(reason: ReportFailureTool.reason(from: arguments))
+        }
+
         // `resolve` runs payload-rewriting rails (e.g. PIIRedactor in redact
         // mode) before the block checks, so the tool sees the sanitized input.
-        let (resolvedPayload, warnings) = try await withTurnDeadline(deadline) {
-            try await self.guardrails.resolve(.preToolUse, .preToolUse(call))
-        }
+        let (resolvedPayload, warnings) = try await guardrails.resolve(
+            .preToolUse,
+            .preToolUse(.init(name: base.name, arguments: arguments))
+        )
         for warning in warnings {
             emit(.verification(stage: .preToolUse, outcome: .warn(reason: warning)))
         }
-        let effectiveCall: ToolCall
+        var effectiveArguments = arguments
         if case .preToolUse(let rewritten) = resolvedPayload {
-            effectiveCall = rewritten
-        } else {
-            effectiveCall = call
+            effectiveArguments = rewritten.arguments
         }
         emit(.verification(stage: .preToolUse, outcome: .pass))
 
-        let inputData = effectiveCall.arguments.data()
-        if updatePhase {
-            setPhase(.callingTool(effectiveCall.name), turn: turnID)
-        }
-        emit(.toolCall(name: effectiveCall.name, input: inputData))
+        let inputData = effectiveArguments.data()
+        setPhase(.callingTool(base.name), turn: turnID)
+        emit(.toolCall(name: base.name, input: inputData))
         await recordActivity(
             viewID: viewID,
             kind: .toolInvoked,
-            text: "\(effectiveCall.name) \(String(decoding: inputData, as: UTF8.self))",
+            text: "\(base.name) \(String(decoding: inputData, as: UTF8.self))",
             turn: turnID
         )
-        return PreparedToolCall(call: effectiveCall, inputData: inputData)
-    }
+        defer { setPhase(.thinking, turn: turnID) }
 
-    private func finishToolCallFailure(
-        _ call: ToolCall,
-        output: Data,
-        viewID: ViewContext.ID,
-        turnID: Int,
-        deadline: ContinuousClock.Instant?,
-        emit: @Sendable (OrchestratorEvent) -> Void
-    ) async throws {
+        let output: GeneratedContent
+        do {
+            output = try await ToolSet.invoke(base, with: effectiveArguments)
+        } catch {
+            let errorContent = Self.toolErrorContent(error)
+            let errorData = errorContent.data()
+            try await verifyPostToolUse(
+                name: base.name, output: errorData, isError: true, emit: emit
+            )
+            emit(.toolResult(name: base.name, output: errorData))
+            await recordActivity(
+                viewID: viewID,
+                kind: .toolResult,
+                text: "\(base.name) -> \(String(decoding: errorData, as: UTF8.self))",
+                turn: turnID
+            )
+            if let toolError = error as? any ToolError, !toolError.isRetriable {
+                // Fatal by the tool's own contract — abort the turn.
+                throw error
+            }
+            // Malformed arguments and retriable tool failures go back to the
+            // model as the call's output, so the session can correct course.
+            return errorContent
+        }
+
+        let outputData = output.data()
         try await verifyPostToolUse(
-            call, output: output, isError: true, deadline: deadline, emit: emit
+            name: base.name, output: outputData, isError: false, emit: emit
         )
-        emit(.toolResult(name: call.name, output: output))
+        emit(.toolResult(name: base.name, output: outputData))
         await recordActivity(
             viewID: viewID,
             kind: .toolResult,
-            text: "\(call.name) -> \(String(decoding: output, as: UTF8.self))",
+            text: "\(base.name) -> \(String(decoding: outputData, as: UTF8.self))",
             turn: turnID
         )
-    }
-
-    private func finishToolCallSuccess(
-        _ call: ToolCall,
-        output: Data,
-        viewID: ViewContext.ID,
-        turnID: Int,
-        deadline: ContinuousClock.Instant?,
-        emit: @Sendable (OrchestratorEvent) -> Void
-    ) async throws {
-        try await verifyPostToolUse(
-            call, output: output, isError: false, deadline: deadline, emit: emit
-        )
-        emit(.toolResult(name: call.name, output: output))
-        await recordActivity(
-            viewID: viewID,
-            kind: .toolResult,
-            text: "\(call.name) -> \(String(decoding: output, as: UTF8.self))",
-            turn: turnID
-        )
+        return output
     }
 
     private func verifyPostToolUse(
-        _ call: ToolCall,
+        name: String,
         output: Data,
         isError: Bool,
-        deadline: ContinuousClock.Instant?,
         emit: @Sendable (OrchestratorEvent) -> Void
     ) async throws {
-        let warnings = try await withTurnDeadline(deadline) {
-            try await self.guardrails.verify(
-                .postToolUse,
-                .postToolUse(name: call.name, output: output, isError: isError)
-            )
-        }
+        let warnings = try await guardrails.verify(
+            .postToolUse,
+            .postToolUse(name: name, output: output, isError: isError)
+        )
         for warning in warnings {
             emit(.verification(stage: .postToolUse, outcome: .warn(reason: warning)))
         }
         emit(.verification(stage: .postToolUse, outcome: .pass))
     }
 
-    private func executeBatch(
-        _ calls: [ToolCall],
-        viewID: ViewContext.ID,
-        turnID: Int,
-        deadline: ContinuousClock.Instant?,
-        transcript: inout [TranscriptEntry],
-        emit: @escaping @Sendable (OrchestratorEvent) -> Void
-    ) async throws {
-        for index in calls.indices {
-            do {
-                _ = try await execute(
-                    calls[index],
-                    viewID: viewID,
-                    turnID: turnID,
-                    deadline: deadline,
-                    transcript: &transcript,
-                    emit: emit
-                )
-            } catch {
-                appendSkippedToolResults(
-                    for: calls[(index + 1)...],
-                    transcript: &transcript
-                )
-                throw error
-            }
-        }
-    }
-
-    /// Routes one parsed batch of calls: a `reportFailure` refusal ends the
-    /// turn; otherwise the calls execute sequentially. Returns `true` when
-    /// the turn ended.
-    private func handleToolCalls(
-        _ calls: [ToolCall],
-        narration: String?,
-        viewID: ViewContext.ID,
-        turnID: Int,
-        deadline: ContinuousClock.Instant?,
-        transcript: inout [TranscriptEntry],
-        emit: @escaping @Sendable (OrchestratorEvent) -> Void
-    ) async throws -> Bool {
-        // A `reportFailure` call is a refusal: it ends the turn.
-        if let reason = failureReason(in: calls) {
-            await recordFailure(reason, turn: turnID, outcome: .refused)
-            emit(.failure(reason: reason))
-            return true
-        }
-        // Non-stream mode never emitted deltas, so surface the narration
-        // that accompanies the tool calls instead of dropping it.
-        // (Streaming already emitted it as deltas.)
-        if !options.stream, let narration, !narration.isEmpty {
-            emit(.llmDelta(narration))
-        }
-        let (entry, resolved) = Self.assistantTurn(text: narration, calls: calls)
-        transcript.append(entry)
-        try await executeBatch(
-            resolved, viewID: viewID, turnID: turnID, deadline: deadline,
-            transcript: &transcript, emit: emit
-        )
-        return false
-    }
-
-    private func appendSkippedToolResults(
-        for calls: ArraySlice<ToolCall>,
-        transcript: inout [TranscriptEntry]
-    ) {
-        let content = String(decoding: Self.skippedToolOutput, as: UTF8.self)
-        for call in calls {
-            transcript.append(.toolResult(
-                id: call.id ?? call.name,
-                name: call.name,
-                content: content,
-                isError: true
-            ))
-        }
-    }
-
-    private func execute(
-        _ call: ToolCall,
-        viewID: ViewContext.ID,
-        turnID: Int,
-        deadline: ContinuousClock.Instant?,
-        transcript: inout [TranscriptEntry],
-        emit: @Sendable (OrchestratorEvent) -> Void
-    ) async throws -> Data {
-        let prepared = try await prepareToolCall(
-            call,
-            viewID: viewID,
-            turnID: turnID,
-            deadline: deadline,
-            emit: emit
-        )
-        let outputValue: GeneratedContent
-        do {
-            // A hung or slow tool must not be able to overrun the turn budget,
-            // so the invocation is raced against the deadline too.
-            outputValue = try await withTurnDeadline(deadline) {
-                try await self.tools.call(prepared.call)
-            }
-        } catch {
-            let output = Self.toolErrorOutput(error)
-            try await finishToolCallFailure(
-                prepared.call,
-                output: output,
-                viewID: viewID,
-                turnID: turnID,
-                deadline: deadline,
-                emit: emit
-            )
-            let outputText = String(decoding: output, as: UTF8.self)
-            transcript.append(.toolResult(
-                id: prepared.call.id ?? prepared.call.name,
-                name: prepared.call.name,
-                content: outputText,
-                isError: true
-            ))
-            // Surface to the catch-site classifier (tool-retriable, fatal, …).
-            throw error
-        }
-
-        let output = outputValue.data()
-        try await finishToolCallSuccess(
-            prepared.call,
-            output: output,
-            viewID: viewID,
-            turnID: turnID,
-            deadline: deadline,
-            emit: emit
-        )
-
-        transcript.append(.toolResult(
-            id: prepared.call.id ?? prepared.call.name,
-            name: prepared.call.name,
-            content: String(decoding: output, as: UTF8.self),
-            isError: false
-        ))
-        return output
-    }
-
     // MARK: - Deadline
 
     /// Races `operation` against the turn deadline. Returning the operation's
     /// value cancels the timer; the timer firing first throws
-    /// `TurnDeadlineExceeded` and cancels the in-flight LLM call so a single
-    /// slow request can't outlive the whole turn budget.
+    /// `TurnDeadlineExceeded` and cancels the in-flight session call so a
+    /// single slow request can't outlive the whole turn budget.
     private func withTurnDeadline<T: Sendable>(
         _ deadline: ContinuousClock.Instant?,
         _ operation: @escaping @Sendable () async throws -> T
@@ -1232,87 +1116,34 @@ public actor Orchestrator {
             return result
         }
     }
-
-    // MARK: - LLM
-
-    private static func malformedToolInput(raw: String) -> GeneratedContent {
-        AIKitMalformedToolInput.make(raw: raw)
-    }
-
-    private func callLLM(
-        _ request: LLMRequest,
-        emit: @Sendable (OrchestratorEvent) -> Void
-    ) async throws -> LLMResponse {
-        guard options.stream else {
-            return try await llm.complete(request)
-        }
-        var textChunks: [String] = []
-        var reasoningChunks: [String] = []
-        var toolBlocks: [StreamingToolBlock] = []
-        var toolIndexesByID: [String: Int] = [:]
-        var stopReason: StopReason = .endTurn
-        var usage = TokenUsage.zero
-
-        for try await chunk in llm.stream(request) {
-            // Make deadline/host cancellation prompt: without this the loop
-            // would keep draining the provider stream after the turn budget
-            // fired or the caller cancelled.
-            try Task.checkCancellation()
-            switch chunk {
-            case .textDelta(let delta):
-                textChunks.append(delta)
-                emit(.llmDelta(delta))
-            case .reasoningDelta(let delta):
-                reasoningChunks.append(delta)
-                emit(.reasoningDelta(delta))
-            case .toolUseStart(let id, let name):
-                toolIndexesByID[id] = toolBlocks.count
-                toolBlocks.append(StreamingToolBlock(id: id, name: name))
-            case .toolUseInputDelta(let id, let json):
-                if let index = toolIndexesByID[id] {
-                    toolBlocks[index].jsonChunks.append(json)
-                } else if let index = toolBlocks.indices.last {
-                    toolBlocks[index].jsonChunks.append(json)
-                }
-            case .toolUseStop:
-                continue
-            case .stop(let reason):
-                stopReason = reason
-            case .usage(let value):
-                // Streaming providers may report usage across several events.
-                // Keep the largest seen of each field so a later partial event
-                // can't zero out an earlier count.
-                usage = TokenUsage(
-                    inputTokens: max(usage.inputTokens, value.inputTokens),
-                    outputTokens: max(usage.outputTokens, value.outputTokens)
-                )
-            }
-        }
-
-        var blocks: [ContentBlock] = []
-        let reasoning = reasoningChunks.joined()
-        let text = textChunks.joined()
-        if !reasoning.isEmpty { blocks.append(.reasoning(reasoning)) }
-        if !text.isEmpty { blocks.append(.text(text)) }
-        for tool in toolBlocks {
-            let json = tool.jsonChunks.joined()
-            let arguments: GeneratedContent
-            if json.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                arguments = .object([:])
-            } else if AIKitMalformedToolInput.isCompleteJSON(json),
-                      let value = try? GeneratedContent(json: json) {
-                arguments = value
-            } else {
-                arguments = Self.malformedToolInput(raw: json)
-            }
-            blocks.append(.toolUse(id: tool.id, name: tool.name, arguments: arguments))
-        }
-        return LLMResponse(content: blocks, stopReason: stopReason, usage: usage)
-    }
 }
 
-private struct StreamingToolBlock {
-    let id: String
-    let name: String
-    var jsonChunks: [String] = []
+/// The official `Tool` the session sees for each of the host's tools: same
+/// name, description, and schema, but the call routes through the
+/// orchestrator's rails (guardrails, events, durable activity, refusal
+/// interception) before and after the host tool runs.
+private struct GuardedTool: Tool {
+    typealias Arguments = GeneratedContent
+    typealias Output = GeneratedContent
+
+    let base: any Tool
+    let orchestrator: Orchestrator
+    let viewID: ViewContext.ID
+    let turnID: Int
+    let emit: @Sendable (OrchestratorEvent) -> Void
+
+    var name: String { base.name }
+    var description: String { base.description }
+    var parameters: GenerationSchema { base.parameters }
+    var includesSchemaInInstructions: Bool { base.includesSchemaInInstructions }
+
+    func call(arguments: GeneratedContent) async throws -> GeneratedContent {
+        try await orchestrator.runGuardedTool(
+            base,
+            arguments: arguments,
+            viewID: viewID,
+            turnID: turnID,
+            emit: emit
+        )
+    }
 }

@@ -1,14 +1,13 @@
 import Foundation
+import FoundationModels
 import AIToolKit
-import AIKitCore
-import AIKitCapability
 import AIKitSafety
+import VolcengineArkFoundationModels
 
 /// How an error is classified for retry decisions.
 public enum ErrorCategory: Sendable, Hashable {
-    case transient            // network blip, 5xx
+    case transient            // network blip, rate limit, 5xx
     case toolRetriable        // tool said isRetriable == true
-    case malformedOutput      // parser failure
     case guardrailViolation   // never retriable
     case fatal
 }
@@ -55,31 +54,39 @@ public struct RetryPolicy: Sendable, Hashable {
     public static let `default` = RetryPolicy()
 }
 
-/// Classifies an error into an `ErrorCategory`.
+/// Classifies an error into an `ErrorCategory`. Models surface the official
+/// `LanguageModelError` taxonomy; provider-specific shapes (Ark HTTP/transport
+/// errors, Private Cloud Compute network failures) are classified on their
+/// own types.
 public enum ErrorClassifier {
     public static func category(of error: any Error) -> ErrorCategory {
         switch error {
         case is GuardrailViolation:
             return .guardrailViolation
-        case let dispatchError as ToolDispatchError:
-            if case .decodingFailed = dispatchError {
-                return .malformedOutput
-            }
-            return .fatal
         case let toolError as any ToolError:
             return toolError.isRetriable ? .toolRetriable : .fatal
-        case is OutputParser.ParserError:
-            return .malformedOutput
-        case let llmError as LLMError:
-            switch llmError {
+        case let modelError as LanguageModelError:
+            switch modelError {
+            case .rateLimited, .timeout:
+                return .transient
+            default:
+                return .fatal
+            }
+        case let pccError as PrivateCloudComputeLanguageModel.Error:
+            switch pccError {
+            case .networkFailure, .serviceUnavailable:
+                return .transient
+            default:
+                return .fatal
+            }
+        case let arkError as VolcengineArkError:
+            switch arkError {
             case .httpStatus(let code, _):
                 // 429 (rate limited) and 5xx are worth a retry; other 4xx are
                 // client errors that will fail again identically.
                 return (code == 429 || (500..<600).contains(code)) ? .transient : .fatal
-            case .transport, .timeout:
+            case .transport:
                 return .transient
-            case .cancelled:
-                return .fatal
             default:
                 return .fatal
             }

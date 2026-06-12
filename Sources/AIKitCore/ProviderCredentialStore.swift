@@ -55,9 +55,3 @@ public struct AIKitProviderCredentialStore: Equatable, Sendable {
         defaults.set(data, forKey: Self.storageKey)
     }
 }
-
-public extension AIKitProviderDefinition.APIKeyStrategy {
-    var requiresCredential: Bool {
-        self != .none
-    }
-}
