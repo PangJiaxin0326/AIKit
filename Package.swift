@@ -27,7 +27,7 @@ let package = Package(
         .package(path: "../AIToolKit"),
         .package(path: "../MultiModalKit"),
         .package(path: "../UICollection"),
-        .package(path: "Packages/VolcengineArkFoundationModels"),
+        .package(path: "../VolcengineArkFoundationModels"),
     ],
     targets: [
         .target(
