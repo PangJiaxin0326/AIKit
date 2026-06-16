@@ -342,7 +342,6 @@ public struct AIKitChatbotTabBar<Item: AIKitChatbotTab, TabContent: View, TabFab
     /// activity flashes back to idle and the draft text vanishes — so the
     /// accessory's state has to outlive it.
     @State private var input: AssistantInputCoordinator
-    @State private var lastActiveTab: Item = Item.default
     /// Backs the TabView's selection and is never `.none`, so the TabView never
     /// selects/restores the empty search tab — that empty-tab churn is what
     /// corrupts the hosted NavigationStack on device. `activeTab` (the external
@@ -419,16 +418,28 @@ public struct AIKitChatbotTabBar<Item: AIKitChatbotTab, TabContent: View, TabFab
         // External (e.g. AI-driven) navigation sets `activeTab`; mirror it into
         // the TabView's `selectedTab` storage. The reverse direction (user taps)
         // flows through `tabSelection`'s setter. The mirror write is deferred
-        // one hop: we're mid-update here, and the accessory field must resign
-        // BEFORE the selection write (the setter's proven resign-then-write
-        // order) or the focus re-resolution storms AttributeGraph.
+        // one hop: we're mid-update here. The selection write happens before the
+        // resign (see the setter) and the remaining side effects ride
+        // `onChange(of: selectedTab)`, so this only has to adopt the new tab.
         .onChange(of: activeTab) { _, newValue in
             guard let newValue, newValue != selectedTab else { return }
             Task { @MainActor in
-                dismissKeyboard()
                 selectedTab = newValue
-                lastActiveTab = newValue
+                dismissKeyboard()
             }
+        }
+        // The single home for selection side effects: mirroring back to the
+        // external binding, collapsing the runtime-detail surface, and pulling
+        // a fresh snapshot for the new tab's active context. Running them here —
+        // after the selection commits, in their own transaction — rather than
+        // inside the binding setter keeps extra writes from fighting the
+        // TabView's selection animation, and the refresh stops the AI-details
+        // surface from lagging a tab behind. Fires for both user taps and
+        // external navigation; the guard keeps the `activeTab` mirror loop-free.
+        .onChange(of: selectedTab) { _, newTab in
+            if activeTab != newTab { activeTab = newTab }
+            showsRuntimeDetails = false
+            Task { await refreshSnapshot() }
         }
         .onChange(of: selectedMenu) { _, menu in
             if menu != .activity { activityDisplay = .tasks }
@@ -466,18 +477,20 @@ public struct AIKitChatbotTabBar<Item: AIKitChatbotTab, TabContent: View, TabFab
                     Task { @MainActor in toggleFABPanel() }
                     return
                 }
-                // Resign the accessory text field BEFORE the selection write.
-                // A focused field inside tabViewBottomAccessory spans the
-                // focus system across the accessory and the tab content;
-                // re-resolving that focus during the selection transaction is
-                // what AttributeGraph reports as a cycle storm. This setter
-                // runs from UIKit event handling — before SwiftUI's update —
-                // so resigning synchronously here is safe and early enough.
-                dismissKeyboard()
+                // Commit the tapped tab FIRST, then resign. The getter returns
+                // `selectedTab`, so a stale read of the selection — which is
+                // exactly what `resignFirstResponder` can provoke synchronously
+                // while a field is focused — would otherwise hand the TabView
+                // the old tab and make the indicator animate toward the new tab
+                // and snap back. Both writes run in the same UIKit event
+                // handler, ahead of SwiftUI's update pass, so the field is
+                // already resigned before the tab content rebuilds: that
+                // ordering relative to the update — not the order of these two
+                // lines — is what keeps the focus re-resolution from storming
+                // AttributeGraph. The remaining side effects ride
+                // `onChange(of: selectedTab)` so they don't crowd the commit.
                 selectedTab = newValue
-                lastActiveTab = newValue
-                if activeTab != newValue { activeTab = newValue }
-                showsRuntimeDetails = false
+                dismissKeyboard()
             }
         )
     }
@@ -2619,8 +2632,18 @@ private struct AIKitTabFabOverlayModifier<ViewContent: View>: ViewModifier {
                     if isPresented {
                         viewContent()
                             .clipShape(.rect(cornerRadius: 30))
-                            .contentShape(.rect(cornerRadius: 30))
-                            .glassEffect(.regular.interactive(), in: .rect(cornerRadius: 30))
+                            // A container panel, not a tappable element, so use
+                            // plain `.regular` glass. `.interactive()` Liquid
+                            // Glass installs its own touch-responsive layer that
+                            // offsets/swallows hits meant for the controls nested
+                            // inside the panel — the Memory/Tools/Activity
+                            // segmented menu only responded in a shifted region,
+                            // which read as "needs 2+ taps". No explicit
+                            // `.contentShape` either: applied before the
+                            // bottom-aligning frame its hit region didn't track
+                            // the visible glass, and the glass background already
+                            // makes the panel hittable.
+                            .glassEffect(.regular, in: .rect(cornerRadius: 30))
                             .frame(maxHeight: .infinity, alignment: .bottom)
                             .padding(.horizontal, 15)
                             .padding(.bottom, 10)

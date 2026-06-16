@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 import FoundationModels
 import Testing
@@ -657,6 +658,46 @@ private struct EchoTool: Tool {
         let image = try #require(parts[1].objectValue?["image_url"]?.objectValue)
         #expect(parts[1].objectValue?["type"]?.stringValue == "image_url")
         #expect(image["url"]?.stringValue == "data:image/png;base64,qrs=")
+    }
+
+    @Test func inlinesInMemoryImageAttachmentsAsBase64() async throws {
+        let sse = """
+        data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}
+
+        data: [DONE]
+        """.data(using: .utf8)!
+        URLProtocolStub.setStub(.init(body: sse))
+
+        // A CGImage-backed attachment has no `url`; the provider must inline
+        // its pixels as a base64 `data:` URL instead of dropping the image to
+        // a text description (which left vision models blind).
+        let colorSpace = try #require(CGColorSpace(name: CGColorSpace.sRGB))
+        let context = try #require(CGContext(
+            data: nil, width: 1, height: 1, bitsPerComponent: 8, bytesPerRow: 0,
+            space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ))
+        let cgImage = try #require(context.makeImage())
+        let transcript = Transcript(entries: [
+            .prompt(Transcript.Prompt(segments: [
+                .text(Transcript.TextSegment(content: "What is shown?")),
+                .attachment(Transcript.AttachmentSegment(
+                    content: .image(Transcript.ImageAttachment(cgImage))
+                )),
+            ])),
+        ])
+
+        _ = try await respond(model: makeModel(), transcript: transcript)
+
+        let sent = try recordedRequestJSON()
+        let messages = try #require(sent["messages"]?.arrayValue)
+        let message = try #require(messages.first?.objectValue)
+        let parts = try #require(message["content"]?.arrayValue)
+        #expect(parts[1].objectValue?["type"]?.stringValue == "image_url")
+        let image = try #require(parts[1].objectValue?["image_url"]?.objectValue)
+        let url = try #require(image["url"]?.stringValue)
+        #expect(url.hasPrefix("data:image/jpeg;base64,"))
+        #expect(url.count > "data:image/jpeg;base64,".count)
     }
 }
 

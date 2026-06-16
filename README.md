@@ -107,7 +107,9 @@ and a block throws the official `LanguageModelError.guardrailViolation`
 
 Built-in rails: `AllowlistedTools`, `PIIGuard` (block-only; tag tools that
 legitimately receive PII via `acceptsPII`), `InjectionSniffer` (warns by
-default), `OutputLengthCap`. Custom rails conform to `Guardrail`
+default), `OutputLengthCap`, `ArraySizeCap` (blocks a tool output that would
+feed the model an array of more than 10 items — recursive, configurable
+`maxItems`, with an `exempt` tool set). Custom rails conform to `Guardrail`
 (`id`, `stages`, `evaluate`) and register on the `PolicyEngine` —
 `register`/`replace`/`unregister` work at runtime.
 

@@ -14,6 +14,28 @@ private func toolCall(
     Transcript.ToolCall(id: UUID().uuidString, toolName: name, arguments: arguments)
 }
 
+/// A `postToolUse` payload carrying one structured output segment.
+private func toolOutput(
+    _ name: String,
+    _ content: GeneratedContent
+) -> GuardrailPayload {
+    let call = toolCall(name)
+    let output = Transcript.ToolOutput(
+        id: call.id,
+        toolName: name,
+        segments: [.structure(Transcript.StructuredSegment(
+            source: name,
+            content: content
+        ))]
+    )
+    return .postToolUse(call, output)
+}
+
+/// An array of `count` trivial string items.
+private func items(_ count: Int) -> GeneratedContent {
+    .array((0..<count).map { .string("item \($0)") })
+}
+
 @Suite struct GuardrailTests {
     @Test func allowlistBlocksUnknownTool() async {
         let rail = AllowlistedTools(allowed: ["navigate"])
@@ -74,6 +96,58 @@ private func toolCall(
             Issue.record("expected block")
             return
         }
+    }
+
+    @Test func arraySizeCapBlocksOversizedOutput() async {
+        let rail = ArraySizeCap()
+        let outcome = await rail.evaluate(toolOutput(
+            "listEntries",
+            .object(["entries": items(11)])
+        ))
+        guard case .block(let reason) = outcome else {
+            Issue.record("expected block")
+            return
+        }
+        #expect(reason.contains("11 items"))
+    }
+
+    /// The cap is on "larger than": an array of exactly the limit passes.
+    @Test func arraySizeCapAllowsArrayAtTheLimit() async {
+        let rail = ArraySizeCap()
+        let outcome = await rail.evaluate(toolOutput(
+            "listEntries",
+            .object(["entries": items(10)])
+        ))
+        #expect(outcome == .pass)
+    }
+
+    /// An oversized array buried inside a nested structure still trips it.
+    @Test func arraySizeCapWalksNestedArrays() async {
+        let rail = ArraySizeCap()
+        let outcome = await rail.evaluate(toolOutput(
+            "report",
+            .object(["page": .object(["rows": items(25)])])
+        ))
+        guard case .block = outcome else {
+            Issue.record("expected block")
+            return
+        }
+    }
+
+    @Test func arraySizeCapHonorsExemptTool() async {
+        let rail = ArraySizeCap(exempt: ["listEntries"])
+        let outcome = await rail.evaluate(toolOutput(
+            "listEntries",
+            .object(["entries": items(50)])
+        ))
+        #expect(outcome == .pass)
+    }
+
+    /// Bound to `postToolUse` only — other stages are a no-op.
+    @Test func arraySizeCapIgnoresOtherStages() async {
+        let rail = ArraySizeCap(maxItems: 1)
+        let outcome = await rail.evaluate(.finalResult("anything"))
+        #expect(outcome == .pass)
     }
 
     @Test func injectionSnifferWarns() async {
