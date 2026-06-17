@@ -844,7 +844,7 @@ public struct AIKitView: View {
         .font(.footnote)
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
-        .glassEffect(.regular.tint(tint.opacity(0.08)), in: .capsule)
+        .aiKitGlassEffect(tint: tint.opacity(0.08), in: Capsule())
         .overlay {
             Capsule()
                 .strokeBorder(tint.opacity(0.22), lineWidth: 0.5)
@@ -968,9 +968,10 @@ public struct AIKitView: View {
                         }
                     }
                     .frame(width: 30, height: 30)
-                    .glassEffect(
-                        .regular.interactive().tint(Color.indigo.opacity(0.08)),
-                        in: .circle
+                    .aiKitGlassEffect(
+                        tint: Color.indigo.opacity(0.08),
+                        interactive: true,
+                        in: Circle()
                     )
                 }
                 .buttonStyle(.plain)
@@ -1202,7 +1203,7 @@ public struct AIKitView: View {
     }
 
     private var resetFooter: some View {
-        GlassEffectContainer(spacing: 10) {
+        AIKitGlassContainer(spacing: 10) {
             HStack {
                 Spacer()
                 Button(role: .destructive) {
@@ -1215,7 +1216,7 @@ public struct AIKitView: View {
                     }
                         .font(.callout)
                 }
-                .buttonStyle(.glass)
+                .aiKitGlassButtonStyle()
                 .tint(.red)
                 Spacer()
             }
@@ -3479,7 +3480,7 @@ private extension View {
 
     @ViewBuilder
     func chatbotCapsuleStyle(tint: Color) -> some View {
-        glassEffect(.regular.interactive().tint(tint), in: .capsule)
+        aiKitGlassEffect(tint: tint, interactive: true, in: Capsule())
     }
 
     #if os(iOS)
