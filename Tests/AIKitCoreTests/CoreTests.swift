@@ -474,6 +474,24 @@ private struct EchoTool: Tool {
         )
     }
 
+    @Test func malformedProviderStreamCannotSucceedWithPartialText() async {
+        let wire = "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\ndata: invalid\n\n"
+        URLProtocolStub.setStub(.init(body: Data(wire.utf8)))
+        await #expect(throws: (any Error).self) {
+            try await respond(model: makeModel())
+        }
+    }
+
+    @Test func emptyToolOutputRetainsItsProtocolMessage() async throws {
+        let call = #"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"empty_1","function":{"name":"empty_output","arguments":"{\"destination\":\"settings\"}"}}]},"finish_reason":"tool_calls"}]}"# + "\n\ndata: [DONE]\n\n"
+        let final = #"data: {"choices":[{"delta":{"content":"done"},"finish_reason":"stop"}]}"# + "\n\ndata: [DONE]\n\n"
+        URLProtocolStub.setStubs([.init(body: Data(call.utf8)), .init(body: Data(final.utf8))])
+        _ = try await respond(model: makeModel(), tools: [EmptyOutputTool()])
+        let body = try recordedRequestJSON()
+        let messages = try #require(body["messages"]?.arrayValue)
+        #expect(messages.contains { $0.objectValue?["role"]?.stringValue == "tool" })
+    }
+
     @Test func streamsTextFinishReasonAndUsage() async throws {
         let sse = """
         data: {"choices":[{"delta":{"content":"hello"},"finish_reason":null}]}
@@ -706,6 +724,13 @@ private struct EchoTool: Tool {
         #expect(url.hasPrefix("data:image/jpeg;base64,"))
         #expect(url.count > "data:image/jpeg;base64,".count)
     }
+}
+
+private struct EmptyOutputTool: Tool {
+    typealias Arguments = StubNavigateTool.Arguments
+    let name = "empty_output"
+    let description = "A tool with an empty successful output."
+    func call(arguments: Arguments) async throws -> String { "" }
 }
 
 /// Records the destinations the model navigated to, so the tool-call tests

@@ -1,4 +1,5 @@
 // swift-tools-version: 6.4
+import Foundation
 import PackageDescription
 
 let swiftSettings: [SwiftSetting] = [
@@ -22,12 +23,22 @@ let package = Package(
         .library(name: "AIKitProviders", targets: ["AIKitProviders"]),
     ],
     dependencies: [
-        // Use sibling checkouts so the AIKit stack builds against the packages
-        // updated in lockstep during local development.
-        .package(path: "../AIToolKit"),
-        .package(path: "../MultiModalKit"),
-        .package(path: "../UICollection"),
-        .package(path: "../VolcengineArkFoundationModels"),
+        ProcessInfo.processInfo.environment["SWIFTPACKAGES_USE_LOCAL_DEPENDENCIES"] == "1"
+            ? .package(path: "../AIToolKit")
+            : .package(url: "https://github.com/PangJiaxin0326/AIToolKit.git",
+                       revision: "417c8023f9d99a6e739dc686c577b62729e71f31"),
+        ProcessInfo.processInfo.environment["SWIFTPACKAGES_USE_LOCAL_DEPENDENCIES"] == "1"
+            ? .package(path: "../MultiModalKit")
+            : .package(url: "https://github.com/PangJiaxin0326/MultiModalKit.git",
+                       revision: "c8711adb6c3bea390fb1c21fd192f577857c50ad"),
+        ProcessInfo.processInfo.environment["SWIFTPACKAGES_USE_LOCAL_DEPENDENCIES"] == "1"
+            ? .package(path: "../UICollection")
+            : .package(url: "https://github.com/PangJiaxin0326/UICollection.git",
+                       revision: "6552495b008b2896e31f6054137de12bccb016dd"),
+        ProcessInfo.processInfo.environment["SWIFTPACKAGES_USE_LOCAL_DEPENDENCIES"] == "1"
+            ? .package(path: "../VolcengineArkFoundationModels")
+            : .package(url: "https://github.com/PangJiaxin0326/VolcengineArkFoundationModels.git",
+                       revision: "f538c10caf8d0af848643049fcd67729eddc0f1b"),
     ],
     targets: [
         .target(

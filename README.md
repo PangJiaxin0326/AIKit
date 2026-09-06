@@ -349,3 +349,13 @@ facades remain until the next major release. The replacements:
 The per-turn tool-guardrail semantics are unchanged: the same
 `PolicyEngine` rails run at the same four observable boundaries, now
 entirely inside the session machinery.
+
+## Dependency development
+
+The manifest pins the four GitHub package dependencies to audited revisions,
+so a fresh checkout does not require sibling folders. UICollection pins the
+same AIToolKit revision. To work against local sibling checkouts, build with
+`SWIFTPACKAGES_USE_LOCAL_DEPENDENCIES=1 swift test` (or `swift build`).
+
+See [the dependency audit](Documentation/DependencyAudit.md) for findings,
+fixes, verification, and compatibility notes.
