@@ -408,7 +408,9 @@ private func generatedValue<Value: ConvertibleFromGeneratedContent>(
 @Suite struct AIKitConfigurationToolTests {
     @Test func configurationToolsReadAndMutateStore() async throws {
         let store = AIKitConfigurationStore()
-        let tools = AIKitConfigurationTools.all(store: store)
+        let tools = AIKitConfigurationTools.all(store: store) { section, key in
+            section == .runtime && key == "maxTurnDuration"
+        }
 
         #expect(Set(tools.map(\.name)) == AIKitConfigurationTools.toolNames)
 

@@ -47,14 +47,16 @@ public actor PolicyEngine {
     public func verify(
         _ stage: GuardrailStage,
         _ payload: GuardrailPayload
-    ) async throws -> [String] {
-        var warnings: [String] = []
+    ) async throws -> [GuardrailWarning] {
+        var warnings: [GuardrailWarning] = []
         for rail in rails where rail.stages.contains(stage) {
             switch await rail.evaluate(payload) {
             case .pass:
                 continue
             case .warn(let reason):
-                warnings.append(reason)
+                warnings.append(GuardrailWarning(
+                    railID: rail.id, stage: stage, reason: reason
+                ))
                 logger.warning("guardrail \(rail.id, privacy: .public) warned: \(reason, privacy: .public)")
             case .block(let reason):
                 logger.error("guardrail \(rail.id, privacy: .public) blocked: \(reason, privacy: .public)")

@@ -21,6 +21,7 @@ final class VoiceModeController {
         case listening
         case thinking
         case speaking
+        case stopping
     }
 
     private(set) var phase: Phase = .idle
@@ -29,17 +30,44 @@ final class VoiceModeController {
     private(set) var errorMessage: String?
     /// The recorder backing the current listening / thinking phase, exposed
     /// so the button can react to its live input level.
-    private(set) var activeSpeech: LiveSpeechSession?
+    private(set) var activeSpeech: (any AIKitVoiceSpeechSession)?
 
-    @ObservationIgnored private let orchestrator: Orchestrator
+    @ObservationIgnored private let respond: @Sendable (String) async throws -> String
+    @ObservationIgnored private let makeSpeech: @MainActor () -> any AIKitVoiceSpeechSession
+    @ObservationIgnored private let managesAudioSession: Bool
     @ObservationIgnored private let synthesizer = SpeechSynthesizer()
     @ObservationIgnored private var flowTask: Task<Void, Never>?
 
+    init(
+        conversation: AIKitConversation,
+        makeSpeech: @escaping @MainActor () -> any AIKitVoiceSpeechSession = { LiveSpeechSession() },
+        managesAudioSession: Bool = true
+    ) {
+        self.makeSpeech = makeSpeech
+        self.managesAudioSession = managesAudioSession
+        respond = { try await conversation.collectResponse(to: $0).content }
+    }
+
     init(orchestrator: Orchestrator) {
-        self.orchestrator = orchestrator
+        makeSpeech = { LiveSpeechSession() }
+        managesAudioSession = true
+        respond = { instruction in
+            var answer = ""
+            for try await event in await orchestrator.run(instruction) {
+                switch event {
+                case .finalAnswer(let text): answer = text
+                case .failure(let reason): throw TurnRefusal(reason: reason)
+                case .error(let error): throw error
+                default: break
+                }
+            }
+            try Task.checkCancellation()
+            return answer
+        }
     }
 
     /// Live input level of the active recorder, `0...1`.
+    var canStart: Bool { flowTask == nil }
     var audioLevel: Double { activeSpeech?.audioLevel ?? 0 }
 
     // MARK: - Intent
@@ -72,14 +100,13 @@ final class VoiceModeController {
     /// Stops everything and returns to idle.
     func abort() {
         flowTask?.cancel()
-        flowTask = nil
+        // Keep ownership until cancellation and audio cleanup settle.
+        // A new flow cannot race the previous flow's asynchronous cleanup.
         synthesizer.stop()
         activeSpeech?.cancel()
         activeSpeech = nil
-        let orchestrator = orchestrator
-        Task { await orchestrator.cancelActiveTurns() }
         deactivateAudioSession()
-        phase = .idle
+        phase = flowTask == nil ? .idle : .stopping
     }
 
     // MARK: - Conversation flow
@@ -144,13 +171,13 @@ final class VoiceModeController {
 
     /// Captures one spoken instruction, returning the transcript.
     private func listen() async throws -> String {
-        let session = LiveSpeechSession()
+        let session = makeSpeech()
         activeSpeech = session
         do {
             try await session.start()
             try await session.awaitSilence()
         } catch {
-            await session.finish()
+            _ = await session.finish()
             activeSpeech = nil
             throw error
         }
@@ -161,14 +188,14 @@ final class VoiceModeController {
 
     /// Runs one orchestrator turn while a second recorder listens for "stop".
     private func think(instruction: String) async -> Outcome {
-        let stopListener = LiveSpeechSession()
+        let stopListener = makeSpeech()
         activeSpeech = stopListener
         let listeningForStop = ((try? await stopListener.start()) != nil)
 
-        let orchestrator = orchestrator
+        let respond = respond
         let outcome = await withTaskGroup(of: Outcome?.self) { group -> Outcome in
             group.addTask {
-                await Self.runTurn(orchestrator: orchestrator, instruction: instruction)
+                await Self.runTurn(respond: respond, instruction: instruction)
             }
             if listeningForStop {
                 group.addTask {
@@ -185,9 +212,6 @@ final class VoiceModeController {
             while let next = await group.next() {
                 guard let value = next else { continue }
                 resolved = value
-                if case .stopped = value {
-                    await orchestrator.cancelActiveTurns()
-                }
                 group.cancelAll()
                 break
             }
@@ -199,35 +223,20 @@ final class VoiceModeController {
         return outcome
     }
 
-    /// Consumes one orchestrator turn and classifies its result.
+    /// Group cancellation reaches the same conversation turn lifecycle.
     private static func runTurn(
-        orchestrator: Orchestrator,
+        respond: @Sendable (String) async throws -> String,
         instruction: String
     ) async -> Outcome {
-        var finalAnswer: String?
-        var failure: String?
         do {
-            for try await event in await orchestrator.run(instruction) {
-                switch event {
-                case .finalAnswer(let text):
-                    finalAnswer = text
-                case .failure(let reason):
-                    failure = reason
-                case .error(let error):
-                    failure = AIKitSession.describe(error)
-                default:
-                    break
-                }
-            }
+            let answer = try await respond(instruction)
+            try Task.checkCancellation()
+            return answer.isEmpty ? .empty : .completed
         } catch is CancellationError {
-            return .empty
+            return .stopped
         } catch {
-            failure = AIKitSession.describe(error)
+            return .needsFollowUp(AIKitConversationPresenter.describe(error))
         }
-
-        if let failure, !failure.isEmpty { return .needsFollowUp(failure) }
-        if let finalAnswer, !finalAnswer.isEmpty { return .completed }
-        return .empty
     }
 
     // MARK: - Audio session
@@ -242,6 +251,7 @@ final class VoiceModeController {
     #endif
 
     private func activateAudioSession() async {
+        guard managesAudioSession else { return }
         #if os(iOS) || os(visionOS)
         await withCheckedContinuation { continuation in
             Self.audioSessionQueue.async {
@@ -259,6 +269,7 @@ final class VoiceModeController {
     }
 
     private func deactivateAudioSession() {
+        guard managesAudioSession else { return }
         #if os(iOS) || os(visionOS)
         Self.audioSessionQueue.async {
             try? AVAudioSession.sharedInstance().setActive(

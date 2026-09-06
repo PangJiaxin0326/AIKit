@@ -288,6 +288,7 @@ public struct AIKitConfigurationChange: Codable, Sendable, Hashable, Identifiabl
 }
 
 public enum AIKitConfigurationError: ToolError, Sendable, Hashable {
+    case unauthorized(section: AIKitConfiguration.Section, key: String)
     case unknownKey(section: AIKitConfiguration.Section, key: String)
     case invalidValue(section: AIKitConfiguration.Section, key: String, expected: String)
 
@@ -295,6 +296,8 @@ public enum AIKitConfigurationError: ToolError, Sendable, Hashable {
 
     public var message: String {
         switch self {
+        case .unauthorized(let section, let key):
+            return "The host does not allow model edits to \(section.rawValue).\(key)."
         case .unknownKey(let section, let key):
             return "Unknown AIKit \(section.rawValue) configuration key '\(key)'."
         case .invalidValue(let section, let key, let expected):
@@ -308,6 +311,7 @@ public enum AIKitConfigurationError: ToolError, Sendable, Hashable {
 public actor AIKitConfigurationStore {
     private var configuration: AIKitConfiguration
     private var changes: [AIKitConfigurationChange]
+    private var observers: [UUID: AsyncStream<AIKitConfiguration>.Continuation] = [:]
 
     public init(configuration: AIKitConfiguration = .standard) {
         self.configuration = configuration
@@ -317,6 +321,32 @@ public actor AIKitConfigurationStore {
     public func snapshot() -> AIKitConfiguration {
         configuration
     }
+
+    /// Atomic field mutation against current state, never a stale UI snapshot.
+    @discardableResult
+    public func update(
+        source: String = "host",
+        _ mutation: @Sendable (inout AIKitConfiguration) -> Void
+    ) -> AIKitConfigurationChange {
+        mutation(&configuration)
+        let change = AIKitConfigurationChange(source: source, section: nil, key: nil,
+                                             valueDescription: "Updated configuration fields")
+        record(change)
+        return change
+    }
+
+    /// Descriptive, in-memory preferences. The host explicitly applies them
+    /// when constructing profiles; safety policy remains host-owned.
+    public func updates() -> AsyncStream<AIKitConfiguration> {
+        let id = UUID()
+        let (stream, continuation) = AsyncStream<AIKitConfiguration>.makeStream(bufferingPolicy: .bufferingNewest(1))
+        observers[id] = continuation
+        continuation.yield(configuration)
+        continuation.onTermination = { _ in Task { await self.removeObserver(id) } }
+        return stream
+    }
+
+    private func removeObserver(_ id: UUID) { observers[id] = nil }
 
     @discardableResult
     public func replace(
@@ -357,6 +387,7 @@ public actor AIKitConfigurationStore {
     }
 
     private func record(_ change: AIKitConfigurationChange) {
+        for observer in observers.values { observer.yield(configuration) }
         changes.append(change)
         if changes.count > 100 {
             changes.removeFirst(changes.count - 100)

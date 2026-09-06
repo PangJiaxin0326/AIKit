@@ -4,7 +4,7 @@ import Testing
 import AIToolKit
 import AIKitCore
 import AIKitCapability
-import AIKitRuntime
+@testable import AIKitRuntime
 import AIKitSafety
 import AIKitTestSupport
 
@@ -16,9 +16,11 @@ private actor InvocationFlag {
 }
 
 private func mockModel(_ model: MockLanguageModel) -> OrchestratorModel {
-    OrchestratorModel(model: model, modelID: "mock-model", providerName: "Mock")
+    OrchestratorModel(testing: model, modelID: "mock-model", providerName: "Mock")
 }
 
+// Pins legacy `Orchestrator` behavior through the deprecation window,
+// constructing through the internal `testing:` seam.
 @Suite struct IntegrationTests {
     private func resolver(toolNames: Set<String>) async -> ContextResolver {
         let resolver = ContextResolver()
@@ -44,7 +46,7 @@ private func mockModel(_ model: MockLanguageModel) -> OrchestratorModel {
         ])
 
         let orchestrator = Orchestrator(
-            model: mockModel(model),
+            testing: mockModel(model),
             tools: tools,
             memory: InMemoryMemoryStore(),
             contextResolver: await resolver(toolNames: ["navigate"]),
@@ -77,7 +79,7 @@ private func mockModel(_ model: MockLanguageModel) -> OrchestratorModel {
         ])
 
         let orchestrator = Orchestrator(
-            model: mockModel(model),
+            testing: mockModel(model),
             tools: tools,
             memory: InMemoryMemoryStore(),
             contextResolver: await resolver(toolNames: ["navigate"]),
@@ -115,7 +117,7 @@ private func mockModel(_ model: MockLanguageModel) -> OrchestratorModel {
         ])
 
         let orchestrator = Orchestrator(
-            model: mockModel(model),
+            testing: mockModel(model),
             tools: tools,
             memory: InMemoryMemoryStore(),
             contextResolver: await resolver(toolNames: ["navigate"]),
@@ -150,7 +152,7 @@ private func mockModel(_ model: MockLanguageModel) -> OrchestratorModel {
                     let resolver = ContextResolver()
                     await resolver.push(ViewContext(id: .init("v\(i)"), displayName: "V"))
                     let orchestrator = Orchestrator(
-                        model: mockModel(MockLanguageModel(finalText: "answer-\(i)")),
+                        testing: mockModel(MockLanguageModel(finalText: "answer-\(i)")),
                         tools: [],
                         memory: InMemoryMemoryStore(),
                         contextResolver: resolver,

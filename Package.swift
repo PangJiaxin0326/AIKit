@@ -1,8 +1,7 @@
-// swift-tools-version: 6.0
+// swift-tools-version: 6.4
 import PackageDescription
 
 let swiftSettings: [SwiftSetting] = [
-    .enableUpcomingFeature("StrictConcurrency"),
     .swiftLanguageMode(.v6),
 ]
 
@@ -20,6 +19,7 @@ let package = Package(
         .library(name: "AIKitRuntime", targets: ["AIKitRuntime"]),
         .library(name: "AIKitSafety", targets: ["AIKitSafety"]),
         .library(name: "AIKitUI", targets: ["AIKitUI"]),
+        .library(name: "AIKitProviders", targets: ["AIKitProviders"]),
     ],
     dependencies: [
         // Use sibling checkouts so the AIKit stack builds against the packages
@@ -32,12 +32,6 @@ let package = Package(
     targets: [
         .target(
             name: "AIKitCore",
-            dependencies: [
-                .product(
-                    name: "VolcengineArkFoundationModels",
-                    package: "VolcengineArkFoundationModels"
-                ),
-            ],
             swiftSettings: swiftSettings
         ),
         .target(
@@ -62,10 +56,14 @@ let package = Package(
                 "AIKitCore",
                 "AIKitCapability",
                 "AIKitSafety",
-                .product(
-                    name: "VolcengineArkFoundationModels",
-                    package: "VolcengineArkFoundationModels"
-                ),
+            ],
+            swiftSettings: swiftSettings
+        ),
+        .target(
+            name: "AIKitProviders",
+            dependencies: [
+                "AIKitCore", "AIKitRuntime", "AIKitCapability", "AIKitSafety",
+                .product(name: "VolcengineArkFoundationModels", package: "VolcengineArkFoundationModels"),
             ],
             swiftSettings: swiftSettings
         ),
@@ -101,6 +99,7 @@ let package = Package(
                 "AIKitRuntime",
                 "AIKitSafety",
                 "AIKitUI",
+                "AIKitProviders",
             ],
             swiftSettings: swiftSettings
         ),
@@ -112,7 +111,7 @@ let package = Package(
         ),
         .testTarget(
             name: "AIKitCoreTests",
-            dependencies: ["AIKitCore", "AIKitTestSupport"],
+            dependencies: ["AIKitCore", "AIKitProviders", "AIKitTestSupport"],
             swiftSettings: swiftSettings
         ),
         .testTarget(
@@ -122,7 +121,7 @@ let package = Package(
         ),
         .testTarget(
             name: "AIKitRuntimeTests",
-            dependencies: ["AIKitRuntime", "AIKitTestSupport"],
+            dependencies: ["AIKitRuntime", "AIKitProviders", "AIKitTestSupport"],
             swiftSettings: swiftSettings
         ),
         .testTarget(

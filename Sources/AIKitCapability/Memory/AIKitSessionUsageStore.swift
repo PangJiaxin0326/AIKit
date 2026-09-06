@@ -43,7 +43,9 @@ public struct AIKitSessionUsageSummary: Sendable, Hashable, Codable {
         self.messageCount = max(0, messageCount)
         self.usage = TokenUsage(
             inputTokens: max(0, usage.inputTokens),
-            outputTokens: max(0, usage.outputTokens)
+            outputTokens: max(0, usage.outputTokens),
+            cachedInputTokens: max(0, usage.cachedInputTokens),
+            reasoningOutputTokens: max(0, usage.reasoningOutputTokens)
         )
         self.outcome = outcome
         self.recordedAt = recordedAt

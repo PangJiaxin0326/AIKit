@@ -117,10 +117,16 @@ public struct SetAIKitConfigurationTool: Tool {
 
     private let store: AIKitConfigurationStore
     private let source: String
+    private let authorize: @Sendable (AIKitConfiguration.Section, String) -> Bool
 
-    public init(store: AIKitConfigurationStore, source: String = "llm") {
+    /// Denies all model edits unless the host explicitly grants field access.
+    public init(
+        store: AIKitConfigurationStore, source: String = "llm",
+        authorize: @escaping @Sendable (AIKitConfiguration.Section, String) -> Bool = { _, _ in false }
+    ) {
         self.store = store
         self.source = source
+        self.authorize = authorize
     }
 
     public func call(arguments input: Input) async throws -> Output {
@@ -130,6 +136,9 @@ public struct SetAIKitConfigurationTool: Tool {
                 key: "section",
                 expected: AIKitConfiguration.Section.allCases.map(\.rawValue).joined(separator: ", ")
             )
+        }
+        guard authorize(section, input.key) else {
+            throw AIKitConfigurationError.unauthorized(section: section, key: input.key)
         }
         let change = try await store.set(
             section: section,
@@ -159,10 +168,13 @@ public enum AIKitConfigurationTools {
 
     /// Both configuration tools, in the `[any Tool]` currency a
     /// `LanguageModelSession` (or the `Orchestrator`) takes.
-    public static func all(store: AIKitConfigurationStore) -> [any Tool] {
+    public static func all(
+        store: AIKitConfigurationStore,
+        authorize: @escaping @Sendable (AIKitConfiguration.Section, String) -> Bool = { _, _ in false }
+    ) -> [any Tool] {
         [
             GetAIKitConfigurationTool(store: store),
-            SetAIKitConfigurationTool(store: store),
+            SetAIKitConfigurationTool(store: store, authorize: authorize),
         ]
     }
 }

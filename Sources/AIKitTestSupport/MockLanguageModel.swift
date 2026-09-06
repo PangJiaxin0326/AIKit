@@ -71,7 +71,7 @@ public struct MockLanguageModel: LanguageModel, Sendable {
     public var executorConfiguration: Configuration { configuration }
 
     public static let defaultCapabilities = LanguageModelCapabilities(
-        capabilities: [.toolCalling, .reasoning, .guidedGeneration]
+        [.toolCalling, .reasoning, .guidedGeneration]
     )
 
     public init(

@@ -1,5 +1,6 @@
 import Foundation
 import FoundationModels
+import AIKitCore
 import VolcengineArkFoundationModels
 
 /// The language models AIKit ships, each wrapped in its official Foundation

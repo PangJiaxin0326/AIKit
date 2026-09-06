@@ -17,41 +17,84 @@ public enum AIKitChatbotOverlayMode: Sendable {
 ///   capsule: a tap starts listening, silence fires the AI turn, and the
 ///   assistant speaks back when it needs a follow-up.
 public struct AIKitChatbotOverlay<DetailContent: View>: View {
-    private let orchestrator: Orchestrator
+    private let orchestrator: Orchestrator?
+    private let conversation: AIKitConversation?
+    private let context: AIKitOverlayContext
     private let mode: AIKitChatbotOverlayMode
     private let detailContent: @MainActor (AIKitOverlayContext) -> DetailContent
 
     @MainActor
     public init(
-        orchestrator: Orchestrator,
+        conversation: AIKitConversation,
+        context: AIKitOverlayContext = AIKitOverlayContext(),
         mode: AIKitChatbotOverlayMode = .assistant
     ) where DetailContent == EmptyView {
-        self.orchestrator = orchestrator
+        self.orchestrator = nil
+        self.conversation = conversation
+        self.context = context
         self.mode = mode
         self.detailContent = { _ in EmptyView() }
     }
 
     @MainActor
     public init(
+        conversation: AIKitConversation,
+        context: AIKitOverlayContext = AIKitOverlayContext(),
+        mode: AIKitChatbotOverlayMode = .assistant,
+        @ViewBuilder detailContent: @escaping @MainActor (AIKitOverlayContext) -> DetailContent
+    ) {
+        self.orchestrator = nil
+        self.conversation = conversation
+        self.context = context
+        self.mode = mode
+        self.detailContent = detailContent
+    }
+
+    @MainActor
+    @available(*, deprecated, message: "Use the conversation initializer; legacy runtime UI is removed in the next major release.")
+    public init(
+        orchestrator: Orchestrator,
+        mode: AIKitChatbotOverlayMode = .assistant
+    ) where DetailContent == EmptyView {
+        self.orchestrator = orchestrator
+        self.conversation = nil
+        self.context = AIKitOverlayContext()
+        self.mode = mode
+        self.detailContent = { _ in EmptyView() }
+    }
+
+    @MainActor
+    @available(*, deprecated, message: "Use the conversation initializer; legacy runtime UI is removed in the next major release.")
+    public init(
         orchestrator: Orchestrator,
         mode: AIKitChatbotOverlayMode = .assistant,
         @ViewBuilder detailContent: @escaping @MainActor (AIKitOverlayContext) -> DetailContent
     ) {
         self.orchestrator = orchestrator
+        self.conversation = nil
+        self.context = AIKitOverlayContext()
         self.mode = mode
         self.detailContent = detailContent
     }
 
     @ViewBuilder
     public var body: some View {
-        switch mode {
-        case .assistant:
-            AssistantChatbotOverlay(
-                orchestrator: orchestrator,
-                detailContent: detailContent
-            )
-        case .voice:
-            VoiceChatbotOverlay(orchestrator: orchestrator)
+        if let conversation {
+            switch mode {
+            case .assistant:
+                ConversationAssistantOverlay(conversation: conversation) {
+                    detailContent(context)
+                }
+            case .voice:
+                VoiceChatbotOverlay(conversation: conversation)
+            }
+        } else if let orchestrator {
+            switch mode {
+            case .assistant:
+                AssistantChatbotOverlay(orchestrator: orchestrator, detailContent: detailContent)
+            case .voice:
+                VoiceChatbotOverlay(orchestrator: orchestrator)
+            }
         }
     }
 }
@@ -59,6 +102,7 @@ public struct AIKitChatbotOverlay<DetailContent: View>: View {
 /// The pure-voice pet button. Renders only a draggable, edge-docked circle
 /// whose icon and color reflect the conversation phase.
 struct VoiceChatbotOverlay: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var controller: VoiceModeController
 
     /// Which screen edge the button is docked to, and where along it
@@ -74,6 +118,11 @@ struct VoiceChatbotOverlay: View {
     private let edgeInset = AIKitMetrics.edgeInset
 
     @MainActor
+    init(conversation: AIKitConversation) {
+        _controller = State(initialValue: VoiceModeController(conversation: conversation))
+    }
+
+    @MainActor
     init(orchestrator: Orchestrator) {
         _controller = State(initialValue: VoiceModeController(orchestrator: orchestrator))
     }
@@ -83,21 +132,22 @@ struct VoiceChatbotOverlay: View {
             let size = proxy.size
             petButton(in: size)
                 .position(center(in: size))
-                .animation(.spring(duration: 0.3), value: petEdge)
-                .animation(.spring(duration: 0.3), value: petVerticalFraction)
+                .animation(reduceMotion ? nil : .spring(duration: 0.3), value: petEdge)
+                .animation(reduceMotion ? nil : .spring(duration: 0.3), value: petVerticalFraction)
         }
         .onDisappear { controller.abort() }
     }
 
     private func petButton(in size: CGSize) -> some View {
+        Button { controller.toggle() } label: {
         ZStack {
             if controller.phase == .listening {
                 Circle()
                     .stroke(tint.opacity(0.55), lineWidth: 3)
                     .frame(width: petDiameter, height: petDiameter)
-                    .scaleEffect(1 + controller.audioLevel * 0.7)
+                    .scaleEffect(reduceMotion ? 1 : 1 + controller.audioLevel * 0.7)
                     .opacity(1 - controller.audioLevel * 0.55)
-                    .animation(.snappy(duration: 0.18), value: controller.audioLevel)
+                    .animation(reduceMotion ? nil : .snappy(duration: 0.18), value: controller.audioLevel)
             }
             Circle()
                 .fill(tint.gradient)
@@ -110,16 +160,17 @@ struct VoiceChatbotOverlay: View {
                         .font(.title2.weight(.semibold))
                         .foregroundStyle(.white)
                         .contentTransition(.symbolEffect(.replace))
-                        .symbolEffect(.pulse, options: .repeating, isActive: isPulsing)
+                        .symbolEffect(.pulse, options: .repeating, isActive: isPulsing && !reduceMotion)
                 }
         }
         .frame(width: petDiameter, height: petDiameter)
-        .scaleEffect(isInteracting ? 1.2 : 1)
+        .scaleEffect(!reduceMotion && isInteracting ? 1.2 : 1)
         .contentShape(Circle())
-        .onTapGesture { controller.toggle() }
+        }
+        .buttonStyle(.plain)
         .simultaneousGesture(moveGesture(in: size))
-        .animation(.spring(duration: 0.2), value: isInteracting)
-        .animation(.spring(duration: 0.25), value: controller.phase)
+        .animation(reduceMotion ? nil : .spring(duration: 0.2), value: isInteracting)
+        .animation(reduceMotion ? nil : .spring(duration: 0.25), value: controller.phase)
         .accessibilityLabel(accessibilityLabel)
         .accessibilityAddTraits(.isButton)
     }
@@ -139,6 +190,7 @@ struct VoiceChatbotOverlay: View {
         case .listening: return .red
         case .thinking: return .yellow
         case .speaking: return .blue
+        case .stopping: return .secondary
         }
     }
 
@@ -149,6 +201,7 @@ struct VoiceChatbotOverlay: View {
         case .listening: return "waveform"
         case .thinking: return "sparkles"
         case .speaking: return "speaker.wave.2.fill"
+        case .stopping: return "hourglass"
         }
     }
 
@@ -163,6 +216,7 @@ struct VoiceChatbotOverlay: View {
         case .listening: return "Listening. Tap to cancel"
         case .thinking: return "Working. Say stop, or tap, to cancel"
         case .speaking: return "Speaking. Tap to cancel"
+        case .stopping: return "Stopping voice assistant"
         }
     }
 
@@ -198,7 +252,7 @@ struct VoiceChatbotOverlay: View {
                 let restingY = minY + petVerticalFraction * (maxY - minY)
                 let droppedX = restingX + value.translation.width
                 let droppedY = (restingY + value.translation.height).clamped(to: minY...maxY)
-                withAnimation(.spring(duration: 0.3)) {
+                withAnimation(reduceMotion ? nil : .spring(duration: 0.3)) {
                     petEdge = droppedX < size.width / 2 ? .leading : .trailing
                     petVerticalFraction = maxY > minY
                         ? (droppedY - minY) / (maxY - minY)

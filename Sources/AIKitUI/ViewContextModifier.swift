@@ -3,8 +3,12 @@ import AIKitCapability
 
 /// Environment slot carrying the app's `ContextResolver` so `.aiContext`
 /// modifiers can push/pop without manual plumbing.
+private enum AIContextResolverDefault {
+    static let shared = ContextResolver()
+}
+
 public extension EnvironmentValues {
-    @Entry var aiContextResolver = ContextResolver()
+    @Entry var aiContextResolver = AIContextResolverDefault.shared
 }
 
 struct AIKitContextLifecycleModifier: ViewModifier {

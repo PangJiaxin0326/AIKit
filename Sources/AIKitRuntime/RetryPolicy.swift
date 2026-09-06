@@ -1,7 +1,6 @@
 import Foundation
 import FoundationModels
 import AIToolKit
-import VolcengineArkFoundationModels
 
 /// How an error is classified for retry decisions.
 public enum ErrorCategory: Sendable, Hashable {
@@ -26,10 +25,12 @@ public struct RetryPolicy: Sendable, Hashable {
             case .none:
                 return 0
             case .fixed(let seconds):
-                return seconds
+                return seconds.isFinite ? max(0, seconds) : 0
             case .exponential(let base, let cap):
-                return min(cap, base * pow(2, Double(max(0, attempt - 1))))
+                guard base.isFinite, cap.isFinite else { return 0 }
+                return max(0, min(cap, base * pow(2, Double(max(0, attempt - 1)))))
             case .exponentialJitter(let base, let cap):
+                guard base.isFinite, cap.isFinite else { return 0 }
                 let ceiling = min(cap, base * pow(2, Double(max(0, attempt - 1))))
                 return Double.random(in: 0...max(0, ceiling))
             }
@@ -50,6 +51,10 @@ public struct RetryPolicy: Sendable, Hashable {
         self.retriableCategories = retriableCategories
     }
 
+    /// No automatic replay of potentially effectful work.
+    public static let never = RetryPolicy(maxAttempts: 1, backoff: .none)
+
+    /// Opt-in: every tool and the host operation must be safe to repeat.
     public static let `default` = RetryPolicy()
 }
 
@@ -58,6 +63,13 @@ public struct RetryPolicy: Sendable, Hashable {
 /// errors, Private Cloud Compute network failures) are classified on their
 /// own types.
 public enum ErrorClassifier {
+    public static func underlyingError(_ error: any Error) -> any Error {
+        if let wrapped = error as? LanguageModelSession.ToolCallError {
+            return underlyingError(wrapped.underlyingError)
+        }
+        return error
+    }
+
     public static func category(of error: any Error) -> ErrorCategory {
         switch error {
         // An error thrown inside a tool's `call` (or a profile hook) reaches
@@ -90,19 +102,16 @@ public enum ErrorClassifier {
             default:
                 return .fatal
             }
-        case let arkError as VolcengineArkError:
-            switch arkError {
-            case .httpStatus(let code, _):
-                // 429 (rate limited) and 5xx are worth a retry; other 4xx are
-                // client errors that will fail again identically.
-                return (code == 429 || (500..<600).contains(code)) ? .transient : .fatal
-            case .transport:
-                return .transient
-            default:
-                return .fatal
-            }
+        case let classified as any AIKitRetryClassifyingError:
+            return classified.aiKitErrorCategory
         default:
             return .fatal
         }
     }
+}
+
+/// Optional provider integrations classify their typed errors without making
+/// the runtime depend on a concrete provider implementation.
+public protocol AIKitRetryClassifyingError: Error {
+    var aiKitErrorCategory: ErrorCategory { get }
 }

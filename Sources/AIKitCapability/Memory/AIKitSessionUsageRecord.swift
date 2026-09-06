@@ -32,6 +32,8 @@ public final class AIKitSessionUsageRecord {
     public var messageCount: Int = 0
     public var inputTokens: Int = 0
     public var outputTokens: Int = 0
+    public var cachedInputTokens: Int = 0
+    public var reasoningOutputTokens: Int = 0
     public var outcomeRawValue: String = AIKitSessionUsageOutcome.completed.rawValue
     public var recordedAt: Date = Date(timeIntervalSince1970: 0)
 
@@ -47,6 +49,8 @@ public final class AIKitSessionUsageRecord {
         messageCount: Int = 0,
         inputTokens: Int,
         outputTokens: Int,
+        cachedInputTokens: Int = 0,
+        reasoningOutputTokens: Int = 0,
         outcome: AIKitSessionUsageOutcome = .completed,
         recordedAt: Date = Date()
     ) {
@@ -61,6 +65,8 @@ public final class AIKitSessionUsageRecord {
         self.messageCount = max(0, messageCount)
         self.inputTokens = max(0, inputTokens)
         self.outputTokens = max(0, outputTokens)
+        self.cachedInputTokens = max(0, cachedInputTokens)
+        self.reasoningOutputTokens = max(0, reasoningOutputTokens)
         self.outcomeRawValue = outcome.rawValue
         self.recordedAt = recordedAt
     }
@@ -91,6 +97,8 @@ public final class AIKitSessionUsageRecord {
             messageCount: messageCount,
             inputTokens: usage.inputTokens,
             outputTokens: usage.outputTokens,
+            cachedInputTokens: usage.cachedInputTokens,
+            reasoningOutputTokens: usage.reasoningOutputTokens,
             outcome: outcome,
             recordedAt: recordedAt
         )
@@ -131,12 +139,16 @@ public final class AIKitSessionUsageRecord {
         get {
             TokenUsage(
                 inputTokens: max(0, inputTokens),
-                outputTokens: max(0, outputTokens)
+                outputTokens: max(0, outputTokens),
+                cachedInputTokens: max(0, cachedInputTokens),
+                reasoningOutputTokens: max(0, reasoningOutputTokens)
             )
         }
         set {
             inputTokens = max(0, newValue.inputTokens)
             outputTokens = max(0, newValue.outputTokens)
+            cachedInputTokens = max(0, newValue.cachedInputTokens)
+            reasoningOutputTokens = max(0, newValue.reasoningOutputTokens)
         }
     }
 

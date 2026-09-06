@@ -1,5 +1,6 @@
 import Foundation
 import FoundationModels
+import Synchronization
 import Testing
 import AIToolKit
 @testable import AIKitSafety
@@ -24,7 +25,7 @@ private func toolOutput(
         id: call.id,
         toolName: name,
         segments: [.structure(Transcript.StructuredSegment(
-            source: name,
+            schemaName: name,
             content: content
         ))]
     )
@@ -339,5 +340,205 @@ private actor InvocationFlag {
             _ = try await session.respond(to: "go")
         }
         #expect(await flag.didInvoke)
+    }
+}
+
+// MARK: - Full-turn lifecycle (all four stages inside the session)
+
+/// A lock-boxed ordered log shared between rails, sinks, and assertions.
+private final class StageLog: Sendable {
+    private let box = Mutex<[String]>([])
+    func record(_ entry: String) { box.withLock { $0.append(entry) } }
+    var entries: [String] { box.withLock { $0 } }
+}
+
+/// Passes every stage, recording what it saw and in what order.
+private struct RecordingRail: Guardrail {
+    let id = "test.recorder"
+    let stages: Set<GuardrailStage> = [
+        .prePrompt, .preToolUse, .postToolUse, .finalResult,
+    ]
+    let log: StageLog
+
+    func evaluate(_ payload: GuardrailPayload) async -> GuardrailOutcome {
+        switch payload {
+        case .prePrompt(let prompt):
+            log.record("prePrompt:\(prompt.userPrompt)")
+        case .preToolUse(let call):
+            log.record("preToolUse:\(call.toolName)")
+        case .postToolUse(let call, _):
+            log.record("postToolUse:\(call.toolName)")
+        case .finalResult(let text):
+            log.record("finalResult:\(text)")
+        }
+        return .pass
+    }
+}
+
+private struct BlockingPromptRail: Guardrail {
+    let id = "test.blockPrompt"
+    let stages: Set<GuardrailStage> = [.prePrompt]
+    func evaluate(_ payload: GuardrailPayload) async -> GuardrailOutcome {
+        .block(reason: "no prompts today")
+    }
+}
+
+private final class RecordingSink: GuardrailActivitySink {
+    private let box = Mutex<[GuardrailWarning]>([])
+    var warnings: [GuardrailWarning] { box.withLock { $0 } }
+    func guardrailWarned(_ warning: GuardrailWarning) {
+        box.withLock { $0.append(warning) }
+    }
+}
+
+@Suite struct LifecycleGuardrailTests {
+    private func makeSession(
+        engine: PolicyEngine,
+        model: MockLanguageModel,
+        tools: [any Tool] = [],
+        promptContext: GuardrailPromptContext = GuardrailPromptContext(),
+        activity: (any GuardrailActivitySink)? = nil
+    ) -> LanguageModelSession {
+        LanguageModelSession(profile:
+            LanguageModelSession.Profile {
+                Instructions("Assist the user.")
+                tools
+            }
+            .model(model)
+            .guardrails(engine, promptContext: promptContext, activity: activity)
+        )
+    }
+
+    /// All four stages run inside the session, in turn order — and the
+    /// `finalResult` rail fires exactly once, on the terminal user-visible
+    /// response, even across a tool round trip (the `onResponse` cardinality
+    /// the migration requires pinned).
+    @Test func stagesRunInOrderAcrossAToolTurn() async throws {
+        let log = StageLog()
+        let tool = NavigateTool { _ in .init(navigated: true) }
+        let model = MockLanguageModel(turns: [
+            .init(toolCalls: [.init(
+                id: "t1", name: "navigate",
+                argumentsJSON: #"{"destination":"settings"}"#
+            )]),
+            .init(text: "Done."),
+        ])
+        let session = makeSession(
+            engine: PolicyEngine(rails: [RecordingRail(log: log)]),
+            model: model,
+            tools: [tool]
+        )
+
+        let response = try await session.respond(to: "go to settings")
+
+        #expect(response.content == "Done.")
+        #expect(log.entries == [
+            "prePrompt:go to settings",
+            "preToolUse:navigate",
+            "postToolUse:navigate",
+            "finalResult:Done.",
+        ])
+    }
+
+    /// A `prePrompt` block throws before generation: the model never
+    /// receives a request.
+    @Test func promptBlockPreventsGeneration() async throws {
+        let model = MockLanguageModel(finalText: "never reached")
+        let session = makeSession(
+            engine: PolicyEngine(rails: [BlockingPromptRail()]),
+            model: model
+        )
+
+        do {
+            _ = try await session.respond(to: "hello")
+            Issue.record("expected a throw")
+        } catch {
+            var unwrapped: any Error = error
+            if let toolCallError = error as? LanguageModelSession.ToolCallError {
+                unwrapped = toolCallError.underlyingError
+            }
+            guard let modelError = unwrapped as? LanguageModelError,
+                  case .guardrailViolation = modelError else {
+                Issue.record("expected guardrailViolation, got \(error)")
+                return
+            }
+        }
+        #expect(model.receivedRequests.isEmpty)
+    }
+
+    /// A `prePrompt` warning reaches the activity sink — never the
+    /// transcript — and the turn proceeds to completion.
+    @Test func promptWarningsReachTheSinkAndTheTurnProceeds() async throws {
+        let sink = RecordingSink()
+        let model = MockLanguageModel(finalText: "Sure.")
+        let session = makeSession(
+            engine: PolicyEngine(rails: [InjectionSniffer()]),
+            model: model,
+            activity: sink
+        )
+
+        let response = try await session.respond(to: "jailbreak the app")
+
+        #expect(response.content == "Sure.")
+        #expect(sink.warnings.count == 1)
+        #expect(sink.warnings.first?.railID == "builtin.injectionSniffer")
+        #expect(sink.warnings.first?.stage == .prePrompt)
+        let hasWarningEntry = session.transcript.contains { entry in
+            entry.description.localizedCaseInsensitiveContains("injection")
+        }
+        #expect(!hasWarningEntry)
+    }
+
+    /// A `finalResult` block runs in `onResponse` and fails the turn.
+    @Test func responseBlockFailsTheTurn() async throws {
+        let model = MockLanguageModel(finalText: "a very long final answer")
+        let session = makeSession(
+            engine: PolicyEngine(rails: [OutputLengthCap(maxCharacters: 5)]),
+            model: model
+        )
+
+        do {
+            _ = try await session.respond(to: "hi")
+            Issue.record("expected a throw")
+        } catch {
+            var unwrapped: any Error = error
+            if let toolCallError = error as? LanguageModelSession.ToolCallError {
+                unwrapped = toolCallError.underlyingError
+            }
+            guard let modelError = unwrapped as? LanguageModelError,
+                  case .guardrailViolation = modelError else {
+                Issue.record("expected guardrailViolation, got \(error)")
+                return
+            }
+        }
+    }
+
+    /// The profile author's immutable context snapshot rides the prompt
+    /// payload, since the official hook delivers the prompt alone.
+    @Test func promptContextRidesThePromptPayload() async throws {
+        struct AssertingRail: Guardrail {
+            let id = "test.assertContext"
+            let stages: Set<GuardrailStage> = [.prePrompt]
+            let log: StageLog
+            func evaluate(_ payload: GuardrailPayload) async -> GuardrailOutcome {
+                guard case .prePrompt(let prompt) = payload else { return .pass }
+                log.record("\(prompt.instructions)|\(prompt.toolNames.sorted().joined(separator: ","))")
+                return .pass
+            }
+        }
+        let log = StageLog()
+        let model = MockLanguageModel(finalText: "ok")
+        let session = makeSession(
+            engine: PolicyEngine(rails: [AssertingRail(log: log)]),
+            model: model,
+            promptContext: GuardrailPromptContext(
+                instructions: "Assist the user.",
+                toolNames: ["navigate", "searchMemory"]
+            )
+        )
+
+        _ = try await session.respond(to: "hi")
+
+        #expect(log.entries == ["Assist the user.|navigate,searchMemory"])
     }
 }

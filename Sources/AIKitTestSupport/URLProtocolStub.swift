@@ -24,15 +24,22 @@ public final class URLProtocolStub: URLProtocol, @unchecked Sendable {
     }
 
     private struct Shared {
-        var stub: Stub?
+        var stubs: [Stub] = []
         var requests: [URLRequest] = []
     }
 
     private static let shared = Mutex(Shared())
 
     public static func setStub(_ stub: Stub?) {
+        setStubs(stub.map { [$0] } ?? [])
+    }
+
+    /// Queues stubs consumed in order, one per request; the final stub sticks
+    /// for any further requests. Lets a test script a multi-round session
+    /// turn (e.g. a tool-call round followed by the final answer).
+    public static func setStubs(_ stubs: [Stub]) {
         shared.withLock {
-            $0.stub = stub
+            $0.stubs = stubs
             $0.requests.removeAll()
         }
     }
@@ -48,6 +55,18 @@ public final class URLProtocolStub: URLProtocol, @unchecked Sendable {
         return URLSession(configuration: configuration)
     }
 
+    /// Registers the stub in the process-global `URLProtocol` registry, so
+    /// transports built on `URLSession.shared` — the provider executors'
+    /// default — resolve to it. Pair with `unregisterGlobally()`; tests using
+    /// this must be serialized, like everything else touching the stub.
+    public static func registerGlobally() {
+        URLProtocol.registerClass(URLProtocolStub.self)
+    }
+
+    public static func unregisterGlobally() {
+        URLProtocol.unregisterClass(URLProtocolStub.self)
+    }
+
     public override class func canInit(with request: URLRequest) -> Bool { true }
 
     public override class func canonicalRequest(for request: URLRequest) -> URLRequest {
@@ -57,7 +76,8 @@ public final class URLProtocolStub: URLProtocol, @unchecked Sendable {
     public override func startLoading() {
         let stub = Self.shared.withLock {
             $0.requests.append(request)
-            return $0.stub
+            // Consume the queue front, keeping the final stub sticky.
+            return $0.stubs.count > 1 ? $0.stubs.removeFirst() : $0.stubs.first
         }
 
         guard let stub, let url = request.url else {

@@ -1,3 +1,4 @@
+import AIKitProviders
 import Foundation
 import FoundationModels
 import Testing
@@ -10,7 +11,7 @@ import AIKitSafety
 import AIKitTestSupport
 
 private func mockModel(_ model: MockLanguageModel) -> OrchestratorModel {
-    OrchestratorModel(model: model, modelID: "mock-model", providerName: "Mock")
+    OrchestratorModel(testing: model, modelID: "mock-model", providerName: "Mock")
 }
 
 @Suite struct PromptRendererTests {
@@ -128,6 +129,8 @@ private func mockModel(_ model: MockLanguageModel) -> OrchestratorModel {
     }
 }
 
+// Pins legacy `Orchestrator` behavior through the deprecation window,
+// constructing through the internal `testing:` seam.
 @Suite struct OrchestratorTests {
     private func makeOrchestrator(
         model: MockLanguageModel,
@@ -146,7 +149,7 @@ private func mockModel(_ model: MockLanguageModel) -> OrchestratorModel {
             toolNames: ["navigate"]
         ))
         return Orchestrator(
-            model: mockModel(model),
+            testing: mockModel(model),
             tools: tools,
             memory: InMemoryMemoryStore(),
             contextResolver: resolver,
@@ -233,10 +236,12 @@ private func mockModel(_ model: MockLanguageModel) -> OrchestratorModel {
         let orchestrator = await makeOrchestrator(model: MockLanguageModel(turns: []))
 
         await confirmation("onCancel invoked") { cancelled in
-            _ = await orchestrator.beginExternalWork(statusText: "Creating Entry…") {
+            let id = await orchestrator.beginExternalWork(statusText: "Creating Entry…") {
                 cancelled()
             }
             await orchestrator.cancelActiveTurns()
+            #expect(await currentActivity(of: orchestrator).isBusy)
+            await orchestrator.endExternalWork(id)
         }
         let activity = await currentActivity(of: orchestrator)
         #expect(!activity.isBusy)
@@ -328,13 +333,37 @@ private func mockModel(_ model: MockLanguageModel) -> OrchestratorModel {
         #expect(summary.taskID.hasPrefix("turn-"))
         #expect(summary.modelName == "mock-model")
         #expect(summary.providerName == "Mock")
-        // One session call carries the whole turn (the tool rounds happen
-        // inside it), so the turn counts one round trip.
-        #expect(summary.roundTripCount == 1)
-        #expect(summary.messageCount == 2)
+        // Count model rounds, including the tool request and final answer.
+        #expect(summary.roundTripCount == 2)
+        // Four transcript messages: the user instruction, the tool call, its
+        // result, and the final response — the tool round trip counts, not
+        // just the prompt/answer pair.
+        #expect(summary.messageCount == 4)
         // Both rounds' usage, not just the final model call's.
         #expect(summary.usage == TokenUsage(inputTokens: 115, outputTokens: 19))
         #expect(summary.outcome == .completed)
+    }
+
+    @Test func rejectedLegacyStreamEmitsNoTextAndCountsUsageOnce() async throws {
+        let model = MockLanguageModel(turns: [.init(text: "blocked response", inputTokens: 7, outputTokens: 3)])
+        let usageStore = InMemorySessionUsageStore()
+        let orchestrator = await makeOrchestrator(model: model,
+            guardrails: PolicyEngine(rails: [OutputLengthCap(maxCharacters: 1)]),
+            usageRecorder: usageStore, options: .init(stream: true))
+        var usageEvents: [TokenUsage] = []
+        for try await event in await orchestrator.run("go") {
+            switch event {
+            case .llmDelta, .reasoningDelta, .finalAnswer: Issue.record("Rejected text escaped")
+            case .usage(let usage): usageEvents.append(usage)
+            default: break
+            }
+        }
+        let expected = TokenUsage(inputTokens: 7, outputTokens: 3)
+        #expect(usageEvents == [expected])
+        let summary = try #require(await usageStore.all().first)
+        #expect(summary.usage == expected)
+        #expect(summary.roundTripCount == 1)
+        #expect(summary.outcome == .failed)
     }
 
     private struct ScriptedProviderFailure: Error {}
@@ -383,7 +412,7 @@ private func mockModel(_ model: MockLanguageModel) -> OrchestratorModel {
         ))
         let usageStore = InMemorySessionUsageStore()
         let orchestrator = Orchestrator(
-            model: mockModel(model),
+            testing: mockModel(model),
             tools: [HangingTool(delay: .seconds(5))],
             memory: InMemoryMemoryStore(),
             contextResolver: resolver,
@@ -433,7 +462,7 @@ private func mockModel(_ model: MockLanguageModel) -> OrchestratorModel {
             .init(text: "Corrected."),
         ])
         let orchestrator = Orchestrator(
-            model: mockModel(model),
+            testing: mockModel(model),
             tools: tools,
             memory: InMemoryMemoryStore(),
             contextResolver: resolver,
@@ -476,7 +505,7 @@ private func mockModel(_ model: MockLanguageModel) -> OrchestratorModel {
             .init(text: "Recovered."),
         ])
         let orchestrator = Orchestrator(
-            model: mockModel(model),
+            testing: mockModel(model),
             tools: tools,
             memory: InMemoryMemoryStore(),
             contextResolver: resolver,
@@ -520,7 +549,7 @@ private func mockModel(_ model: MockLanguageModel) -> OrchestratorModel {
             )]),
         ])
         let orchestrator = Orchestrator(
-            model: mockModel(model),
+            testing: mockModel(model),
             tools: tools,
             memory: InMemoryMemoryStore(),
             contextResolver: resolver,
@@ -552,7 +581,7 @@ private func mockModel(_ model: MockLanguageModel) -> OrchestratorModel {
             .init(text: "never reached"),
         ])
         let orchestrator = Orchestrator(
-            model: mockModel(model),
+            testing: mockModel(model),
             tools: tools,
             memory: InMemoryMemoryStore(),
             contextResolver: resolver,
@@ -578,7 +607,7 @@ private func mockModel(_ model: MockLanguageModel) -> OrchestratorModel {
         let resolver = ContextResolver()
         await resolver.push(ViewContext(id: .init("v"), displayName: "V"))
         let orchestrator = Orchestrator(
-            model: mockModel(MockLanguageModel(finalText: "hello stream")),
+            testing: mockModel(MockLanguageModel(finalText: "hello stream")),
             tools: [],
             memory: InMemoryMemoryStore(),
             contextResolver: resolver,
@@ -605,7 +634,7 @@ private func mockModel(_ model: MockLanguageModel) -> OrchestratorModel {
         let resolver = ContextResolver()
         await resolver.push(ViewContext(id: .init("v"), displayName: "V"))
         let orchestrator = Orchestrator(
-            model: mockModel(model),
+            testing: mockModel(model),
             tools: [],
             memory: InMemoryMemoryStore(),
             contextResolver: resolver,
@@ -642,7 +671,7 @@ private func mockModel(_ model: MockLanguageModel) -> OrchestratorModel {
             )]),
         ])
         let orchestrator = Orchestrator(
-            model: mockModel(model),
+            testing: mockModel(model),
             tools: tools,
             memory: InMemoryMemoryStore(),
             contextResolver: resolver,
@@ -667,7 +696,7 @@ private func mockModel(_ model: MockLanguageModel) -> OrchestratorModel {
         let resolver = ContextResolver()
         await resolver.push(ViewContext(id: .init("v"), displayName: "V"))
         let orchestrator = Orchestrator(
-            model: mockModel(MockLanguageModel(turns: [
+            testing: mockModel(MockLanguageModel(turns: [
                 .init(text: "answer", reasoning: "let me think"),
             ])),
             tools: [],
@@ -701,7 +730,7 @@ private func mockModel(_ model: MockLanguageModel) -> OrchestratorModel {
             id: .init("v"), displayName: "V", toolNames: toolNames
         ))
         return Orchestrator(
-            model: mockModel(model),
+            testing: mockModel(model),
             tools: tools,
             memory: InMemoryMemoryStore(),
             contextResolver: resolver,

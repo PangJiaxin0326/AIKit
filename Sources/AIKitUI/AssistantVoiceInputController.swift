@@ -5,47 +5,47 @@ import MultiModalKit
 @MainActor
 @Observable
 final class AssistantVoiceInputController {
-    @ObservationIgnored private let recorder = AudioRecorder()
+    @ObservationIgnored private let recorder: any AIKitAudioRecording
     @ObservationIgnored private var voiceTask: Task<Void, Never>?
     @ObservationIgnored private var meteringTask: Task<Void, Never>?
 
     var isRecording = false
+    var isStarting = false
     var isVoiceTranscribing = false
     var voiceError: String?
     var voiceLevel: Double = 0
 
+    init(recorder: any AIKitAudioRecording = AIKitAudioRecorder()) {
+        self.recorder = recorder
+    }
+
     func startRecording() {
-        guard !isRecording, !isVoiceTranscribing else { return }
+        guard voiceTask == nil, !isRecording, !isVoiceTranscribing else { return }
         voiceError = nil
+        isStarting = true
         voiceLevel = 0
-        voiceTask?.cancel()
         voiceTask = Task { @MainActor in
+            defer { isStarting = false; voiceTask = nil }
             do {
-                try await PermissionCenter.require(.speechRecognition)
+                try await recorder.start()
                 try Task.checkCancellation()
-                _ = try await recorder.startRecordingWithPermission(
-                    configuration: AudioRecordingConfiguration(format: .wav)
-                )
                 isRecording = recorder.isRecording
                 startMetering()
-                voiceTask = nil
             } catch is CancellationError {
-                recorder.cancelRecording()
+                recorder.cancel()
                 isRecording = false
-                voiceTask = nil
                 stopMetering()
             } catch {
                 voiceError = error.localizedDescription
-                recorder.cancelRecording()
+                recorder.cancel()
                 isRecording = false
-                voiceTask = nil
                 stopMetering()
             }
         }
     }
 
     func finishRecording(onText: @escaping @MainActor (String) -> Void) {
-        guard let url = recorder.stopRecording() else {
+        guard let url = recorder.stop() else {
             cancel()
             return
         }
@@ -56,12 +56,12 @@ final class AssistantVoiceInputController {
 
     func cancel() {
         voiceTask?.cancel()
-        voiceTask = nil
+        // The task retains ownership until permission/transcription cleanup.
         if recorder.isRecording {
-            recorder.cancelRecording()
+            recorder.cancel()
         }
         isRecording = false
-        isVoiceTranscribing = false
+        if voiceTask == nil { isVoiceTranscribing = false }
         stopMetering()
     }
 
@@ -79,7 +79,6 @@ final class AssistantVoiceInputController {
         voiceTask = Task { @MainActor [url] in
             defer {
                 isVoiceTranscribing = false
-                voiceTask = nil
                 try? FileManager.default.removeItem(at: url)
             }
 
@@ -96,7 +95,7 @@ final class AssistantVoiceInputController {
                 }
                 onText(text)
             } catch is CancellationError {
-                recorder.cancelRecording()
+                recorder.cancel()
             } catch {
                 voiceError = error.localizedDescription
             }

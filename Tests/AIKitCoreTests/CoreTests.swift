@@ -1,6 +1,10 @@
+import AIKitProviders
 import CoreGraphics
+import ImageIO
+import UniformTypeIdentifiers
 import Foundation
 import FoundationModels
+import Synchronization
 import Testing
 import AIToolKit
 import VolcengineArkFoundationModels
@@ -30,7 +34,7 @@ import AIKitTestSupport
             "name": .string("navigate"),
             "count": .number(3),
             "flag": .bool(true),
-            "nested": .array([.string("a"), .null]),
+            "nested": .array([.string("a"), .nullContent]),
         ])
         let decoded = try GeneratedContent(data: value.data())
         let object = try #require(decoded.objectValue)
@@ -190,36 +194,36 @@ import AIKitTestSupport
     }
 
     @Test func savedKeyRoundTrips() throws {
-        let defaults = try makeDefaults()
+        let storage = AIKitInMemoryCredentialStorage()
         var store = AIKitProviderCredentialStore()
         store.setAPIKey("sk-ark-123", for: .ark)
-        store.save(defaults: defaults)
+        try store.save(storage: storage)
 
-        let loaded = AIKitProviderCredentialStore.load(defaults: defaults)
+        let loaded = try AIKitProviderCredentialStore.load(storage: storage, migrating: nil)
         #expect(loaded.apiKey(for: .ark) == "sk-ark-123")
     }
 
     @Test func clearedKeyStaysCleared() throws {
-        let defaults = try makeDefaults()
+        let storage = AIKitInMemoryCredentialStorage()
         var store = AIKitProviderCredentialStore()
         store.setAPIKey("sk-ark", for: .ark)
-        store.save(defaults: defaults)
+        try store.save(storage: storage)
 
         store.setAPIKey("", for: .ark)
-        store.save(defaults: defaults)
+        try store.save(storage: storage)
         #expect(
-            AIKitProviderCredentialStore.load(defaults: defaults)
+            try AIKitProviderCredentialStore.load(storage: storage, migrating: nil)
                 .apiKey(for: .ark).isEmpty
         )
     }
 
     @Test func credentialFreeProvidersStoreNothing() throws {
-        let defaults = try makeDefaults()
+        let storage = AIKitInMemoryCredentialStorage()
         var store = AIKitProviderCredentialStore()
         store.setAPIKey("ignored", for: .appleIntelligence)
-        store.save(defaults: defaults)
+        try store.save(storage: storage)
 
-        let loaded = AIKitProviderCredentialStore.load(defaults: defaults)
+        let loaded = try AIKitProviderCredentialStore.load(storage: storage, migrating: nil)
         #expect(loaded.apiKey(for: .appleIntelligence).isEmpty)
     }
 }
@@ -386,109 +390,88 @@ private struct EchoTool: Tool {
         }
     }
 
-    // MARK: Ark wire mapping through the official executor
+    // MARK: Ark wire mapping through the official session
     //
-    // Drives `VolcengineArkLanguageModelExecutor` exactly the way a
-    // `LanguageModelSession` does — an official generation request streamed
-    // into the official channel — against the URLProtocol stub.
+    // Drives the provider exactly the way production does — a public
+    // `LanguageModelSession` over `VolcengineArkLanguageModel` — against the
+    // URLProtocol stub, registered process-globally so the executor's default
+    // transport resolves to it. Assertions read only public surfaces: the
+    // response content, the official transcript, and usage. The generation
+    // channel's event representation is the framework's private business.
 
-    private struct DrainedEvents {
+    private struct SessionOutcome {
         var text = ""
         var reasoning = ""
-        var toolCalls: [(id: String, name: String, arguments: String)] = []
+        var toolCalls: [(name: String, arguments: GeneratedContent)] = []
         var finishReason: String?
         var inputTokens = 0
         var outputTokens = 0
     }
 
-    private static let endEntryID = "aikit.core-tests.end"
-
     private func respond(
         model: VolcengineArkLanguageModel,
-        transcript: Transcript = Transcript(entries: [
-            .prompt(Transcript.Prompt(segments: [
-                .text(Transcript.TextSegment(content: "hi")),
-            ])),
-        ]),
-        tools: [Transcript.ToolDefinition] = [],
-        schema: GenerationSchema? = nil
-    ) async throws -> DrainedEvents {
-        let executor = try VolcengineArkLanguageModelExecutor(
-            configuration: model.configuration,
-            session: URLProtocolStub.makeSession()
+        prompt: Prompt = Prompt("hi"),
+        tools: [any Tool] = [],
+        schema: GenerationSchema? = nil,
+        history: [Transcript.Entry] = []
+    ) async throws -> SessionOutcome {
+        URLProtocolStub.registerGlobally()
+        defer { URLProtocolStub.unregisterGlobally() }
+        let session = LanguageModelSession(
+            model: model, tools: tools, transcript: Transcript(entries: history)
         )
-        let request = LanguageModelExecutorGenerationRequest(
-            id: UUID(),
-            transcript: transcript,
-            enabledTools: tools,
-            schema: schema,
-            generationOptions: GenerationOptions(),
-            contextOptions: ContextOptions(),
-            metadata: [:]
-        )
-        let channel = LanguageModelExecutorGenerationChannel()
-        var drained = DrainedEvents()
-        var toolIndexesByID: [String: Int] = [:]
 
-        try await withThrowingTaskGroup(of: Void.self) { group in
-            group.addTask {
-                // The official channel has no finish event; the sentinel ends
-                // the drain loop whether respond returns or throws.
-                do {
-                    try await executor.respond(
-                        to: request, model: model, streamingInto: channel
-                    )
-                } catch {
-                    await channel.send(.response(
-                        entryID: Self.endEntryID, action: .updateMetadata([:])
-                    ))
-                    throw error
-                }
-                await channel.send(.response(
-                    entryID: Self.endEntryID, action: .updateMetadata([:])
-                ))
-            }
-
-            for try await event in channel {
-                if let response = event as? LanguageModelExecutorGenerationChannel.Response {
-                    if response.entryID == Self.endEntryID { break }
-                    switch response.action {
-                    case .appendText(let fragment):
-                        drained.text += fragment.content
-                    case .updateMetadata(let metadata):
-                        if let reason = metadata.values["finishReason"] as? String {
-                            drained.finishReason = reason
-                        }
-                    case .updateUsage(let usage):
-                        drained.inputTokens = usage.input.totalTokenCount
-                        drained.outputTokens = usage.output.totalTokenCount
-                    default:
-                        continue
-                    }
-                } else if let reasoning = event as? LanguageModelExecutorGenerationChannel.Reasoning {
-                    if case .appendText(let fragment) = reasoning.action {
-                        drained.reasoning += fragment.content
-                    }
-                } else if let toolCalls = event as? LanguageModelExecutorGenerationChannel.ToolCalls {
-                    if case .toolCall(let call) = toolCalls.action {
-                        if toolIndexesByID[call.id] == nil {
-                            toolIndexesByID[call.id] = drained.toolCalls.count
-                            drained.toolCalls.append((id: call.id, name: call.name, arguments: ""))
-                        }
-                        if case .appendArguments(let fragment) = call.action,
-                           let index = toolIndexesByID[call.id] {
-                            drained.toolCalls[index].arguments += fragment.content
-                        }
-                    }
-                }
-            }
-            try await group.next()
+        var outcome = SessionOutcome()
+        let usage: LanguageModelSession.Usage
+        if let schema {
+            usage = try await session.respond(to: prompt, schema: schema).usage
+        } else {
+            let response = try await session.respond(to: prompt)
+            outcome.text = response.content
+            usage = response.usage
         }
-        return drained
+        outcome.inputTokens = usage.input.totalTokenCount
+        outcome.outputTokens = usage.output.totalTokenCount
+
+        // The session's transcript carries every entry of the turn — all
+        // rounds included, which a final response's `transcriptEntries`
+        // slice is not guaranteed to.
+        for entry in session.transcript {
+            switch entry {
+            case .reasoning(let reasoning):
+                outcome.reasoning += reasoning.segments.compactMap { segment in
+                    guard case .text(let text) = segment else { return nil }
+                    return text.content
+                }.joined()
+            case .toolCalls(let calls):
+                for call in calls {
+                    outcome.toolCalls.append(
+                        (name: call.toolName, arguments: call.arguments)
+                    )
+                }
+            case .response(let response):
+                if let reason = try? response.metadata["finishReason"]?.value(String.self) {
+                    outcome.finishReason = reason
+                }
+            default:
+                break
+            }
+        }
+        return outcome
     }
 
+
+    /// Declares the full capability set: the session gates guided generation
+    /// and image input on the model's declared capabilities before anything
+    /// reaches the wire, and these tests exercise exactly those wire paths.
     private func makeModel() -> VolcengineArkLanguageModel {
-        VolcengineArkLanguageModel(apiKey: "test-key", model: "ep-test")
+        VolcengineArkLanguageModel(
+            apiKey: "test-key",
+            model: "ep-test",
+            capabilities: LanguageModelCapabilities(
+                [.toolCalling, .reasoning, .guidedGeneration, .vision]
+            )
+        )
     }
 
     @Test func streamsTextFinishReasonAndUsage() async throws {
@@ -512,7 +495,7 @@ private struct EchoTool: Tool {
     }
 
     @Test func streamsToolCallArgumentOnlyDeltas() async throws {
-        let sse = """
+        let toolCallSSE = """
         data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"navigate","arguments":"{"}}]},"finish_reason":null}]}
 
         data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\\"destination\\""}}]},"finish_reason":null}]}
@@ -521,14 +504,27 @@ private struct EchoTool: Tool {
 
         data: [DONE]
         """.data(using: .utf8)!
-        URLProtocolStub.setStub(.init(body: sse))
+        let finalSSE = """
+        data: {"choices":[{"delta":{"content":"done"},"finish_reason":"stop"}]}
 
-        let drained = try await respond(model: makeModel())
+        data: [DONE]
+        """.data(using: .utf8)!
+        URLProtocolStub.setStubs([.init(body: toolCallSSE), .init(body: finalSSE)])
+        let destinations = Mutex<[String]>([])
+        let tool = StubNavigateTool { destination in
+            destinations.withLock { $0.append(destination) }
+        }
 
-        #expect(drained.toolCalls.map(\.id) == ["call_1"])
-        #expect(drained.toolCalls.map(\.name) == ["navigate"])
-        #expect(drained.toolCalls.first?.arguments == "{\"destination\":\"settings\"}")
-        #expect(drained.finishReason == "tool_calls")
+        let outcome = try await respond(model: makeModel(), tools: [tool])
+
+        // The argument-only deltas assembled into one decodable object and
+        // the session executed the tool with it — the full native loop.
+        #expect(destinations.withLock { $0 } == ["settings"])
+        #expect(outcome.toolCalls.map(\.name) == ["navigate"])
+        let arguments = try #require(outcome.toolCalls.first?.arguments.objectValue)
+        #expect(arguments["destination"]?.stringValue == "settings")
+        #expect(outcome.text == "done")
+        #expect(outcome.finishReason == "stop")
     }
 
     @Test func streamsReasoningSeparately() async throws {
@@ -639,17 +635,32 @@ private struct EchoTool: Tool {
         data: [DONE]
         """.data(using: .utf8)!
         URLProtocolStub.setStub(.init(body: sse))
-        let imageURL = try #require(URL(string: "data:image/png;base64,qrs="))
-        let transcript = Transcript(entries: [
+        let imageURL = FileManager.default.temporaryDirectory.appendingPathComponent("aikit-image-\(UUID()).png")
+        defer { try? FileManager.default.removeItem(at: imageURL) }
+        let colorSpace = try #require(CGColorSpace(name: CGColorSpace.sRGB))
+        let context = try #require(CGContext(data: nil, width: 1, height: 1,
+            bitsPerComponent: 8, bytesPerRow: 0, space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+        let pixels = try #require(context.makeImage())
+        let destination = try #require(CGImageDestinationCreateWithURL(imageURL as CFURL,
+            UTType.png.identifier as CFString, 1, nil))
+        CGImageDestinationAddImage(destination, pixels, nil)
+        #expect(CGImageDestinationFinalize(destination))
+        // The framework loads even historical attachments. Use a valid local
+        // image so this test never relies on network or data-URL loading.
+        let history: [Transcript.Entry] = [
             .prompt(Transcript.Prompt(segments: [
                 .text(Transcript.TextSegment(content: "What is shown?")),
                 .attachment(Transcript.AttachmentSegment(
                     content: .image(Transcript.ImageAttachment(imageURL: imageURL))
                 )),
             ])),
-        ])
+            .response(Transcript.Response(assetIDs: [], segments: [
+                .text(Transcript.TextSegment(content: "A test image.")),
+            ])),
+        ]
 
-        _ = try await respond(model: makeModel(), transcript: transcript)
+        _ = try await respond(model: makeModel(), history: history)
 
         let sent = try recordedRequestJSON()
         let messages = try #require(sent["messages"]?.arrayValue)
@@ -657,7 +668,7 @@ private struct EchoTool: Tool {
         let parts = try #require(message["content"]?.arrayValue)
         let image = try #require(parts[1].objectValue?["image_url"]?.objectValue)
         #expect(parts[1].objectValue?["type"]?.stringValue == "image_url")
-        #expect(image["url"]?.stringValue == "data:image/png;base64,qrs=")
+        #expect(image["url"]?.stringValue?.hasPrefix("data:image/jpeg;base64,") == true)
     }
 
     @Test func inlinesInMemoryImageAttachmentsAsBase64() async throws {
@@ -678,16 +689,12 @@ private struct EchoTool: Tool {
             bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
         ))
         let cgImage = try #require(context.makeImage())
-        let transcript = Transcript(entries: [
-            .prompt(Transcript.Prompt(segments: [
-                .text(Transcript.TextSegment(content: "What is shown?")),
-                .attachment(Transcript.AttachmentSegment(
-                    content: .image(Transcript.ImageAttachment(cgImage))
-                )),
-            ])),
-        ])
+        let prompt = Prompt {
+            "What is shown?"
+            Attachment(cgImage)
+        }
 
-        _ = try await respond(model: makeModel(), transcript: transcript)
+        _ = try await respond(model: makeModel(), prompt: prompt)
 
         let sent = try recordedRequestJSON()
         let messages = try #require(sent["messages"]?.arrayValue)
@@ -698,6 +705,30 @@ private struct EchoTool: Tool {
         let url = try #require(image["url"]?.stringValue)
         #expect(url.hasPrefix("data:image/jpeg;base64,"))
         #expect(url.count > "data:image/jpeg;base64,".count)
+    }
+}
+
+/// Records the destinations the model navigated to, so the tool-call tests
+/// can assert the assembled argument deltas decoded correctly.
+private struct StubNavigateTool: Tool {
+    @Generable
+    struct Arguments {
+        let destination: String
+    }
+
+    @Generable
+    struct Output {
+        let navigated: Bool
+    }
+
+    var name: String { "navigate" }
+    var description: String { "Navigate to a destination in the app." }
+
+    let record: @Sendable (String) -> Void
+
+    func call(arguments: Arguments) async throws -> Output {
+        record(arguments.destination)
+        return Output(navigated: true)
     }
 }
 
@@ -725,4 +756,39 @@ private func recordedBodyData(from request: URLRequest) throws -> Data {
         data.append(buffer, count: count)
     }
     return data
+}
+
+@Suite struct CredentialMigrationTests {
+    private struct UnavailableStorage: AIKitCredentialStorage {
+        func read() -> Data? { nil }
+        func write(_ data: Data) throws { throw AIKitCredentialError.keychainStatus(-1) }
+    }
+
+    @Test func preferencesRemovedOnlyAfterSecureWrite() throws {
+        let name = "AIKitMigration-\(UUID())"
+        let defaults = try #require(UserDefaults(suiteName: name))
+        defer { defaults.removePersistentDomain(forName: name) }
+        let old = try JSONEncoder().encode(["Ark": "test-key"])
+        defaults.set(old, forKey: "AIKitProviderAPIKeys")
+        #expect(throws: AIKitCredentialError.self) {
+            try AIKitProviderCredentialStore.load(storage: UnavailableStorage(), migrating: defaults)
+        }
+        #expect(defaults.data(forKey: "AIKitProviderAPIKeys") == old)
+        let storage = AIKitInMemoryCredentialStorage()
+        let migrated = try AIKitProviderCredentialStore.load(storage: storage, migrating: defaults)
+        #expect(migrated.apiKey(for: .ark) == "test-key")
+        #expect(defaults.object(forKey: "AIKitProviderAPIKeys") == nil)
+        #expect(try AIKitProviderCredentialStore.load(storage: storage, migrating: nil) == migrated)
+    }
+
+    @Test func existingSecureCredentialWinsMigration() throws {
+        let name = "AIKitMigration-\(UUID())"
+        let defaults = try #require(UserDefaults(suiteName: name))
+        defer { defaults.removePersistentDomain(forName: name) }
+        defaults.set(try JSONEncoder().encode(["Ark": "stale-key"]), forKey: "AIKitProviderAPIKeys")
+        let storage = AIKitInMemoryCredentialStorage()
+        try AIKitProviderCredentialStore(apiKeys: [.ark: "current-key"]).save(storage: storage)
+        let migrated = try AIKitProviderCredentialStore.load(storage: storage, migrating: defaults)
+        #expect(migrated.apiKey(for: .ark) == "current-key")
+    }
 }

@@ -7,6 +7,11 @@ import AIKitCapability
 import AIKitSafety
 
 /// Events streamed to the host for one turn.
+///
+/// Deprecated with `Orchestrator` (removal follows the deprecation
+/// window): text rides `ResponseStream.Snapshot.content`, tool calls and
+/// outputs ride profile lifecycle hooks and `Transcript.Entry` values,
+/// warnings ride `GuardrailActivitySink`, and refusals throw `TurnRefusal`.
 public enum OrchestratorEvent: Sendable {
     case promptBuilt(RenderedPrompt)
     case llmDelta(String)
@@ -248,14 +253,12 @@ private struct OrchestratorTaskRecord: Sendable {
     }
 
     func messageCount(outcome: AIKitSessionUsageOutcome) -> Int {
-        let activityMessageCount = activities.reduce(into: 0) { count, event in
-            switch event.kind {
-            case .userInstruction, .llmResponse, .error:
-                count += 1
-            case .toolInvoked, .toolResult:
-                break
-            }
-        }
+        // Every recorded activity is one transcript message: the user
+        // instruction, each tool call and each tool result, and the final
+        // model response (or error). The tool messages are what make a
+        // multi-round-trip turn read as more than the 2 of a plain chat turn,
+        // so they count too — excluding them pinned every tool-using turn at 2.
+        let activityMessageCount = activities.count
         let hasUserInstruction = activities.contains { $0.kind == .userInstruction }
         let hasTerminalAssistantMessage = activities.contains {
             $0.kind == .llmResponse || $0.kind == .error
@@ -294,12 +297,16 @@ private struct OrchestratorTaskRecord: Sendable {
 /// The model a turn runs on — any official `LanguageModel` conformance —
 /// plus the labels usage records carry. Built from an `AIKitLanguageModel`
 /// (the shipped models) or from any other conformance.
+///
+/// Deprecated with `Orchestrator`: the model belongs on the profile
+/// (`.model(_:)`) and the labels on `AIKitConversation.UsageLabels`.
 public struct OrchestratorModel: Sendable {
     public let modelID: String
     public let providerName: String?
     let model: any LanguageModel
 
     /// Any official `LanguageModel`.
+    @available(*, deprecated, message: "Apply the model to the profile with `.model(_:)`; usage-record labels move to AIKitConversation.UsageLabels.")
     public init(
         model: some LanguageModel,
         modelID: String,
@@ -310,18 +317,31 @@ public struct OrchestratorModel: Sendable {
         self.model = model
     }
 
-    /// One of AIKit's shipped models.
-    public init(_ model: AIKitLanguageModel) {
-        self.init(
-            model: model.base,
-            modelID: model.modelID,
-            providerName: model.providerKind.definition.displayName
-        )
+    /// The non-deprecated seam the pinned legacy-behavior tests construct
+    /// through while the public initializers carry deprecation warnings.
+    internal init(
+        testing model: any LanguageModel,
+        modelID: String,
+        providerName: String? = nil
+    ) {
+        self.modelID = modelID
+        self.providerName = providerName
+        self.model = model
     }
+
+
 }
 
 /// The single entry point a host app calls once per user instruction. An actor
 /// so concurrent `run` calls on one instance serialize cleanly.
+///
+/// **Deprecated.** The model pipeline belongs to the official session: build
+/// a `DynamicProfile` (model, generation options, `.guardrails(_:)`,
+/// `.refusalEscapeHatch()`) and drive it with `LanguageModelSession(profile:)`
+/// — or `AIKitConversation` when retry/deadline/usage policies are needed.
+/// The initializers carry the deprecation; the README's migration table maps
+/// every member to its replacement. This type is removed after the
+/// deprecation window.
 ///
 /// Each turn runs in one official `LanguageModelSession`, built as a
 /// `DynamicProfile` over the configured model: the session executes tools
@@ -335,19 +355,16 @@ public actor Orchestrator {
     public struct Options: Sendable {
         public var stream: Bool
         public var retry: RetryPolicy
-        /// An overall wall-clock budget for the whole turn (all session
-        /// rounds and retries combined). `nil` (default) is unbounded. The
-        /// budget races every blocking await in the turn — the session call
-        /// (which contains the tool rounds) and the guardrail passes — so a
-        /// hung tool or a slow rail can't overrun it; it is a hard wall-clock
-        /// cap, not just a between-attempts check.
+        /// Cooperative execution budget for generation, guardrails and retry
+        /// backoff. Swift waits for tool cleanup after requesting cancellation;
+        /// a noncooperative tool can delay settlement beyond this budget.
         public var maxTurnDuration: TimeInterval?
         public var temperature: Double?
         public var maxTokens: Int?
 
         public init(
             stream: Bool = true,
-            retry: RetryPolicy = .default,
+            retry: RetryPolicy = .never,
             maxTurnDuration: TimeInterval? = nil,
             temperature: Double? = 0.2,
             maxTokens: Int? = nil
@@ -484,19 +501,25 @@ public actor Orchestrator {
         guard var record = taskRecords[turn] else { return }
         record.usage = TokenUsage(
             inputTokens: record.usage.inputTokens + usage.inputTokens,
-            outputTokens: record.usage.outputTokens + usage.outputTokens
+            outputTokens: record.usage.outputTokens + usage.outputTokens,
+            cachedInputTokens: record.usage.cachedInputTokens + usage.cachedInputTokens,
+            reasoningOutputTokens: record.usage.reasoningOutputTokens + usage.reasoningOutputTokens
         )
-        record.roundTripCount += 1
         taskRecords[turn] = record
         broadcast()
     }
 
+    fileprivate func recordModelRound(turn: Int) {
+        guard var record = taskRecords[turn] else { return }
+        record.roundTripCount += 1
+        taskRecords[turn] = record
+    }
+
     private func persistUsage(_ summary: AIKitSessionUsageSummary?) async {
         guard let summary, let usageRecorder else { return }
-        do {
-            try await usageRecorder.record(summary)
-        } catch {
-            logger.error("Failed to persist AIKit session usage")
+        await withTaskCancellationShield {
+            do { try await usageRecorder.record(summary) }
+            catch { logger.error("Failed to persist AIKit session usage") }
         }
     }
 
@@ -557,26 +580,17 @@ public actor Orchestrator {
     }
 
     /// Cancels every in-flight turn — and any registered external work, via
-    /// its cancel callback — and clears any sticky failure, returning the
-    /// orchestrator to idle. Safe to call from UI (e.g. a Cancel button).
+    /// its cancel callback — and clears any sticky failure. Activity remains
+    /// busy until each owner settles. Safe to call from UI.
     public func cancelActiveTurns() async {
         for task in turnTasks.values { task.cancel() }
         let externalCancels = externalWorkCancelHandlers.values
         externalWorkCancelHandlers.removeAll()
         for cancel in externalCancels { cancel() }
-        var summaries: [AIKitSessionUsageSummary] = []
-        for turn in turnTasks.keys {
-            if let summary = finishTask(turn, outcome: .cancelled) {
-                summaries.append(summary)
-            }
-        }
-        turnTasks.removeAll()
-        turnPhases.removeAll()
+        // Owners finalize usage and end their activity only after cancellation
+        // settles. External owners must pair beginExternalWork with end.
         lastFailureReason = nil
         broadcast()
-        for summary in summaries {
-            await persistUsage(summary)
-        }
     }
 
     /// A live stream of this orchestrator's activity: the current state is
@@ -585,7 +599,7 @@ public actor Orchestrator {
     /// floating assistant button reflects turns started anywhere — including
     /// overlapping ones — not just its own session's.
     public nonisolated func activityUpdates() -> AsyncStream<OrchestratorActivity> {
-        AsyncStream { continuation in
+        AsyncStream(bufferingPolicy: .bufferingNewest(1)) { continuation in
             let id = UUID()
             Task { await self.registerActivityObserver(id, continuation) }
             continuation.onTermination = { _ in
@@ -645,10 +659,10 @@ public actor Orchestrator {
         outcome: AIKitSessionUsageOutcome? = nil
     ) async {
         let summary = finishTask(turn, outcome: outcome)
+        await persistUsage(summary)
         turnPhases[turn] = nil
         turnTasks[turn] = nil
         broadcast()
-        await persistUsage(summary)
     }
 
     /// Records a sticky failure reason for a turn and ends it.
@@ -659,10 +673,10 @@ public actor Orchestrator {
     ) async {
         lastFailureReason = reason
         let summary = finishTask(turn, failureReason: reason, outcome: outcome)
+        await persistUsage(summary)
         turnPhases[turn] = nil
         turnTasks[turn] = nil
         broadcast()
-        await persistUsage(summary)
     }
 
     private func registerTask(_ task: Task<Void, Never>, turn: Int) {
@@ -691,8 +705,31 @@ public actor Orchestrator {
         return "\(error)"
     }
 
+    @available(*, deprecated, message: "The Orchestrator pipeline is superseded by the official session driven directly: build a DynamicProfile (model, generation options, `.guardrails(_:)`, `.refusalEscapeHatch()`), run it with LanguageModelSession(profile:) — or AIKitConversation for retry/deadline/usage policies. See the AIKit README migration table.")
     public init(
         model: OrchestratorModel,
+        tools: [any Tool],
+        memory: any MemoryStore,
+        contextResolver: ContextResolver,
+        guardrails: PolicyEngine,
+        usageRecorder: (any AIKitSessionUsageRecording)? = nil,
+        options: Options = .init()
+    ) {
+        self.init(
+            testing: model,
+            tools: tools,
+            memory: memory,
+            contextResolver: contextResolver,
+            guardrails: guardrails,
+            usageRecorder: usageRecorder,
+            options: options
+        )
+    }
+
+    /// The non-deprecated seam the pinned legacy-behavior tests construct
+    /// through while the public initializers carry deprecation warnings.
+    internal init(
+        testing model: OrchestratorModel,
         tools: [any Tool],
         memory: any MemoryStore,
         contextResolver: ContextResolver,
@@ -717,28 +754,75 @@ public actor Orchestrator {
         self.options = options
     }
 
-    /// Convenience over one of AIKit's shipped models.
-    public init(
-        model: AIKitLanguageModel,
-        tools: [any Tool],
-        memory: any MemoryStore,
-        contextResolver: ContextResolver,
-        guardrails: PolicyEngine,
-        usageRecorder: (any AIKitSessionUsageRecording)? = nil,
-        options: Options = .init()
-    ) {
-        self.init(
-            model: OrchestratorModel(model),
-            tools: tools,
-            memory: memory,
-            contextResolver: contextResolver,
-            guardrails: guardrails,
-            usageRecorder: usageRecorder,
-            options: options
+    /// The default turn: the session's profile is synthesized from the resolved
+    /// view context — AIKit's base preamble plus the context's system-prompt
+    /// fragment, and the registered tools subset by the context's tool names.
+    public func run(_ instruction: String) -> AsyncThrowingStream<OrchestratorEvent, any Error> {
+        makeRunStream(
+            instruction: instruction,
+            render: { context in
+                PromptRenderer.render(instruction: instruction, context: context)
+            },
+            makeSession: { [self] context, rendered, viewID, turnID, emit in
+                // The view's tool subset is fixed for the turn. A tool-less
+                // context stays pure chat.
+                let activeTools = tools.subset(for: Self.withBuiltinTools(context.toolNames))
+                return turnSession(
+                    tools: activeTools,
+                    instructions: rendered.instructions,
+                    viewID: viewID,
+                    turnID: turnID,
+                    emit: emit
+                )
+            }
         )
     }
 
-    public func run(_ instruction: String) -> AsyncThrowingStream<OrchestratorEvent, any Error> {
+    /// The same turn machinery — view-context resolution, the guardrail stages,
+    /// retry/deadline policy, usage records, and the event/activity streams —
+    /// driving a host-authored `DynamicProfile` instead of the synthesized one.
+    ///
+    /// The profile fully owns the turn's instructions and tools; AIKit
+    /// contributes only the runtime around them. The tool-stage guardrails and
+    /// turn hooks still ride the profile through `TurnHooksModifier`, and the
+    /// `prePrompt`/`finalResult` rails still bracket the call on the instruction
+    /// and the final text. Pass a *bare* profile: the orchestrator owns the
+    /// model (its `OrchestratorModel`) and the generation options (temperature,
+    /// max tokens), so do not pre-apply `.model`/`.temperature` to it.
+    public func run<Profile: LanguageModelSession.DynamicProfile & Sendable>(
+        _ instruction: String,
+        profile: Profile
+    ) -> AsyncThrowingStream<OrchestratorEvent, any Error> {
+        makeRunStream(
+            instruction: instruction,
+            render: { _ in
+                // A host profile owns its own instructions; there is nothing to
+                // render. The prompt still reaches the `prePrompt` rails and the
+                // `promptBuilt` event as the user prompt.
+                RenderedPrompt(instructions: "", userPrompt: instruction, toolNames: [])
+            },
+            makeSession: { [self] _, _, viewID, turnID, emit in
+                hostTurnSession(
+                    profile: profile,
+                    viewID: viewID,
+                    turnID: turnID,
+                    emit: emit
+                )
+            }
+        )
+    }
+
+    /// Shared turn setup for both `run` variants: assigns a turn id, clears any
+    /// sticky failure, and drives the loop with the given prompt renderer and
+    /// per-attempt session factory (the only two things the variants differ in).
+    private func makeRunStream(
+        instruction: String,
+        render: @escaping @Sendable (ResolvedContext) -> RenderedPrompt,
+        makeSession: @escaping @Sendable (
+            ResolvedContext, RenderedPrompt, ViewContext.ID, Int,
+            @escaping @Sendable (OrchestratorEvent) -> Void
+        ) -> LanguageModelSession
+    ) -> AsyncThrowingStream<OrchestratorEvent, any Error> {
         let turnID = nextTurnID()
         startTask(instruction, turn: turnID)
         // A new turn supersedes any prior failure.
@@ -746,7 +830,13 @@ public actor Orchestrator {
         setPhase(.preparing, turn: turnID)
         return AsyncThrowingStream { continuation in
             let task = Task {
-                await self.runTurn(instruction, turnID: turnID, emit: { continuation.yield($0) })
+                await self.runTurn(
+                    instruction,
+                    turnID: turnID,
+                    render: render,
+                    makeSession: makeSession,
+                    emit: { continuation.yield($0) }
+                )
                 continuation.finish()
             }
             registerTask(task, turn: turnID)
@@ -760,9 +850,20 @@ public actor Orchestrator {
     private func runTurn(
         _ instruction: String,
         turnID: Int,
+        render: @escaping @Sendable (ResolvedContext) -> RenderedPrompt,
+        makeSession: @escaping @Sendable (
+            ResolvedContext, RenderedPrompt, ViewContext.ID, Int,
+            @escaping @Sendable (OrchestratorEvent) -> Void
+        ) -> LanguageModelSession,
         emit: @escaping @Sendable (OrchestratorEvent) -> Void
     ) async {
-        await loop(instruction, turnID: turnID, emit: emit)
+        await loop(
+            instruction,
+            turnID: turnID,
+            render: render,
+            makeSession: makeSession,
+            emit: emit
+        )
         await finishTurn(turnID)
     }
 
@@ -792,6 +893,11 @@ public actor Orchestrator {
     private func loop(
         _ instruction: String,
         turnID: Int,
+        render: @escaping @Sendable (ResolvedContext) -> RenderedPrompt,
+        makeSession: @escaping @Sendable (
+            ResolvedContext, RenderedPrompt, ViewContext.ID, Int,
+            @escaping @Sendable (OrchestratorEvent) -> Void
+        ) -> LanguageModelSession,
         emit: @escaping @Sendable (OrchestratorEvent) -> Void
     ) async {
         let context = await contextResolver.merged()
@@ -801,14 +907,20 @@ public actor Orchestrator {
             viewID: viewID, kind: .userInstruction, text: instruction, turn: turnID
         )
 
+        if let budget = options.maxTurnDuration, !budget.isFinite {
+            let error = AIKitConversationError.invalidDeadline
+            await recordFailure(errorMessage(error), turn: turnID)
+            emit(.error(error))
+            return
+        }
         let deadline = options.maxTurnDuration.map {
             ContinuousClock.now.advanced(by: .seconds($0))
         }
 
-        // The view's tool subset is fixed for the turn. A tool-less context
-        // stays pure chat.
-        let activeTools = tools.subset(for: Self.withBuiltinTools(context.toolNames))
-        let rendered = PromptRenderer.render(instruction: instruction, context: context)
+        // The prompt snapshot the `prePrompt` rails inspect and `promptBuilt`
+        // reports. The session's profile (tools + instructions) is built per
+        // attempt by `makeSession`, since a fresh session is created each retry.
+        let rendered = render(context)
         emit(.promptBuilt(rendered))
 
         var attempt = 0
@@ -828,25 +940,25 @@ public actor Orchestrator {
             // AIKit's guardrails riding its profile hooks. Created outside
             // the `do` so the catch paths can still account the tokens a
             // failed or cancelled attempt consumed.
-            let session = turnSession(
-                tools: activeTools,
-                instructions: rendered.instructions,
-                viewID: viewID,
-                turnID: turnID,
-                emit: emit
-            )
+            let session = makeSession(context, rendered, viewID, turnID, emit)
             do {
                 setPhase(.preparing, turn: turnID)
                 let warnings = try await withTurnDeadline(deadline) {
                     try await self.guardrails.verify(.prePrompt, .prePrompt(rendered))
                 }
                 for warning in warnings {
-                    emit(.verification(stage: .prePrompt, outcome: .warn(reason: warning)))
+                    emit(.verification(stage: .prePrompt, outcome: .warn(reason: warning.reason)))
                 }
 
                 setPhase(.thinking, turn: turnID)
                 let result = try await withTurnDeadline(deadline) {
                     try await self.converse(session, instruction: instruction, emit: emit)
+                }
+                setPhase(.verifying, turn: turnID)
+                _ = try await withTurnDeadline(deadline) {
+                    try await self.guardrails.verify(
+                        .finalResult, .finalResult(result.text)
+                    )
                 }
                 // The attempt's usage is the session's lifetime usage: the
                 // session is fresh per attempt and accumulates every model
@@ -858,16 +970,11 @@ public actor Orchestrator {
                     emit(.reasoningDelta(result.reasoning))
                 }
 
-                setPhase(.verifying, turn: turnID)
-                _ = try await withTurnDeadline(deadline) {
-                    try await self.guardrails.verify(
-                        .finalResult, .finalResult(result.text)
-                    )
-                }
                 emit(.verification(stage: .finalResult, outcome: .pass))
                 await recordActivity(
                     viewID: viewID, kind: .llmResponse, text: result.text, turn: turnID
                 )
+                emit(.llmDelta(result.text))
                 emit(.finalAnswer(result.text))
                 return
             } catch is CancellationError {
@@ -878,10 +985,7 @@ public actor Orchestrator {
                 recordAttemptUsage(of: session, turn: turnID, emit: emit)
                 // An error thrown inside a tool's `call` reaches the host
                 // wrapped in the official `ToolCallError`.
-                var error = error
-                if let toolCallError = error as? LanguageModelSession.ToolCallError {
-                    error = toolCallError.underlyingError
-                }
+                let error = ErrorClassifier.underlyingError(error)
                 if Task.isCancelled || error is CancellationError {
                     await finishTurn(turnID, outcome: .cancelled)
                     return
@@ -905,7 +1009,20 @@ public actor Orchestrator {
                     await recordFailure(errorMessage(cause), turn: turnID)
                     emit(.error(cause))
                     return
-                case .retry:
+                case .retry(let delay):
+                    do {
+                        try await withTurnDeadline(deadline) {
+                            if delay > 0 { try await Task.sleep(for: .seconds(delay)) }
+                        }
+                    } catch {
+                        if Task.isCancelled {
+                            await finishTurn(turnID, outcome: .cancelled)
+                        } else {
+                            await recordFailure(errorMessage(error), turn: turnID)
+                            emit(.error(error))
+                        }
+                        return
+                    }
                     continue
                 }
             }
@@ -937,7 +1054,7 @@ public actor Orchestrator {
 
     /// One official session call carrying the whole turn: the session runs
     /// the tool rounds internally and returns the final text. Streaming
-    /// emits `llmDelta`s from the cumulative snapshots.
+    /// buffers native snapshots until the host final-result rail accepts them.
     private func converse(
         _ session: LanguageModelSession,
         instruction: String,
@@ -957,31 +1074,9 @@ public actor Orchestrator {
             )
         }
 
-        // Snapshots carry the cumulative text; deltas are the new suffix.
-        var seen = ""
-        var result = TurnResult(text: "", reasoning: "")
-        for try await snapshot in session.streamResponse(
-            to: instruction, options: generationOptions
-        ) {
-            // Make deadline/host cancellation prompt: without this the loop
-            // would keep draining the response stream after the turn budget
-            // fired or the caller cancelled.
-            try Task.checkCancellation()
-            let content = snapshot.content
-            if content.hasPrefix(seen) {
-                let delta = String(content.dropFirst(seen.count))
-                if !delta.isEmpty { emit(.llmDelta(delta)) }
-            } else if !content.isEmpty {
-                // A segment was replaced rather than appended; re-emit it.
-                emit(.llmDelta(content))
-            }
-            seen = content
-            result = TurnResult(
-                text: content,
-                reasoning: Self.reasoningText(in: snapshot.transcriptEntries)
-            )
-        }
-        return result
+        let response = try await session.streamResponse(to: instruction, options: generationOptions).collect()
+        try Task.checkCancellation()
+        return TurnResult(text: response.content, reasoning: Self.reasoningText(in: response.transcriptEntries))
     }
 
     /// The turn's reasoning text, recovered from the official transcript
@@ -1053,6 +1148,48 @@ public actor Orchestrator {
         )
     }
 
+    /// The host-profile counterpart of `turnSession`: the caller's
+    /// `DynamicProfile` supplies the instructions and tools, and the
+    /// orchestrator layers on its configured model and the same tool-stage
+    /// hooks the default path installs.
+    private nonisolated func hostTurnSession<Profile: LanguageModelSession.DynamicProfile & Sendable>(
+        profile: Profile,
+        viewID: ViewContext.ID,
+        turnID: Int,
+        emit: @escaping @Sendable (OrchestratorEvent) -> Void
+    ) -> LanguageModelSession {
+        hostTurnSession(
+            model: model.model,
+            profile: profile,
+            viewID: viewID,
+            turnID: turnID,
+            emit: emit
+        )
+    }
+
+    /// Generic over the model for the same reason as `turnSession`: opening the
+    /// stored `any LanguageModel` here keeps the profile chain a concrete opaque
+    /// type, which region analysis requires for the session's `sending` profile
+    /// parameter (an `any` opened mid-chain erases it to `any DynamicProfile`).
+    private nonisolated func hostTurnSession<Model: LanguageModel, Profile: LanguageModelSession.DynamicProfile & Sendable>(
+        model: Model,
+        profile: Profile,
+        viewID: ViewContext.ID,
+        turnID: Int,
+        emit: @escaping @Sendable (OrchestratorEvent) -> Void
+    ) -> LanguageModelSession {
+        LanguageModelSession(profile:
+            profile
+                .model(model)
+                .modifier(TurnHooksModifier(
+                    orchestrator: self,
+                    viewID: viewID,
+                    turnID: turnID,
+                    emit: emit
+                ))
+        )
+    }
+
     /// The `preToolUse` stage, run by the session before the tool executes.
     /// The `reportFailure` refusal is intercepted ahead of the rails so an
     /// allowlist that (correctly) omits it cannot block the bail-out.
@@ -1068,7 +1205,7 @@ public actor Orchestrator {
 
         let warnings = try await guardrails.verify(.preToolUse, .preToolUse(call))
         for warning in warnings {
-            emit(.verification(stage: .preToolUse, outcome: .warn(reason: warning)))
+            emit(.verification(stage: .preToolUse, outcome: .warn(reason: warning.reason)))
         }
         emit(.verification(stage: .preToolUse, outcome: .pass))
 
@@ -1096,7 +1233,7 @@ public actor Orchestrator {
         defer { setPhase(.thinking, turn: turnID) }
         let warnings = try await guardrails.verify(.postToolUse, .postToolUse(call, output))
         for warning in warnings {
-            emit(.verification(stage: .postToolUse, outcome: .warn(reason: warning)))
+            emit(.verification(stage: .postToolUse, outcome: .warn(reason: warning.reason)))
         }
         emit(.verification(stage: .postToolUse, outcome: .pass))
 
@@ -1114,7 +1251,7 @@ public actor Orchestrator {
     /// Races `operation` against the turn deadline. Returning the operation's
     /// value cancels the timer; the timer firing first throws
     /// `TurnDeadlineExceeded` and cancels the in-flight session call so a
-    /// single slow request can't outlive the whole turn budget.
+    /// slow request is cancelled; settlement still requires cooperative cleanup.
     private func withTurnDeadline<T: Sendable>(
         _ deadline: ContinuousClock.Instant?,
         _ operation: @escaping @Sendable () async throws -> T
@@ -1155,6 +1292,9 @@ private struct TurnHooksModifier: LanguageModelSession.DynamicProfileModifier {
 
     func body(content: Content) -> some LanguageModelSession.DynamicProfile {
         content
+            .onResponse { [orchestrator, turnID] _ in
+                await orchestrator.recordModelRound(turn: turnID)
+            }
             .onToolCall { [orchestrator, viewID, turnID, emit] call in
                 try await orchestrator.willExecuteTool(
                     call, viewID: viewID, turnID: turnID, emit: emit
@@ -1165,22 +1305,5 @@ private struct TurnHooksModifier: LanguageModelSession.DynamicProfileModifier {
                     call, output: output, viewID: viewID, turnID: turnID, emit: emit
                 )
             }
-    }
-}
-
-extension Transcript.ToolOutput {
-    /// The official output entry's content as display text: text segments
-    /// verbatim, structured segments as their JSON.
-    public var contentText: String {
-        segments.map { segment in
-            switch segment {
-            case .text(let text):
-                text.content
-            case .structure(let structured):
-                structured.content.jsonString
-            default:
-                String(describing: segment)
-            }
-        }.joined(separator: "\n")
     }
 }

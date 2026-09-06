@@ -1,13 +1,12 @@
 import Foundation
 
-/// Decides what to do with an error mid-turn, applying backoff for retries.
+/// Pure retry decision. The admitted turn owns cancellable backoff timing.
 ///
-/// The session owns in-turn recovery (malformed tool arguments go back to the
-/// model as error outputs), so the only decisions left are retrying the whole
-/// turn or aborting it.
+/// Malformed tool arguments surface as parsing errors. Replaying a turn
+/// requires explicit host authorization through the retry policy.
 public actor ErrorHandler {
     public enum Decision: Sendable {
-        case retry
+        case retry(delay: TimeInterval)
         case abort(any Error)
     }
 
@@ -29,11 +28,7 @@ public actor ErrorHandler {
                   attempt < policy.maxAttempts else {
                 return .abort(error)
             }
-            let delay = policy.backoff.delay(forAttempt: attempt)
-            if delay > 0 {
-                try? await Task.sleep(for: .seconds(delay))
-            }
-            return .retry
+            return .retry(delay: policy.backoff.delay(forAttempt: attempt))
         }
     }
 }
